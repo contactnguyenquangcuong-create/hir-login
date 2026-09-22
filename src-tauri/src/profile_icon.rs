@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Transform};
 
 const FONT: &[u8] = include_bytes!("../assets/NotoSans-Bold.ttf");
-/// The product mark, drawn into the accent band so a profile icon still reads
-/// as ShardX at a glance.
-const MARK: &[u8] = include_bytes!("../icons/icon.png");
+/// The mark drawn into the accent band, so a profile icon reads as a Chrome
+/// window at a glance (the engine is Chromium-based).
+const MARK: &[u8] = include_bytes!("../assets/chrome-mark.png");
 
 /// Rendered at 512 and downscaled by the toolkit.
 const SIZE: f32 = 512.0;
@@ -249,9 +249,24 @@ fn draw_text(
     }
 }
 
-/// Composes the icon for `name` in `color` (None = derived from the name) and
-/// returns the PNG path, reusing the cached file when neither has changed.
-pub fn ensure_icon(cache_dir: &Path, name: &str, color: Option<&str>) -> Result<PathBuf> {
+/// The plain mark on its own, no badge/band/name — every profile shows the
+/// same window icon. Written once and reused after that.
+pub fn ensure_icon(cache_dir: &Path, _name: &str, _color: Option<&str>) -> Result<PathBuf> {
+    let dir = cache_dir.join("profile-icons");
+    std::fs::create_dir_all(&dir).ok();
+    let out = dir.join("mark.png");
+    if out.exists() {
+        return Ok(out);
+    }
+    std::fs::write(&out, MARK).context("write mark png")?;
+    Ok(out)
+}
+
+/// Composes the badge icon for `name` in `color` (None = derived from the
+/// name): white body, coloured band, mark and name. Kept for callers that
+/// still want a per-profile badge instead of the plain mark.
+#[allow(dead_code)]
+pub fn ensure_badge_icon(cache_dir: &Path, name: &str, color: Option<&str>) -> Result<PathBuf> {
     let key = format!("{name}\u{1}{}", color.unwrap_or(""));
     let mut h: u64 = 1469598103934665603;
     for b in key.as_bytes() {
@@ -293,7 +308,7 @@ pub fn ensure_icon(cache_dir: &Path, name: &str, color: Option<&str>) -> Result<
     pix.fill_path(&body, &paint, FillRule::Winding, Transform::identity(), None);
 
     // Accent band, clipped to the body so its corners follow the same curve.
-    let band_h = y0 + (y1 - y0) * 0.30;
+    let band_h = y0 + (y1 - y0) * 0.40;
     let mut band = PathBuilder::new();
     band.push_rect(tiny_skia::Rect::from_ltrb(0.0, 0.0, SIZE, band_h).context("band rect")?);
     if let Some(rect) = band.finish() {
@@ -301,7 +316,7 @@ pub fn ensure_icon(cache_dir: &Path, name: &str, color: Option<&str>) -> Result<
         clip.fill_path(&body, FillRule::Winding, true, Transform::identity());
         paint.set_color(color.and_then(parse_hex).unwrap_or_else(|| accent(name)));
         pix.fill_path(&rect, &paint, FillRule::Winding, Transform::identity(), Some(&clip));
-        draw_mark(&mut pix, cx, (y0 + band_h) / 2.0, (band_h - y0) * 0.62);
+        draw_mark(&mut pix, cx, (y0 + band_h) / 2.0, (band_h - y0) * 0.92);
     }
 
     // Hairline outline, Linux only.

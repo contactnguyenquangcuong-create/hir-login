@@ -13,7 +13,6 @@ const PUB_BASE: &str = "https://pub-e57a7c60f6934eb09a6600bf2fc59cdc.r2.dev";
 /// etag, so install/status checks never poll R2/S3 per-archive.
 const MANIFEST_URL: &str =
     "https://raw.githubusercontent.com/ProxyShard/ShardBrowser/main/runtime.json";
-const LAUNCHER_RELEASE_REPO: &str = "ProxyShard/ShardBrowser";
 /// Chromium version baked into the current bundle (used for Mac Framework path).
 pub const CHROMIUM_VERSION: &str = "152.0.7977.65";
 
@@ -34,21 +33,21 @@ pub fn host_spec() -> Option<PlatformSpec> {
     return Some(PlatformSpec {
         browser: ArchiveSpec {
             key: "ShardX-Mac-arm64.zip".into(),
-            label: "ShardX browser (macOS arm64)".into(),
+            label: "Hir-Login browser (macOS arm64)".into(),
         },
     });
     #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     return Some(PlatformSpec {
         browser: ArchiveSpec {
             key: "ShardX-Windows.zip".into(),
-            label: "ShardX browser (Windows x64)".into(),
+            label: "Hir-Login browser (Windows x64)".into(),
         },
     });
     #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     return Some(PlatformSpec {
         browser: ArchiveSpec {
             key: "ShardX-Linux.zip".into(),
-            label: "ShardX browser (Linux x64)".into(),
+            label: "Hir-Login browser (Linux x64)".into(),
         },
     });
     #[allow(unreachable_code)]
@@ -669,7 +668,7 @@ pub async fn runtime_status() -> Result<RuntimeStatus, String> {
 
 #[tauri::command]
 pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatus, String> {
-    let spec = host_spec().ok_or("Host platform has no published ShardX archive")?;
+    let spec = host_spec().ok_or("Host platform has no published Hir-Login archive")?;
     let base = runtime_dir().map_err(|e| e.to_string())?;
     fs::create_dir_all(&base).map_err(|e| e.to_string())?;
 
@@ -680,7 +679,7 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
     // Refused rather than installed: this build could not configure it.
     if engine_needs_newer_launcher(&manifest) {
         return Err(format!(
-            "This engine build needs ShardX Launcher {} or newer — you are on {}. Update the launcher first.",
+            "This engine build needs Hir-Login {} or newer — you are on {}. Update the launcher first.",
             manifest.min_launcher_version.as_deref().unwrap_or("?"),
             launcher_version(),
         ));
@@ -976,71 +975,10 @@ pub struct LauncherVersionInfo {
     pub release_url: Option<String>,
 }
 
-fn norm_ver(v: &str) -> &str {
-    v.strip_prefix('v').unwrap_or(v)
-}
-
-/// Best-effort SemVer compare, lex fallback per component.
-fn is_newer(latest: &str, current: &str) -> bool {
-    let a: Vec<_> = norm_ver(latest).split('.').collect();
-    let b: Vec<_> = norm_ver(current).split('.').collect();
-    for i in 0..a.len().max(b.len()) {
-        let x = a.get(i).copied().unwrap_or("0");
-        let y = b.get(i).copied().unwrap_or("0");
-        match (x.parse::<u64>(), y.parse::<u64>()) {
-            (Ok(xn), Ok(yn)) => {
-                if xn != yn { return xn > yn; }
-            }
-            _ => {
-                if x != y { return x > y; }
-            }
-        }
-    }
-    false
-}
-
+/// No public release feed for this internal build — just the running
+/// version, no GitHub check and nothing clickable.
 #[tauri::command]
 pub async fn launcher_update_check(app: tauri::AppHandle) -> Result<LauncherVersionInfo, String> {
     let current = app.package_info().version.to_string();
-
-    let url = format!("https://api.github.com/repos/{LAUNCHER_RELEASE_REPO}/releases/latest");
-    let client = match reqwest::Client::builder()
-        .user_agent(format!("shardx-launcher/{current}"))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => return Ok(LauncherVersionInfo {
-            current, latest: None, update_available: false, release_url: None,
-        }).map_err(|_: String| e.to_string()),
-    };
-
-    let resp = client
-        .get(&url)
-        .timeout(std::time::Duration::from_secs(6))
-        .send()
-        .await;
-    let Ok(resp) = resp else {
-        return Ok(LauncherVersionInfo {
-            current, latest: None, update_available: false, release_url: None,
-        });
-    };
-    if !resp.status().is_success() {
-        // 404/403 etc → report unknown rather than scare the user.
-        return Ok(LauncherVersionInfo {
-            current, latest: None, update_available: false, release_url: None,
-        });
-    }
-    let body: serde_json::Value = match resp.json().await {
-        Ok(v) => v,
-        Err(_) => return Ok(LauncherVersionInfo {
-            current, latest: None, update_available: false, release_url: None,
-        }),
-    };
-    let latest = body.get("tag_name").and_then(|v| v.as_str()).map(String::from);
-    let release_url = body.get("html_url").and_then(|v| v.as_str()).map(String::from);
-    let update_available = match &latest {
-        Some(l) => is_newer(l, &current),
-        None => false,
-    };
-    Ok(LauncherVersionInfo { current, latest, update_available, release_url })
+    Ok(LauncherVersionInfo { current, latest: None, update_available: false, release_url: None })
 }

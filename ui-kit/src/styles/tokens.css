@@ -65,15 +65,15 @@
   --color-neutral-600: #5c5c5c;
   --color-neutral-700: #333333;
 
-  /* Primary — brand blue #535efd (Prox landing language, app-wide default) */
-  --color-primary-base: #535efd;
-  --color-primary-darker: #4348e6;
-  --color-primary-dark: #3a3fd0;
-  --color-primary-alpha-24: #535efd3d;
-  --color-primary-alpha-16: #535efd29;
-  --color-primary-alpha-10: #535efd1a;
-  --color-blue-feature: #535efd;
-  --color-blue-feature-dark: #4348e6;
+  /* Primary — brand orange #f0700d (Hir-Login, app-wide default) */
+  --color-primary-base: #f0700d;
+  --color-primary-darker: #ce600b;
+  --color-primary-dark: #ac5009;
+  --color-primary-alpha-24: #f0700d3d;
+  --color-primary-alpha-16: #f0700d29;
+  --color-primary-alpha-10: #f0700d1a;
+  --color-blue-feature: #f0700d;
+  --color-blue-feature-dark: #ce600b;
   --color-purple-50: #efebff;
   --color-purple-200: #cac0ff;
   --back-blue: rgba(71, 108, 255, 0.16);
@@ -223,7 +223,7 @@
   --shadow-sm: 0 2px 4px 0 #1b1c1d0a;
   --shadow-md: 0 16px 32px -12px #0e121b1a;
   --shadow-tooltip: 0 12px 24px 0 #0e121b14;
-  --ring-primary-focus: 0 0 0 2px #ffffff, 0 0 0 4px #535efd29;
+  --ring-primary-focus: 0 0 0 2px #ffffff, 0 0 0 4px #f0700d29;
   --ring-error-focus: 0 0 0 2px #ffffff, 0 0 0 4px #fb374829;
   --ring-neutral-focus: 0 0 0 2px #ffffff, 0 0 0 4px #a3a3a329;
 }
@@ -255,7 +255,7 @@
   --shadow-sm: 0 2px 4px 0 #00000033;
   --shadow-md: 0 16px 32px -12px #00000066;
   --shadow-tooltip: 0 12px 24px 0 #00000066;
-  --ring-primary-focus: 0 0 0 2px #171717, 0 0 0 4px #535efd3d;
+  --ring-primary-focus: 0 0 0 2px #171717, 0 0 0 4px #f0700d3d;
   --ring-error-focus: 0 0 0 2px #171717, 0 0 0 4px #fb37483d;
   --ring-neutral-focus: 0 0 0 2px #171717, 0 0 0 4px #a3a3a33d;
 

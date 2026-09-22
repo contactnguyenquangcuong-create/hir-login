@@ -38,7 +38,7 @@ pub fn resolve_binary() -> Result<PathBuf> {
     if pb.exists() {
         return Ok(pb);
     }
-    anyhow::bail!("ShardX browser not installed yet — open Settings to download, or configure Browser path manually")
+    anyhow::bail!("Hir-Login browser not installed yet — open Settings to download, or configure Browser path manually")
 }
 
 pub async fn launch_profile(
@@ -64,6 +64,9 @@ pub async fn launch_profile_synced(
     if Tracker::shared().is_running(profile_id) {
         anyhow::bail!("profile {profile_id} is already running");
     }
+    // No-op unless Settings > Team Sync is configured; otherwise locks the
+    // profile on the sync server and pulls its latest state down first.
+    crate::cloud_sync::checkout(profile_id).await?;
     let bin = resolve_binary()?;
     let stored = profile::load_raw(profile_id)?;
     let udd = profile::user_data_dir(profile_id)?;
@@ -358,7 +361,7 @@ pub async fn launch_profile_synced(
         // when a Tauri GUI app spawns the engine binary.
         cmd.creation_flags(0x08000000);
     }
-    let child = cmd.spawn().context("spawn ShardX")?;
+    let child = cmd.spawn().context("spawn Hir-Login")?;
     let pid = Tracker::shared().track(profile_id.to_string(), child, stored.meta.temporary);
 
     profile::touch_launched(profile_id, None)?;

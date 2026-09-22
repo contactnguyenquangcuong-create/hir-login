@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Settings, ApiInfo, DataRootInfo } from "./types";
+import type { Settings, ApiInfo, DataRootInfo, RemoteProfileStatus } from "./types";
 
 export const settingsGet = () => invoke<Settings>("settings_get");
 export const settingsSave = (value: Settings) => invoke("settings_save", { value });
@@ -12,3 +12,7 @@ export const mcpDownload = (dir: string) => invoke<string>("mcp_download", { dir
 export const dataRootGet = () => invoke<DataRootInfo>("data_root_get");
 /** Moves the data; progress arrives as `data-migration` events. */
 export const dataRootMigrate = (path: string) => invoke<number>("data_root_migrate", { path });
+
+/** "Test connection": lists what the sync server currently knows. Throws if
+ *  sync isn't enabled or the server/token is wrong. */
+export const teamSyncList = () => invoke<RemoteProfileStatus[]>("team_sync_list");

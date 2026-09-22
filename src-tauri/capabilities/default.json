@@ -24,8 +24,7 @@
         { "path": "/Volumes/**" },
         { "path": "/media/**" },
         { "path": "/mnt/**" },
-        { "path": "?:/**" },
-        { "path": "?:\\**" }
+        { "path": "?:/**" }
       ]
     },
     "dialog:default"

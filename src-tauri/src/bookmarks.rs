@@ -11,7 +11,7 @@ use std::path::Path;
 /// Marker on the managed folder node. Anything carrying it is ours to replace.
 const MANAGED_KEY: &str = "shardx_managed";
 /// What the managed folder is called inside the browser.
-const MANAGED_FOLDER: &str = "ShardX";
+const MANAGED_FOLDER: &str = "Hir-Login";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Bookmark {

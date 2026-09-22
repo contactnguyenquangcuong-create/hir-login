@@ -52,6 +52,28 @@ pub struct Settings {
     /// (see `ensure_secret`); rotating it invalidates issued tokens.
     #[serde(default)]
     pub api_secret: String,
+
+    // ---- Team profile sync (self-hosted server, see cloud_sync.rs) ----
+    #[serde(default)]
+    pub sync: SyncConfig,
+}
+
+/// Points at a self-hosted sync server (see `sync-server/`). Off by default:
+/// an empty `server_url` or `token` disables checkout/checkin silently, so a
+/// profile launches exactly as it did before this feature existed.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SyncConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// e.g. "https://sync.yourcompany.com" — no trailing slash.
+    #[serde(default)]
+    pub server_url: Option<String>,
+    /// Shared bearer token for the whole team.
+    #[serde(default)]
+    pub token: Option<String>,
+    /// Identifies this machine in lock-contention errors. None = hostname.
+    #[serde(default)]
+    pub device_name: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -94,6 +116,7 @@ fn defaults() -> Settings {
         api_enabled: default_api_enabled(),
         api_port: default_api_port(),
         api_secret: String::new(),
+        sync: SyncConfig::default(),
     }
 }
 

@@ -13,7 +13,7 @@ const RETENTION_SECS: u64 = RETENTION_DAYS * 24 * 60 * 60;
 
 /// Files and directories under the profile's user-data dir worth keeping: the
 /// session, the logins and the site storage. Everything else is cache.
-const KEEP: &[&str] = &[
+pub(crate) const KEEP: &[&str] = &[
     "Local State",
     "Default/Cookies",
     "Default/Login Data",

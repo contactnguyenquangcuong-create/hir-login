@@ -4,7 +4,6 @@ import { Sidebar } from "../widgets/Sidebar/Sidebar";
 import { FirstRunGate } from "../widgets/FirstRunGate/FirstRunGate";
 import { ToastHost } from "../widgets/ToastHost/ToastHost";
 import { ConfirmHost } from "../widgets/ConfirmHost/ConfirmHost";
-import { StarModal } from "../widgets/StarModal/StarModal";
 import { HelperWatcher } from "../widgets/HelperWatcher";
 import { WhatsNewGate } from "../widgets/WhatsNewGate";
 import { BrowsersPage } from "../pages/browsers";
@@ -52,7 +51,6 @@ export function App() {
           </main>
           <ToastHost />
           <ConfirmHost />
-          <StarModal />
         </div>
       </FirstRunGate>
     </>

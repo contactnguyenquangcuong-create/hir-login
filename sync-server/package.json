@@ -1,0 +1,10 @@
+{
+  "name": "hir-login-sync-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Self-hosted profile sync server for Hir-Login (zero dependencies)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

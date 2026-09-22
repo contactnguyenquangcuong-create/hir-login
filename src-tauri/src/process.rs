@@ -105,6 +105,13 @@ impl Tracker {
                 if let Err(e) = crate::profile::add_runtime(&profile_id, elapsed_ms) {
                     eprintln!("[launcher] add_runtime({profile_id}) failed: {e}");
                 }
+                // No-op unless Team Sync is configured; otherwise pushes this
+                // close's state up and frees the lock for the next device.
+                // Best effort: a failed push leaves the lock held rather than
+                // risk another device grabbing a stale profile mid-upload.
+                if let Err(e) = crate::cloud_sync::checkin(&profile_id).await {
+                    eprintln!("[launcher] cloud_sync checkin({profile_id}) failed: {e:#}");
+                }
             }
             // Tear down temporary profile (config + udd) on close.
             if temporary {

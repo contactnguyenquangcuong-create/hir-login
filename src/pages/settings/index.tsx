@@ -7,9 +7,9 @@ import { Topbar } from "../../shared/ui/Topbar";
 import { CopyField } from "../../shared/ui/CopyField";
 import { toast } from "../../shared/model/toast";
 import { withUtm } from "../../shared/lib/utils";
-import type { Settings, ApiInfo } from "../../entities/settings";
+import type { Settings, ApiInfo, RemoteProfileStatus } from "../../entities/settings";
 import { HELPER_KINDS } from "../../entities/settings";
-import { settingsGet, settingsSave, settingsLoadError, apiInfo, apiRegenerateToken, mcpDownload } from "../../entities/settings";
+import { settingsGet, settingsSave, settingsLoadError, apiInfo, apiRegenerateToken, mcpDownload, teamSyncList } from "../../entities/settings";
 import { DataRootCard } from "../../features/manage-profiles/ui/DataRootCard";
 import { useT, useLang, LANG_OPTIONS, type Lang } from "../../shared/i18n";
 
@@ -48,6 +48,19 @@ export function SettingsPage() {
   const regenToken = async () => {
     try { setApi(await apiRegenerateToken()); toast.ok(t("settings.tokenRegenerated")); }
     catch (e) { toast.err(String(e)); }
+  };
+
+  const [syncTesting, setSyncTesting] = useState(false);
+  const [syncRows, setSyncRows] = useState<RemoteProfileStatus[] | null>(null);
+  const testSync = async () => {
+    setSyncTesting(true);
+    setSyncRows(null);
+    try {
+      const rows = await teamSyncList();
+      setSyncRows(rows);
+      toast.ok(t("settings.syncTestOk", { n: rows.length }));
+    } catch (e) { toast.err(String(e)); }
+    finally { setSyncTesting(false); }
   };
 
   const [mcpBusy, setMcpBusy] = useState(false);
@@ -257,6 +270,63 @@ export function SettingsPage() {
               <p className="m-0 text-paragraph-xs text-text-soft-400">
                 {t("settings.apiAuthHeaderHint")}<code>Authorization: Bearer &lt;token&gt;</code>.
               </p>
+            </>
+          )}
+        </div>
+      </SettingsCard>
+
+      <SettingsCard title={t("settings.syncTitle")}>
+        <p className="m-0 mb-2 text-paragraph-xs text-text-soft-400">
+          {t("settings.syncHelp1")}
+        </p>
+        <div className="flex flex-col gap-3">
+          <Switch
+            label={t("settings.syncEnableLabel")}
+            checked={s.sync?.enabled ?? false}
+            onChange={(checked) => setS({ ...s, sync: { ...s.sync, enabled: checked, server_url: s.sync?.server_url ?? null, token: s.sync?.token ?? null, device_name: s.sync?.device_name ?? null } })}
+          />
+          {(s.sync?.enabled ?? false) && (
+            <>
+              <Input
+                label={t("settings.syncServerUrlLabel")}
+                inputSize="small"
+                value={s.sync?.server_url ?? ""}
+                onChange={(e) => setS({ ...s, sync: { ...s.sync!, server_url: e.target.value } })}
+                placeholder="https://sync.yourcompany.com"
+              />
+              <Input
+                label={t("settings.syncTokenLabel")}
+                inputSize="small"
+                type="password"
+                value={s.sync?.token ?? ""}
+                onChange={(e) => setS({ ...s, sync: { ...s.sync!, token: e.target.value } })}
+              />
+              <Input
+                label={t("settings.syncDeviceNameLabel")}
+                inputSize="small"
+                value={s.sync?.device_name ?? ""}
+                onChange={(e) => setS({ ...s, sync: { ...s.sync!, device_name: e.target.value } })}
+                placeholder={t("settings.syncDeviceNamePlaceholder")}
+              />
+              <div className="flex items-center gap-2.5">
+                <Button variant="neutral" mode="stroke" size="small" onClick={testSync} isLoading={syncTesting}>
+                  {t("settings.syncTestBtn")}
+                </Button>
+                <span className="text-paragraph-xs text-text-soft-400">{t("settings.syncTestHint")}</span>
+              </div>
+              {syncRows && (
+                <div className="flex flex-col gap-1 rounded-lg bg-bg-weak-50 p-2.5 text-paragraph-xs">
+                  {syncRows.length === 0 && <span className="text-text-soft-400">{t("settings.syncNoProfilesYet")}</span>}
+                  {syncRows.map((r) => (
+                    <div key={r.id} className="flex items-center justify-between gap-2">
+                      <span className="mono truncate text-text-sub-600">{r.id}</span>
+                      <span className={r.locked ? "text-warning-base" : "text-success-base"}>
+                        {r.locked ? t("settings.syncLockedBy", { holder: r.holder ?? "?" }) : t("settings.syncFree")}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </>
           )}
         </div>

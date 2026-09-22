@@ -1,12 +1,10 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { openUrl } from "@tauri-apps/plugin-opener";
-import { Button, cn } from "@proxyshard/shardx-ui-kit";
+import { cn } from "@proxyshard/shardx-ui-kit";
 import Badge from "../../shared/ui/Badge";
 import {
   NavBrowsersIcon,
   RouteIcon,
-  NavShopIcon,
   NavFingerprintsIcon,
   NavSettingsIcon,
   NavPatchLogIcon,
@@ -15,13 +13,9 @@ import {
   NavTrashIcon,
   NavAutomationIcon,
   CopyIcon,
-  DocsIcon,
-  ShardLogo,
-  ShardMini,
 } from "../../shared/icons";
 import { clip } from "../../shared/lib/clipboard";
 import { toast } from "../../shared/model/toast";
-import { withUtm } from "../../shared/lib/utils";
 import type { RtUpdate, Section } from "../../shared/types";
 import { useNav } from "../../shared/model/navigation";
 import { useT } from "../../shared/i18n";
@@ -34,45 +28,13 @@ function VersionPill() {
   useEffect(() => {
     invoke<RtUpdate>("launcher_update_check").then(setInfo).catch(() => {});
   }, []);
-  const open = () => {
-    if (info?.release_url) openUrl(info.release_url).catch(() => {});
-  };
-  const clickable = !!info?.release_url;
   return (
-    <button
-      type="button"
-      className={cn(
-        "flex w-full items-center gap-2.5 rounded-lg border border-transparent bg-transparent px-2.5 py-2 text-left text-text-strong-950 transition-colors",
-        info?.update_available
-          ? "cursor-pointer border-warning-base/40 bg-warning-alpha-16 hover:border-warning-base"
-          : "cursor-default hover:enabled:bg-bg-weak-50 disabled:opacity-85",
-      )}
-      onClick={open}
-      disabled={!clickable}
-      title={
-        info?.update_available
-          ? t("sidebar.updateTitle", { v: info.latest ?? "" })
-          : info
-            ? info.latest
-              ? t("sidebar.runningWithRemote", { v: info.current, latest: info.latest })
-              : t("sidebar.running", { v: info.current })
-            : t("sidebar.checkingTitle")
-      }
-    >
-      <span className="text-icon-strong-950"><ShardMini /></span>
+    <div className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-text-strong-950">
+      <span className="text-icon-strong-950"><img src="/hir-login-logo.png" alt="" className="size-4" /></span>
       <div className="flex min-w-0 flex-col">
         <div className="text-label-xs">{t("sidebar.launcherVersion", { v: info?.current ?? "…" })}</div>
-        <div className="text-paragraph-xs text-text-soft-400">
-          {info === null
-            ? t("sidebar.checkingStatus")
-            : info.update_available
-              ? t("sidebar.updateStatus", { v: info.latest ?? "" })
-              : info.latest
-                ? t("sidebar.upToDate")
-                : t("sidebar.offline")}
-        </div>
       </div>
-    </button>
+    </div>
   );
 }
 
@@ -87,7 +49,6 @@ export function Sidebar() {
       items: [
         { id: "browsers", label: t("sidebar.navBrowsers"), svg: <NavBrowsersIcon className="size-[18px]" /> },
         { id: "proxies", label: t("sidebar.navProxies"), svg: <RouteIcon className="size-[18px]" /> },
-        { id: "proxyshard", label: "ProxyShard", svg: <NavShopIcon className="size-[18px]" /> },
         { id: "automation", label: t("sidebar.navAutomation"), svg: <NavAutomationIcon className="size-[18px]" /> },
       ],
     },
@@ -120,8 +81,8 @@ export function Sidebar() {
   return (
     <aside className="flex flex-col border-r border-stroke-soft-200 bg-bg-white-0 py-2.5 pl-5 pr-2.5">
       <div className="flex items-center gap-2.5 pb-3.5 pt-1.5 text-label-sm font-bold tracking-tight text-text-strong-950">
-        <span className="text-primary-base"><ShardLogo /></span>
-        <span>ShardX</span>
+        <img src="/hir-login-logo.png" alt="" className="size-5" />
+        <span>Hir-Login</span>
       </div>
       <nav>
         {sections.map((sec) => (
@@ -171,19 +132,6 @@ export function Sidebar() {
             <div className="text-paragraph-xs text-text-soft-400">{t("sidebar.apiOff")}</div>
           )}
           <DownloadMcp />
-          <Button
-            variant="neutral"
-            mode="ghost"
-            size="xsmall"
-            className="w-full"
-            leftIcon={<DocsIcon className="size-4" />}
-            onClick={() => {
-              openUrl(withUtm("https://docs.proxyshard.com/eng/shardx-launcher-api/binding-and-lifecycle?fallback=true")).catch(() => {});
-            }}
-            title={t("sidebar.docsTitle")}
-          >
-            {t("sidebar.docs")}
-          </Button>
         </div>
         <ThemeSwitch />
         <VersionPill />

@@ -16,6 +16,27 @@ export type Settings = {
   minimize_to_tray?: boolean;
   /** Appended to every launch, one per line. Applied last, so a repeat wins. */
   extra_args?: string;
+  /** Team profile sync against a self-hosted server. */
+  sync?: SyncConfig;
+};
+
+/** Points the launcher at a self-hosted sync server (see `sync-server/`).
+ *  Off unless `enabled` and both `server_url` + `token` are set. */
+export type SyncConfig = {
+  enabled: boolean;
+  server_url?: string | null;
+  token?: string | null;
+  /** Shown to other devices in "in use by X" errors. Empty = hostname. */
+  device_name?: string | null;
+};
+
+/** One row of what the sync server knows about a profile. */
+export type RemoteProfileStatus = {
+  id: string;
+  locked: boolean;
+  holder: string | null;
+  updated_by: string | null;
+  updated_at: string | null;
 };
 
 /** Where profiles, user-data, extensions and the trash live. */

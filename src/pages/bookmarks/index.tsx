@@ -52,7 +52,7 @@ function Editor({ initial, folders, onClose }: {
           ]}
         />
         <p className="m-0 text-paragraph-xs text-text-soft-400">
-          {t("bookmarks.hintPart1")}<strong>ShardX</strong>{t("bookmarks.hintPart2")}
+          {t("bookmarks.hintPart1")}<strong>Hir-Login</strong>{t("bookmarks.hintPart2")}
         </p>
       </div>
     </DialogModal>

@@ -3,6 +3,7 @@
 mod profile_icon;
 mod api;
 mod bookmarks;
+mod cloud_sync;
 mod cookies;
 mod extensions;
 mod fingerprints;
@@ -879,7 +880,7 @@ async fn automation_fleet_window(app: tauri::AppHandle) {
         return;
     }
     let built = WebviewWindowBuilder::new(&app, "fleet", WebviewUrl::App("index.html#/?fleet=1".into()))
-        .title("ShardX Fleet")
+        .title("Hir-Login Fleet")
         .inner_size(460.0, 420.0)
         .min_inner_size(360.0, 240.0)
         .always_on_top(true)
@@ -1463,7 +1464,7 @@ fn open_sync_panel(app: &tauri::AppHandle, group: &str) {
     }
     let url = format!("index.html#/?syncPanel={group}");
     let built = WebviewWindowBuilder::new(app, "sync-panel", WebviewUrl::App(url.into()))
-        .title("ShardX Sync")
+        .title("Hir-Login Sync")
         .inner_size(360.0, 168.0)
         .resizable(true)
         .min_inner_size(280.0, 120.0)
@@ -1808,6 +1809,13 @@ fn settings_save(mut value: settings::Settings) -> Result<(), String> {
         }
     }
     settings::save(&value).map_err(|e| e.to_string())
+}
+
+/// Settings page "Test connection": proves the server URL + token work and
+/// shows what it currently knows, before the operator relies on it.
+#[tauri::command]
+async fn team_sync_list() -> Result<Vec<cloud_sync::RemoteProfileStatus>, String> {
+    cloud_sync::list_remote().await.map_err(|e| e.to_string())
 }
 
 // ---- Automation API ----
@@ -2214,6 +2222,7 @@ pub fn run() {
             launch,
             settings_get,
             settings_save,
+            team_sync_list,
             settings_load_error,
             host_screen,
             api_info,
@@ -2263,7 +2272,7 @@ pub fn run() {
                     #[cfg(target_os = "macos")]
                     let builder = builder.icon_as_template(true);
                     builder
-                        .tooltip("ShardX Launcher")
+                        .tooltip("Hir-Login")
                         .menu(&menu)
                         .show_menu_on_left_click(false)
                         .on_menu_event(|app, e| match e.id.as_ref() {
