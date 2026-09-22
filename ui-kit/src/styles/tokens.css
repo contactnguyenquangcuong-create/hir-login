@@ -1,0 +1,452 @@
+/* ============================================================================
+ * Shardx UI Kit — design tokens (theme, palette, typography, helpers)
+ *
+ * NO Preflight, NO global `html`/`body` styles here — this file is safe to
+ * ship inside the library CSS AND to be @imported by a Tailwind host.
+ *
+ * Two token layers live side by side:
+ *   - AlignUI palette (base/soft/weak families, neutral/purple scales,
+ *     the bg / text / stroke semantic utilities) that the components use.
+ *   - Prox landing design language (brand-blue primary #535efd, gray/red/green
+ *     scales, success/error/warning/default flat colors + backgrounds, and the
+ *     canvas/surface/ink semantic tokens). This is the app-wide default.
+ * ==========================================================================*/
+
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+@theme {
+  --font-sans: "Inter", "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+
+  /* Radius */
+  --radius-8: 8px;
+  --radius-card: 20px;
+  --radius-panel: 14px;
+
+  /* Tracking / leading (Prox) */
+  --tracking-normal: -0.025em;
+  --leading-tight: 1.15;
+  --leading-relaxed: 1.65;
+
+  /* Type scale (Prox): UI 11/12/13/15/24, touch-input floor 16px */
+  --text-micro: 0.6875rem;
+  --text-micro--line-height: 1rem;
+  --text-caption: 0.75rem;
+  --text-caption--line-height: 1rem;
+  --text-label: 0.8125rem;
+  --text-label--line-height: 1.125rem;
+  --text-body: 0.75rem;
+  --text-body--line-height: 1.25rem;
+  --text-subtitle: 0.9375rem;
+  --text-subtitle--line-height: 1.25rem;
+  --text-title: 1.5rem;
+  --text-title--line-height: 2rem;
+  --text-input: 1rem;
+  --text-input--line-height: 1.5rem;
+
+  /* ============ Base palette ============ */
+  --background: #ffffff;
+
+  /* Gray scale */
+  --color-gray-0: #ffffff;
+  --color-gray-50: #f7f7f7;
+  --color-gray-400: #a3a3a3;
+  --color-gray-500: #7b7b7b;
+  --color-gray-600: #5c5c5c;
+  --color-gray-700: #333333;
+  --color-gray-800: #262626;
+  --color-gray-900: #1c1c1c;
+  --color-gray-950: #171717;
+
+  /* Neutral scale (AlignUI) */
+  --color-neutral-100: #f5f5f5;
+  --color-neutral-200: #ebebeb;
+  --color-neutral-400: #a3a3a3;
+  --color-neutral-500: #7b7b7b;
+  --color-neutral-600: #5c5c5c;
+  --color-neutral-700: #333333;
+
+  /* Primary — brand blue #535efd (Prox landing language, app-wide default) */
+  --color-primary-base: #535efd;
+  --color-primary-darker: #4348e6;
+  --color-primary-dark: #3a3fd0;
+  --color-primary-alpha-24: #535efd3d;
+  --color-primary-alpha-16: #535efd29;
+  --color-primary-alpha-10: #535efd1a;
+  --color-blue-feature: #535efd;
+  --color-blue-feature-dark: #4348e6;
+  --color-purple-50: #efebff;
+  --color-purple-200: #cac0ff;
+  --back-blue: rgba(71, 108, 255, 0.16);
+  --text-blue: #6895ff;
+
+  /* State: information (blue) */
+  --color-information-base: #335cff;
+  --color-information-soft: #c0d5ff;
+  --color-information-weak: #ebf1ff;
+
+  /* State: warning (orange) */
+  --color-warning-base: #fa7319;
+  --color-warning-soft: #ffd9c0;
+  --color-warning-weak: #fff3eb;
+
+  /* State: error (red) */
+  --color-red-50: #ffebec;
+  --color-red-200: #ffc0c5;
+  --color-red-400: #ff6875;
+  --color-red-500: #fb3748;
+  --color-red-600: #e93544;
+  --color-red-950: #681219;
+  --color-error-base: #fb3748;
+  --color-error-soft: #ffc0c5;
+  --color-error-weak: #ffebec;
+
+  /* State: success (green) */
+  --color-green-50: #e0faec;
+  --color-green-200: #c2f5da;
+  --color-green-400: #3ee089;
+  --color-green-500: #1fc16b;
+  --color-green-600: #1daf61;
+  --color-green-950: #0b4627;
+  --color-success-base: #1fc16b;
+  --color-success-soft: #c2f5da;
+  --color-success-weak: #e0faec;
+
+  /* State: away (yellow) */
+  --color-away-base: #f6b51e;
+  --color-away-soft: #ffecc0;
+  --color-away-weak: #fffaeb;
+
+  /* State: verified (sky) */
+  --color-verified-base: #47c2ff;
+  --color-verified-soft: #c0eaff;
+  --color-verified-weak: #ebf8ff;
+
+  /* State: highlight (pink) */
+  --color-highlight-base: #fb4ba3;
+  --color-highlight-soft: #ffc0df;
+  --color-highlight-weak: #ffebf4;
+
+  /* State: stable (teal) */
+  --color-stable-base: #22d3bb;
+  --color-stable-soft: #c2f5ee;
+  --color-stable-weak: #e4fbf8;
+
+  /* Static */
+  --color-static-white: #ffffff;
+  --color-static-black: #171717;
+
+  /* ============ Prox flat state colors (+ soft backgrounds) ============ */
+  --color-success: #1fc16b;
+  --color-success-background: rgba(31, 193, 107, 0.16);
+
+  --color-error: #e34b4b;
+  --color-error-background: rgba(227, 75, 75, 0.16);
+
+  --color-default: #a3a3a3;
+  --color-default-background: rgba(163, 163, 163, 0.16);
+
+  --color-default-light: #5c5c5c;
+  --color-default-light-background: #f5f5f5;
+
+  --color-premium: #f5a623;
+  --color-unlimited: #0d9488;
+  --color-warning: #fa7319;
+  --color-warning-background: rgba(250, 115, 25, 0.16);
+
+  /* ============ Prox semantic tokens ============ */
+  --color-canvas: var(--color-gray-50);
+  --color-surface: var(--color-gray-0);
+  --color-muted: #ebebeb;
+  --color-hover: #a3a3a31f;
+  --color-ink: var(--color-gray-950);
+  --color-ink-soft: var(--color-gray-600);
+  --color-ink-faint: var(--color-gray-400);
+  --color-stroke: #ebebeb;
+  --color-accent: var(--color-blue-feature);
+  --color-accent-hover: var(--color-blue-feature-dark);
+  --color-accent-soft: var(--color-primary-alpha-10);
+  --color-disabled: var(--color-gray-600);
+  --color-reverse: var(--color-gray-950);
+
+  /* Stacked card shadow: tight all-side layer keeps corners soft, wide layer
+     adds depth. */
+  --shadow-card:
+    0px 1px 3px rgba(14, 18, 27, 0.05),
+    0px 16px 32px -12px rgba(14, 18, 27, 0.1);
+  --backdrop: rgba(0, 0, 0, 0.5);
+  --error-focus:
+    0px 0px 0px 2px #171717, 0px 0px 0px 4px rgba(251, 55, 72, 0.1);
+
+  /* ============ Semantic tokens exposed as Tailwind utilities ============
+     (resolve to the runtime vars remapped per theme below) */
+  --color-bg-strong-950: var(--bg-strong-950);
+  --color-bg-sub-300: var(--bg-sub-300);
+  --color-bg-soft-200: var(--bg-soft-200);
+  --color-bg-weak-50: var(--bg-weak-50);
+  --color-bg-white-0: var(--bg-white-0);
+
+  --color-text-strong-950: var(--text-strong-950);
+  --color-text-sub-600: var(--text-sub-600);
+  --color-text-soft-400: var(--text-soft-400);
+  --color-text-disabled-300: var(--text-disabled-300);
+  --color-text-white-0: var(--text-white-0);
+
+  --color-stroke-strong-950: var(--stroke-strong-950);
+  --color-stroke-sub-300: var(--stroke-sub-300);
+  --color-stroke-soft-200: var(--stroke-soft-200);
+}
+
+/* Semantic tokens — LIGHT */
+:root {
+  --bg-strong-950: #171717;
+  --bg-sub-300: #d1d1d1;
+  --bg-soft-200: #ebebeb;
+  --bg-weak-50: #f7f7f7;
+  --bg-white-0: #ffffff;
+
+  --text-strong-950: #171717;
+  --text-sub-600: #5c5c5c;
+  --text-soft-400: #a3a3a3;
+  --text-disabled-300: #d1d1d1;
+  --text-white-0: #ffffff;
+
+  --stroke-strong-950: #171717;
+  --stroke-sub-300: #d1d1d1;
+  --stroke-soft-200: #ebebeb;
+
+  --btn-neutral-bg: #171717;
+  --btn-neutral-bg-hover: #333333;
+  --btn-neutral-fg: #ffffff;
+
+  --backdrop: rgba(23, 23, 23, 0.24);
+  --shadow-xs: 0 1px 2px 0 #0a0d1408;
+  --shadow-sm: 0 2px 4px 0 #1b1c1d0a;
+  --shadow-md: 0 16px 32px -12px #0e121b1a;
+  --shadow-tooltip: 0 12px 24px 0 #0e121b14;
+  --ring-primary-focus: 0 0 0 2px #ffffff, 0 0 0 4px #535efd29;
+  --ring-error-focus: 0 0 0 2px #ffffff, 0 0 0 4px #fb374829;
+  --ring-neutral-focus: 0 0 0 2px #ffffff, 0 0 0 4px #a3a3a329;
+}
+
+/* Semantic tokens — DARK */
+[data-theme="dark"] {
+  --bg-strong-950: #ffffff;
+  --bg-sub-300: #333333;
+  --bg-soft-200: #262626;
+  --bg-weak-50: #1c1c1c;
+  --bg-white-0: #171717;
+
+  --text-strong-950: #ffffff;
+  --text-sub-600: #a3a3a3;
+  --text-soft-400: #7b7b7b;
+  --text-disabled-300: #5c5c5c;
+  --text-white-0: #171717;
+
+  --stroke-strong-950: #ffffff;
+  --stroke-sub-300: #333333;
+  --stroke-soft-200: #262626;
+
+  --btn-neutral-bg: #ffffff;
+  --btn-neutral-bg-hover: #ebebeb;
+  --btn-neutral-fg: #171717;
+
+  --backdrop: rgba(0, 0, 0, 0.5);
+  --shadow-xs: 0 1px 2px 0 #00000033;
+  --shadow-sm: 0 2px 4px 0 #00000033;
+  --shadow-md: 0 16px 32px -12px #00000066;
+  --shadow-tooltip: 0 12px 24px 0 #00000066;
+  --ring-primary-focus: 0 0 0 2px #171717, 0 0 0 4px #535efd3d;
+  --ring-error-focus: 0 0 0 2px #171717, 0 0 0 4px #fb37483d;
+  --ring-neutral-focus: 0 0 0 2px #171717, 0 0 0 4px #a3a3a33d;
+
+  /* Prox semantic tokens flip to the dark surface ramp. --color-stroke must
+     stay one step lighter than --color-surface or card dividers vanish. */
+  --color-canvas: var(--color-gray-950);
+  --color-surface: var(--color-gray-800);
+  --color-muted: var(--color-gray-700);
+  --color-hover: #a3a3a31f;
+  --color-ink: #ffffff;
+  --color-ink-soft: var(--color-gray-400);
+  --color-ink-faint: var(--color-gray-500);
+  --color-stroke: var(--color-gray-700);
+  --color-reverse: #ebebeb;
+}
+
+/* Typography utilities */
+@layer components {
+  .text-title-h1 {
+    font-size: 56px;
+    line-height: 64px;
+    letter-spacing: -0.56px;
+    font-weight: 500;
+  }
+  .text-title-h2 {
+    font-size: 48px;
+    line-height: 56px;
+    letter-spacing: -0.48px;
+    font-weight: 500;
+  }
+  .text-title-h3 {
+    font-size: 40px;
+    line-height: 48px;
+    letter-spacing: -0.4px;
+    font-weight: 500;
+  }
+  .text-title-h4 {
+    font-size: 32px;
+    line-height: 40px;
+    letter-spacing: -0.16px;
+    font-weight: 500;
+  }
+  .text-title-h5 {
+    font-size: 24px;
+    line-height: 32px;
+    font-weight: 500;
+  }
+  .text-title-h6 {
+    font-size: 20px;
+    line-height: 28px;
+    font-weight: 500;
+  }
+
+  .text-label-xl {
+    font-size: 24px;
+    line-height: 32px;
+    letter-spacing: -0.36px;
+    font-weight: 500;
+  }
+  .text-label-lg {
+    font-size: 18px;
+    line-height: 24px;
+    letter-spacing: -0.27px;
+    font-weight: 500;
+  }
+  .text-label-md {
+    font-size: 16px;
+    line-height: 24px;
+    letter-spacing: -0.176px;
+    font-weight: 500;
+  }
+  .text-label-sm {
+    font-size: 14px;
+    line-height: 20px;
+    letter-spacing: -0.084px;
+    font-weight: 500;
+  }
+  .text-label-xs {
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 500;
+  }
+
+  .text-paragraph-xl {
+    font-size: 24px;
+    line-height: 32px;
+    letter-spacing: -0.36px;
+    font-weight: 400;
+  }
+  .text-paragraph-lg {
+    font-size: 18px;
+    line-height: 24px;
+    letter-spacing: -0.27px;
+    font-weight: 400;
+  }
+  .text-paragraph-md {
+    font-size: 16px;
+    line-height: 24px;
+    letter-spacing: -0.176px;
+    font-weight: 400;
+  }
+  .text-paragraph-sm {
+    font-size: 14px;
+    line-height: 20px;
+    letter-spacing: -0.084px;
+    font-weight: 400;
+  }
+  .text-paragraph-xs {
+    font-size: 12px;
+    line-height: 16px;
+    font-weight: 400;
+  }
+
+  .text-subheading-md {
+    font-size: 16px;
+    line-height: 24px;
+    letter-spacing: 0.96px;
+    font-weight: 500;
+    text-transform: uppercase;
+  }
+  .text-subheading-sm {
+    font-size: 14px;
+    line-height: 20px;
+    letter-spacing: 0.84px;
+    font-weight: 500;
+    text-transform: uppercase;
+  }
+  .text-subheading-xs {
+    font-size: 12px;
+    line-height: 16px;
+    letter-spacing: 0.48px;
+    font-weight: 500;
+    text-transform: uppercase;
+  }
+  .text-subheading-2xs {
+    font-size: 11px;
+    line-height: 12px;
+    letter-spacing: 0.22px;
+    font-weight: 500;
+    text-transform: uppercase;
+  }
+}
+
+/* Helpers */
+@layer utilities {
+  .scrollbar::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+  .scrollbar::-webkit-scrollbar-track {
+    border-radius: 100vh;
+    background: transparent;
+  }
+  .scrollbar::-webkit-scrollbar-thumb {
+    background: var(--color-neutral-400);
+    border-radius: 100vh;
+  }
+  .scrollbar-hidden::-webkit-scrollbar {
+    display: none;
+  }
+  .scrollbar-hidden {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+}
+
+/* Range slider thumb (scoped to the kit's .slider inputs to avoid touching host inputs) */
+.slider[type="range"]::-webkit-slider-thumb,
+input[type="range"].sx-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--color-primary-base);
+  border: 4px solid #ffffff;
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+  transition: transform 0.1s ease;
+}
+.slider[type="range"]::-webkit-slider-thumb:hover,
+input[type="range"].sx-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.1);
+}
+.slider[type="range"]::-moz-range-thumb,
+input[type="range"].sx-slider::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--color-primary-base);
+  border: 4px solid #ffffff;
+  box-shadow: var(--shadow-sm);
+  cursor: pointer;
+}

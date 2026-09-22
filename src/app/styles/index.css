@@ -1,0 +1,87 @@
+/* ============================================================================
+ * App global styles — built on the Shardx UI Kit design system.
+ * Tokens (palette, semantic theme vars, typography) come from the kit;
+ * this file only wires Tailwind, scans the kit dist for used utilities,
+ * and adds app-chrome basics (scrollbars, titlebar var, base font).
+ * ==========================================================================*/
+@import "tailwindcss";
+@import "@proxyshard/shardx-ui-kit/tokens.css";
+
+/* Generate Tailwind utilities used inside the kit's prebuilt components. */
+@source "../../../node_modules/@proxyshard/shardx-ui-kit/dist";
+
+/* Titlebar height — shared CSS var, not a design token. */
+:root {
+  --titlebar-h: 30px;
+}
+
+@layer base {
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  html,
+  body,
+  #root {
+    height: 100%;
+    margin: 0;
+    background: var(--bg-weak-50);
+    color: var(--text-strong-950);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  html {
+    color-scheme: dark;
+  }
+  :root[data-theme="light"] {
+    color-scheme: light;
+  }
+
+  @media (min-width: 1700px) {
+    html {
+      font-size: 15px;
+    }
+  }
+  @media (min-width: 2200px) {
+    html {
+      font-size: 16px;
+    }
+  }
+
+  button {
+    font-family: inherit;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--bg-soft-200);
+    border-radius: 8px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: var(--bg-sub-300);
+  }
+
+}
+
+/* ===== Utility aliases ===== */
+@layer utilities {
+  .mono {
+    font-family: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, monospace;
+  }
+  .small {
+    font-size: 12px;
+  }
+  .muted {
+    color: var(--text-soft-400);
+  }
+}

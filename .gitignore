@@ -1,0 +1,7 @@
+node_modules
+
+# build output — regenerated, keeps diffs readable
+dist/
+ui-kit/dist/
+ui-kit/node_modules/
+/src-tauri/target
