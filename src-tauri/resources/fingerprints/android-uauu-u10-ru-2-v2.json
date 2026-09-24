@@ -1,0 +1,380 @@
+{
+  "name": "android-uauu-u10-ru-2-v2",
+  "notes": "Mali-G52",
+  "timezone": "Asia/Ho_Chi_Minh",
+  "navigator": {
+    "user_agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
+    "platform_value": "Linux armv81",
+    "platform": "Android",
+    "hardware_concurrency": 8,
+    "device_memory": 4.0,
+    "max_touch_points": 5,
+    "language": "vi-VN",
+    "languages": [
+      "vi-VN",
+      "vi",
+      "en-US",
+      "en"
+    ],
+    "accept_language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7"
+  },
+  "client_hints": {
+    "platform_version": "16.0.0",
+    "model": "U10",
+    "architecture": "",
+    "bitness": "",
+    "mobile": false,
+    "brand_full_version": "152.0.7977.65",
+    "brand_version": "152",
+    "chrome_build": 7977,
+    "chrome_patch": 65,
+    "grease_brand": "Not?A_Brand",
+    "grease_version": "24",
+    "grease_full_version": "24.0.0.0"
+  },
+  "screen": {
+    "width": 1366,
+    "height": 768,
+    "avail_width": 1366,
+    "avail_height": 768,
+    "avail_top": 0,
+    "avail_left": 0,
+    "color_depth": 24,
+    "pixel_depth": 24,
+    "device_pixel_ratio": 1.0
+  },
+  "audio": {
+    "sample_rate": 48000,
+    "channel_count": 2
+  },
+  "connection": {
+    "effective_type": "4g",
+    "downlink_mbps": 5.0,
+    "rtt_msec": 150,
+    "save_data": false
+  },
+  "battery": {
+    "charging": true,
+    "level": 1.0,
+    "charging_time": 0,
+    "discharging_time": "Infinity"
+  },
+  "motion": {
+    "enabled": true,
+    "carry": "hand"
+  },
+  "memory": {
+    "heap_size_limit": 2147483648
+  },
+  "webauthn": {
+    "uvpa": true
+  },
+  "media_devices": {
+    "audio_input_count": 0,
+    "audio_output_count": 1,
+    "video_input_count": 0
+  },
+  "noise": {
+    "canvas": {
+      "enabled": false,
+      "seed": 0
+    },
+    "webgl": {
+      "enabled": false,
+      "seed": 0,
+      "intensity": 0
+    },
+    "audio": {
+      "enabled": false,
+      "seed": 0
+    },
+    "client_rects": {
+      "enabled": false,
+      "seed": 0,
+      "max_offset": 0
+    },
+    "fonts": {
+      "enabled": false,
+      "seed": 0
+    }
+  },
+  "tls": {
+    "cipher_suites": [
+      4865,
+      4866,
+      4867,
+      49195,
+      49199,
+      49196,
+      49200,
+      52393,
+      52392,
+      49171,
+      49172,
+      156,
+      157,
+      47,
+      53
+    ],
+    "signature_algorithms": [
+      2308,
+      2309,
+      2310,
+      1027,
+      2052,
+      1025,
+      1283,
+      2053,
+      1281,
+      2054,
+      1537
+    ],
+    "shuffle_extensions": true
+  },
+  "window": {
+    "outer_width": 1366,
+    "outer_height": 768,
+    "inner_width": 1366,
+    "inner_height": 597
+  },
+  "storage_estimate": {
+    "quota_gb": 67.507
+  },
+  "webgl": {
+    "vendor_masked": "WebKit",
+    "renderer_masked": "WebKit WebGL",
+    "vendor": "ARM",
+    "renderer": "Mali-G52",
+    "extensions": [
+      "ANGLE_instanced_arrays",
+      "EXT_blend_minmax",
+      "EXT_float_blend",
+      "EXT_sRGB",
+      "EXT_texture_filter_anisotropic",
+      "OES_element_index_uint",
+      "OES_fbo_render_mipmap",
+      "OES_standard_derivatives",
+      "OES_vertex_array_object",
+      "WEBGL_compressed_texture_astc",
+      "WEBGL_compressed_texture_etc",
+      "WEBGL_compressed_texture_etc1",
+      "WEBGL_debug_renderer_info",
+      "WEBGL_debug_shaders",
+      "WEBGL_depth_texture",
+      "WEBGL_lose_context",
+      "WEBGL_multi_draw"
+    ],
+    "extensions_v2": [
+      "EXT_color_buffer_float",
+      "EXT_float_blend",
+      "EXT_texture_filter_anisotropic",
+      "WEBGL_compressed_texture_astc",
+      "WEBGL_compressed_texture_etc",
+      "WEBGL_compressed_texture_etc1",
+      "WEBGL_debug_renderer_info",
+      "WEBGL_debug_shaders",
+      "WEBGL_lose_context",
+      "WEBGL_multi_draw"
+    ],
+    "parameters": {
+      "0x0D33": 4096,
+      "0x0D3A": [
+        16383,
+        16383
+      ],
+      "0x846D": [
+        1.0,
+        1024.0
+      ],
+      "0x846E": [
+        1.0,
+        4095.9375
+      ],
+      "0x851C": 4096,
+      "0x8073": 4096,
+      "0x80E8": 16777216,
+      "0x80E9": 16777216,
+      "0x84FD": 256,
+      "0x84E8": 16383,
+      "0x8824": 4,
+      "0x8CDF": 4,
+      "0x8D57": 4,
+      "0x8869": 16,
+      "0x8872": 16,
+      "0x8B4C": 16,
+      "0x8B4D": 96,
+      "0x8B49": 16384,
+      "0x8B4A": 16384,
+      "0x8B4B": 124,
+      "0x8DFB": 4096,
+      "0x8DFC": 31,
+      "0x8DFD": 4096,
+      "0x88FF": 256,
+      "0x8904": -8,
+      "0x8905": 7,
+      "0x8C80": 4,
+      "0x8C8A": 64,
+      "0x8A2B": 36,
+      "0x8A2D": 36,
+      "0x8A2E": 216,
+      "0x8A2F": 216,
+      "0x8A30": 65536,
+      "0x8A31": 606208,
+      "0x8A33": 606208,
+      "0x8A34": 16,
+      "0x9122": 128,
+      "0x9125": 124,
+      "0x8D6B": 2147483647.0,
+      "0x9111": 0
+    },
+    "max_texture_size": 4096,
+    "max_vertex_attribs": 16
+  },
+  "webgpu": {
+    "vendor": "arm",
+    "architecture": "bifrost",
+    "limits": {
+      "maxTextureDimension1D": 8192,
+      "maxTextureDimension2D": 8192,
+      "maxTextureDimension3D": 2048,
+      "maxTextureArrayLayers": 256,
+      "maxBindGroups": 4,
+      "maxBindGroupsPlusVertexBuffers": 24,
+      "maxBindingsPerBindGroup": 1000,
+      "maxDynamicUniformBuffersPerPipelineLayout": 10,
+      "maxDynamicStorageBuffersPerPipelineLayout": 8,
+      "maxSampledTexturesPerShaderStage": 16,
+      "maxSamplersPerShaderStage": 16,
+      "maxStorageBuffersPerShaderStage": 10,
+      "maxStorageTexturesPerShaderStage": 8,
+      "maxUniformBuffersPerShaderStage": 12,
+      "maxUniformBufferBindingSize": 65536,
+      "maxStorageBufferBindingSize": 134217728,
+      "minUniformBufferOffsetAlignment": 256,
+      "minStorageBufferOffsetAlignment": 256,
+      "maxVertexBuffers": 8,
+      "maxBufferSize": 2147483648.0,
+      "maxVertexAttributes": 30,
+      "maxVertexBufferArrayStride": 2048,
+      "maxInterStageShaderVariables": 28,
+      "maxInterStageShaderComponents": null,
+      "maxColorAttachments": 8,
+      "maxColorAttachmentBytesPerSample": 32,
+      "maxComputeWorkgroupStorageSize": 32768,
+      "maxComputeInvocationsPerWorkgroup": 256,
+      "maxComputeWorkgroupSizeX": 256,
+      "maxComputeWorkgroupSizeY": 256,
+      "maxComputeWorkgroupSizeZ": 64,
+      "maxComputeWorkgroupsPerDimension": 65535,
+      "maxStorageBuffersInFragmentStage": null,
+      "maxStorageTexturesInFragmentStage": null,
+      "maxStorageBuffersInVertexStage": null,
+      "maxStorageTexturesInVertexStage": null,
+      "maxImmediateSize": null
+    },
+    "subgroupMinSize": null,
+    "subgroupMaxSize": null,
+    "features": [
+      "depth32float-stencil8",
+      "rg11b10ufloat-renderable",
+      "bgra8unorm-storage",
+      "texture-compression-astc",
+      "texture-compression-etc2",
+      "shader-f16",
+      "core-features-and-limits",
+      "float32-filterable",
+      "indirect-first-instance",
+      "texture-compression-astc-sliced-3d"
+    ]
+  },
+  "fonts": [
+    [
+      "sans-serif",
+      "arial",
+      "helvetica",
+      "tahoma",
+      "verdana"
+    ],
+    [
+      "sans-serif-thin"
+    ],
+    [
+      "sans-serif-light"
+    ],
+    [
+      "sans-serif-medium"
+    ],
+    [
+      "sans-serif-black"
+    ],
+    [
+      "sans-serif-condensed"
+    ],
+    [
+      "sans-serif-condensed-light"
+    ],
+    [
+      "sans-serif-condensed-medium"
+    ],
+    [
+      "serif",
+      "times",
+      "times new roman",
+      "palatino",
+      "georgia",
+      "baskerville",
+      "goudy",
+      "fantasy",
+      "ITC Stone Serif"
+    ],
+    [
+      "serif-bold"
+    ],
+    [
+      "monospace",
+      "sans-serif-monospace",
+      "monaco"
+    ],
+    [
+      "serif-monospace",
+      "courier",
+      "courier new"
+    ],
+    [
+      "casual"
+    ],
+    [
+      "cursive"
+    ],
+    [
+      "sans-serif-smallcaps"
+    ],
+    [
+      "source-sans-pro"
+    ],
+    [
+      "source-sans-pro-semi-bold"
+    ],
+    [
+      "roboto-flex"
+    ]
+  ],
+  "fonts_local": [
+    [
+      "Roboto"
+    ],
+    [
+      "Droid Sans Mono"
+    ],
+    [
+      "Noto Color Emoji"
+    ],
+    [
+      "Noto Sans Gunjala Gondi Regular"
+    ],
+    [
+      "Noto Sans Masaram Gondi Regular"
+    ]
+  ],
+  "icu_locale": "vi-VN"
+}

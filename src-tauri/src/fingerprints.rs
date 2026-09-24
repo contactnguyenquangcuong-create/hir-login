@@ -204,6 +204,36 @@ pub fn import_folder(dir: &Path) -> Result<usize> {
     Ok(n)
 }
 
+/// Copy the fingerprint set shipped inside the app (`resources/fingerprints`)
+/// into the library. Runs once per app version (marker file) and never
+/// overwrites an existing file, so edits and deletions between updates hold.
+pub fn seed_bundled(resource_dir: &Path, app_version: &str) -> Result<usize> {
+    let src = resource_dir.join("resources").join("fingerprints");
+    let src = if src.is_dir() { src } else { resource_dir.join("fingerprints") };
+    if !src.is_dir() {
+        return Ok(0);
+    }
+    let dir = store::fingerprints_dir()?;
+    let marker = dir.join(".hirlogin-seeded");
+    if fs::read_to_string(&marker).ok().as_deref() == Some(app_version) {
+        return Ok(0);
+    }
+    let mut n = 0;
+    for entry in fs::read_dir(&src)? {
+        let entry = entry?;
+        let p = entry.path();
+        if p.extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let dst = dir.join(entry.file_name());
+        if !dst.exists() && fs::copy(&p, &dst).is_ok() {
+            n += 1;
+        }
+    }
+    let _ = fs::write(&marker, app_version);
+    Ok(n)
+}
+
 fn slugify(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {

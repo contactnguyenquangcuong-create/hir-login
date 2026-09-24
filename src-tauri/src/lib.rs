@@ -2522,6 +2522,21 @@ pub fn run() {
                 runtime::ensure_profiles_migrated().await;
             });
 
+            // Ship the extra fingerprint set with the app: it is not part of
+            // the set downloaded from the engine CDN, so it would otherwise
+            // exist only on the machine that generated it.
+            {
+                use tauri::Manager;
+                if let Ok(res) = app.path().resource_dir() {
+                    let ver = app.package_info().version.to_string();
+                    match fingerprints::seed_bundled(&res, &ver) {
+                        Ok(n) if n > 0 => eprintln!("[launcher] seeded {n} bundled fingerprints"),
+                        Ok(_) => {}
+                        Err(e) => eprintln!("[launcher] fingerprint seed failed: {e}"),
+                    }
+                }
+            }
+
             // Point the heavy directories wherever the operator moved them,
             // before anything reads a profile.
             if let Ok(s) = settings::load() {
