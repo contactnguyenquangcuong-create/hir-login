@@ -28,6 +28,8 @@ export type SyncConfig = {
   token?: string | null;
   /** Shown to other devices in "in use by X" errors. Empty = hostname. */
   device_name?: string | null;
+  /** Delete browser caches from the local copy after each close is uploaded. */
+  slim_local?: boolean;
 };
 
 /** One row of what the sync server knows about a profile. */

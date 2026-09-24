@@ -74,6 +74,12 @@ pub struct SyncConfig {
     /// Identifies this machine in lock-contention errors. None = hostname.
     #[serde(default)]
     pub device_name: Option<String>,
+    /// After each close is uploaded, delete the browser caches from the local
+    /// copy. The account data (cookies, logins, storage) stays on the machine,
+    /// so the next open has nothing big to re-download — only the regenerable
+    /// cache, which is what takes the disk space, goes.
+    #[serde(default = "default_true")]
+    pub slim_local: bool,
 }
 
 fn default_true() -> bool {

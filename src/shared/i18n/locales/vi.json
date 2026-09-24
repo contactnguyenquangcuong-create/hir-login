@@ -1256,6 +1256,8 @@
   "settings.syncHelp1": "Trỏ vào 1 sync server tự host (xem thư mục sync-server/ trong repo) để dùng chung profile giữa nhiều máy. Khi bắt đầu 1 profile, nó sẽ bị khoá trên server và tải về bản mới nhất; khi đóng lại, thay đổi được đẩy lên và khoá được nhả ra. 1 profile đang mở trên máy khác sẽ bị từ chối mở ở đây cho tới khi máy đó đóng lại.",
   "settings.syncLockedBy": "đang được dùng bởi {holder}",
   "settings.syncNoProfilesYet": "Chưa có profile nào được đồng bộ.",
+  "settings.syncSlimLocalHint": "Bật: mỗi lần đóng profile, sau khi đã đẩy lên server, cache của trình duyệt trên máy bị xoá (đây là phần chiếm nhiều ổ đĩa nhất, tự tạo lại khi dùng). Cookie, đăng nhập và dữ liệu tài khoản vẫn giữ trên máy nên mở lại nhanh. Tắt: giữ nguyên cả cache.",
+  "settings.syncSlimLocalLabel": "Dọn cache sau khi đóng profile (giữ dữ liệu tài khoản trên máy)",
   "settings.syncServerUrlLabel": "URL server",
   "settings.syncTestBtn": "Test kết nối",
   "settings.syncTestHint": "Liệt kê những gì server hiện đang biết.",

@@ -1256,6 +1256,8 @@
   "settings.syncHelp1": "指向一个自托管的同步服务器（见仓库中的 sync-server/）以在多台机器间共享配置。启动配置时会在服务器上加锁并拉取最新状态；关闭时会推送更改并释放锁。已在另一台设备打开的配置在这里会被拒绝启动，直到对方关闭。",
   "settings.syncLockedBy": "正被 {holder} 使用",
   "settings.syncNoProfilesYet": "尚无已同步的配置。",
+  "settings.syncSlimLocalHint": "开启：每次关闭并上传后，删除本机浏览器缓存（最占磁盘，会自动重建）。Cookie、登录和账号数据仍保留在本机，重新打开很快。关闭：连缓存一起保留。",
+  "settings.syncSlimLocalLabel": "关闭配置后清理缓存（本机保留账号数据）",
   "settings.syncServerUrlLabel": "服务器地址",
   "settings.syncTestBtn": "测试连接",
   "settings.syncTestHint": "列出服务器当前已知的内容。",

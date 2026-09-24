@@ -219,7 +219,45 @@ pub async fn checkin(profile_id: &str) -> Result<()> {
     if !resp.status().is_success() {
         anyhow::bail!("sync server rejected the upload: {}", resp.status());
     }
-    unlock(&base, &token, profile_id, &holder).await
+    unlock(&base, &token, profile_id, &holder).await?;
+
+    // The upload and the unlock both succeeded, so the server has the account
+    // data; the caches are the bulk of the disk and rebuild themselves. Never
+    // reached on a failed upload (the `?` above returns first).
+    if cfg.slim_local {
+        slim_local_copy(profile_id);
+    }
+    Ok(())
+}
+
+/// Chromium cache directories that are safe to delete: none of them carries
+/// account state, and all are rebuilt on demand.
+const CACHE_DIRS: &[&str] = &[
+    "Default/Cache",
+    "Default/Code Cache",
+    "Default/GPUCache",
+    "Default/DawnGraphiteCache",
+    "Default/DawnWebGPUCache",
+    "Default/Service Worker/CacheStorage",
+    "Default/Service Worker/ScriptCache",
+    "GrShaderCache",
+    "GraphiteDawnCache",
+    "ShaderCache",
+    "Crashpad",
+    "BrowserMetrics",
+];
+
+fn slim_local_copy(profile_id: &str) {
+    let Ok(root) = store::user_data_root() else { return };
+    let udd = root.join(profile_id);
+    for rel in CACHE_DIRS {
+        let p = udd.join(rel);
+        if p.is_dir() {
+            if let Err(e) = fs::remove_dir_all(&p) {
+                eprintln!("[launcher] slim: could not remove {}: {e}", p.display());
+            }
+        }
+    }
 }
 
 async fn unlock(base: &str, token: &str, profile_id: &str, holder: &str) -> Result<()> {

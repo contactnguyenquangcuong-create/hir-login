@@ -1256,6 +1256,8 @@
   "settings.syncHelp1": "Point this at a self-hosted sync server (see sync-server/ in the repo) to share profiles across machines. Starting a profile locks it there and pulls its latest state down; closing it pushes your changes up and frees the lock. A profile already open on another device refuses to start here until they close it.",
   "settings.syncLockedBy": "in use by {holder}",
   "settings.syncNoProfilesYet": "No profiles have synced yet.",
+  "settings.syncSlimLocalHint": "On: after each close is uploaded, the browser caches on this machine are deleted (the part that uses the most disk; it rebuilds itself). Cookies, logins and account data stay here, so reopening is fast. Off: keep the caches too.",
+  "settings.syncSlimLocalLabel": "Clear caches after closing a profile (keep account data on this machine)",
   "settings.syncServerUrlLabel": "Server URL",
   "settings.syncTestBtn": "Test connection",
   "settings.syncTestHint": "Lists what the server currently knows.",

@@ -317,7 +317,7 @@ export function SettingsPage() {
           <Switch
             label={t("settings.syncEnableLabel")}
             checked={s.sync?.enabled ?? false}
-            onChange={(checked) => setS({ ...s, sync: { ...s.sync, enabled: checked, server_url: s.sync?.server_url ?? null, token: s.sync?.token ?? null, device_name: s.sync?.device_name ?? null } })}
+            onChange={(checked) => setS({ ...s, sync: { ...s.sync, enabled: checked, server_url: s.sync?.server_url ?? null, token: s.sync?.token ?? null, device_name: s.sync?.device_name ?? null, slim_local: s.sync?.slim_local ?? true } })}
           />
           {(s.sync?.enabled ?? false) && (
             <>
@@ -335,6 +335,12 @@ export function SettingsPage() {
                 value={s.sync?.token ?? ""}
                 onChange={(e) => setS({ ...s, sync: { ...s.sync!, token: e.target.value } })}
               />
+              <Switch
+                label={t("settings.syncSlimLocalLabel")}
+                checked={s.sync?.slim_local ?? true}
+                onChange={(checked) => setS({ ...s, sync: { ...s.sync!, slim_local: checked } })}
+              />
+              <p className="m-0 text-paragraph-xs text-text-soft-400">{t("settings.syncSlimLocalHint")}</p>
               <Input
                 label={t("settings.syncDeviceNameLabel")}
                 inputSize="small"
