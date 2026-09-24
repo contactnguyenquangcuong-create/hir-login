@@ -14,7 +14,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// One row in the library UI; also what the profile editor uses to
 /// populate the GPU select.  `payload` is the verbatim FingerprintConfig
@@ -183,6 +183,25 @@ pub fn import(json_text: &str, id_hint: Option<String>) -> Result<LibraryEntry> 
     let path = path_for(&id)?;
     fs::write(path, serde_json::to_string_pretty(&entry)?)?;
     Ok(entry)
+}
+
+/// Import every `.json` file in `dir` as a library entry, e.g. to carry a
+/// custom-generated set (or another machine's library) over in one go
+/// instead of pasting files in one at a time. Returns the count imported;
+/// a file that fails to parse is skipped rather than aborting the batch.
+pub fn import_folder(dir: &Path) -> Result<usize> {
+    let mut n = 0;
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.path().extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(entry.path()) else { continue };
+        if import(&text, None).is_ok() {
+            n += 1;
+        }
+    }
+    Ok(n)
 }
 
 fn slugify(s: &str) -> String {

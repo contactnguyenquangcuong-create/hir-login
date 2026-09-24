@@ -7,6 +7,7 @@ export const fingerprintList = () => invoke<FingerprintEntry[]>("fingerprint_lis
 export const fingerprintGet = (id: string) => invoke<FingerprintEntry | null>("fingerprint_get", { id });
 export const fingerprintDelete = (id: string) => invoke("fingerprint_delete", { id });
 export const fingerprintImport = (jsonText: string, idHint: string | null) => invoke<FingerprintEntry>("fingerprint_import", { jsonText, idHint });
+export const fingerprintImportFolder = (dir: string) => invoke<number>("fingerprint_import_folder", { dir });
 export const fingerprintDir = () => invoke<string>("fingerprint_dir");
 
 /// Slow on the first call: it starts the engine off-screen and asks it what the

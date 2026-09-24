@@ -6,7 +6,7 @@ import { confirmModal } from "../../../shared/lib/confirm";
 import { readTextFile } from "../../../shared/lib/utils";
 import { profileCreateFromTemplate } from "../../profile/model/api";
 import { FingerprintEntry } from "../model/types";
-import { fingerprintList, fingerprintDelete, fingerprintImport, fingerprintDir } from "../model/api";
+import { fingerprintList, fingerprintDelete, fingerprintImport, fingerprintImportFolder, fingerprintDir } from "../model/api";
 import { storeBus } from "../../../shared/lib/storeBus";
 import { t } from "../../../shared/i18n";
 
@@ -24,6 +24,7 @@ export type FingerprintStore = {
     useTemplate: (id: string) => Promise<void>;
     remove: (id: string) => Promise<void>;
     importJsonFile: () => Promise<void>;
+    importJsonFolder: () => Promise<void>;
     openLibraryFolder: () => Promise<void>;
 };
 
@@ -80,6 +81,17 @@ export const useFingerprint = create<FingerprintStore>((set, get) => ({
             const txt = await readTextFile(path);
             const e = await fingerprintImport(txt, null);
             toast.ok(t("useFingerprint.imported", { label: e.label }));
+            get().reload();
+        } catch (e) { toast.err(String(e)); }
+    },
+    // Bulk-import every .json in a chosen folder — for carrying a custom-generated
+    // set (or another machine's library) over, instead of one file at a time.
+    importJsonFolder: async () => {
+        const dir = await open({ directory: true, title: t("useFingerprint.pickFolderTitle") });
+        if (typeof dir !== "string") return;
+        try {
+            const n = await fingerprintImportFolder(dir);
+            toast.ok(t("useFingerprint.importedMany", { n }));
             get().reload();
         } catch (e) { toast.err(String(e)); }
     },

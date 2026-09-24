@@ -1325,6 +1325,12 @@ fn fingerprint_import(json_text: String, id_hint: Option<String>) -> Result<fing
     fingerprints::import(&json_text, id_hint).map_err(|e| e.to_string())
 }
 
+/// Bulk-import every `.json` file in a chosen folder as a library entry.
+#[tauri::command]
+fn fingerprint_import_folder(dir: String) -> Result<usize, String> {
+    fingerprints::import_folder(std::path::Path::new(&dir)).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn fingerprint_delete(id: String) -> Result<(), String> {
     fingerprints::delete(&id).map_err(|e| e.to_string())
@@ -2404,6 +2410,7 @@ pub fn run() {
             gpu_caps_compat,
             fingerprint_get,
             fingerprint_import,
+            fingerprint_import_folder,
             fingerprint_delete,
             fingerprint_dir,
             read_text_file,
