@@ -1685,7 +1685,7 @@ fn open_helper_panel(app: &tauri::AppHandle, profile: &str) {
     }
     let url = format!("index.html#/?helperPanel={profile}");
     if let Err(e) = WebviewWindowBuilder::new(app, "helper-panel", WebviewUrl::App(url.into()))
-        .title("Shard Helper")
+        .title("Hir Helper")
         .inner_size(300.0, 150.0)
         .resizable(false)
         .always_on_top(true)
