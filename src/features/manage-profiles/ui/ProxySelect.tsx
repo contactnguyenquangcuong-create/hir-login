@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 import { Button, Input, cn } from "@proxyshard/shardx-ui-kit";
 import { AddIcon, ChevronDownIcon } from "../../../shared/icons";
 import { toast } from "../../../shared/model/toast";
-import { proxyBulkParse, proxySave, type ProxyEntry } from "../../../entities/proxy";
+import { proxyBulkParse, proxySave, proxyFullTest, type ProxyEntry } from "../../../entities/proxy";
 import { useProfile } from "../../../entities/profile";
 import { storeBus } from "../../../shared/lib/storeBus";
 import { useT } from "../../../shared/i18n";
@@ -238,6 +238,12 @@ function CreatePanel({ onCancel, onCreated }: {
       // hold the new proxy before it is selected.
       await reloadProfiles();
       onCreated(saved);
+      // Geolocate in the background so the country flag appears on its own —
+      // without this, a proxy typed in here (rather than added via the
+      // Proxies page's own Test button) never gets a country tag at all.
+      proxyFullTest(saved)
+        .then(() => { reloadProfiles(); storeBus.emit("proxies"); })
+        .catch(() => {});
     } catch (e) { toast.err(String(e)); }
     finally { setBusy(false); }
   };

@@ -7,7 +7,8 @@ import { toast } from "../../../shared/model/toast";
 import { useT } from "../../../shared/i18n";
 import { PS_SIGNATURES } from "../../../entities/proxyshard";
 import type { ProxyEntry } from "../../../entities/proxy";
-import { proxySave } from "../../../entities/proxy";
+import { proxySave, proxyFullTest } from "../../../entities/proxy";
+import { storeBus } from "../../../shared/lib/storeBus";
 import { psActive, psSignatureSet } from "../../../entities/proxyshard";
 
 export function ProxyEditor({ initial, onClose, onSaved }: {
@@ -52,6 +53,11 @@ export function ProxyEditor({ initial, onClose, onSaved }: {
       toast.ok(initial.id ? t("proxyEditor.savedToast") : t("proxyEditor.addedToast"));
       onSaved?.(saved);
       onClose();
+      // New proxy, or the host actually changed: geolocate in the background
+      // so the country flag shows up without a separate manual Test click.
+      if (!initial.id || p.host !== initial.host) {
+        proxyFullTest(saved).then(() => storeBus.emit("proxies")).catch(() => {});
+      }
     } catch (e) { toast.err(String(e)); }
   };
   return (

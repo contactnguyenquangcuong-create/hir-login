@@ -466,7 +466,13 @@ async fn resolve_auto_fields(
     let geo: Option<proxy::GeoInfo> = match proxy_opt {
         Some(p) => {
             match proxy::geo_check_via(Some(p), None).await {
-                Ok(g) => { source = "proxy-live"; Some(g) }
+                Ok(g) => {
+                    source = "proxy-live";
+                    // The country the session actually exits from — keeps the
+                    // Proxy column's flag current, not just at last manual Test.
+                    proxy::set_country_tag(&p.id, &g.country_code);
+                    Some(g)
+                }
                 Err(e) => {
                     eprintln!("[launcher] proxy geo failed: {e} — falling back to cached snapshot");
                     if let Some(snap) = proxy::latest_test(&p.id) {

@@ -406,6 +406,9 @@ export const useProfile = create<ProfileStore>((set, get) => ({
     set({ startBusy: new Set([...get().startBusy, p.id]) });
     try {
       await launch(p.id);
+      // Launch geolocates the proxy live and refreshes its country tag —
+      // reload so the flag in the Proxy column follows.
+      void get().reload();
       // Don't optimistically flip `running`; the 2s poll picks up the new child.
     } catch (e) {
       toast.err(String(e));

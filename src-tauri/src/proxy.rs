@@ -876,11 +876,14 @@ pub async fn full_test(entry: &ProxyEntry) -> Result<TestSnapshot> {
 
     let recorded = record_test(&entry.id, snap)?;
 
-    // Backfill empty country tag on the stored entry.
+    // Keep the stored country tag in step with the latest successful test. It
+    // used to fill only an empty tag, so whatever the first test said stuck
+    // forever — a proxy first seen as VN kept the VN flag after later tests
+    // correctly reported PH.
     if !recorded.country_code.is_empty() {
         let mut store_data = load()?;
         if let Some(p) = store_data.proxies.iter_mut().find(|p| p.id == entry.id) {
-            if p.country.is_empty() || p.country == "—" {
+            if p.country != recorded.country_code {
                 p.country = recorded.country_code.clone();
                 save(&store_data)?;
             }
@@ -888,6 +891,21 @@ pub async fn full_test(entry: &ProxyEntry) -> Result<TestSnapshot> {
     }
 
     Ok(recorded)
+}
+
+/// Best-effort update of a stored proxy's country tag (no-op if unchanged or
+/// unknown); used when a launch geolocates the proxy live.
+pub fn set_country_tag(id: &str, country_code: &str) {
+    if country_code.is_empty() {
+        return;
+    }
+    let Ok(mut store_data) = load() else { return };
+    if let Some(p) = store_data.proxies.iter_mut().find(|p| p.id == id) {
+        if p.country != country_code {
+            p.country = country_code.to_string();
+            let _ = save(&store_data);
+        }
+    }
 }
 
 /// Fallback country → IANA timezone for providers that omit timezone.
