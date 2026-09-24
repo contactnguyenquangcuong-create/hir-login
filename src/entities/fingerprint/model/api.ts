@@ -2,6 +2,9 @@ import { invoke } from "@tauri-apps/api/core";
 import type { FingerprintEntry, GpuCompat, HostGlCaps } from "./types";
 
 export const fingerprintList = () => invoke<FingerprintEntry[]>("fingerprint_list");
+/// list()'s entries carry no payload (bulk calls skip it for speed) — fetch
+/// the full FingerprintConfig for one entry with this instead.
+export const fingerprintGet = (id: string) => invoke<FingerprintEntry | null>("fingerprint_get", { id });
 export const fingerprintDelete = (id: string) => invoke("fingerprint_delete", { id });
 export const fingerprintImport = (jsonText: string, idHint: string | null) => invoke<FingerprintEntry>("fingerprint_import", { jsonText, idHint });
 export const fingerprintDir = () => invoke<string>("fingerprint_dir");

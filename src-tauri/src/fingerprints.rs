@@ -62,33 +62,51 @@ fn tag_color_for(platform: &str) -> String {
     }
 }
 
+/// Parse one fingerprint JSON file into its full `LibraryEntry` (payload
+/// included).  Shared by `list_all` (which then strips the payload back
+/// out for the bulk response) and `get` (which reads a single file
+/// directly instead of scanning the whole directory).
+fn read_entry(path: &PathBuf) -> Result<Option<LibraryEntry>> {
+    if path.extension().and_then(|s| s.to_str()) != Some("json") {
+        return Ok(None);
+    }
+    let body = fs::read_to_string(path)?;
+    if let Ok(e) = serde_json::from_str::<LibraryEntry>(&body) {
+        return Ok(Some(e));
+    }
+    if let Ok(payload) = serde_json::from_str::<Value>(&body) {
+        // Bare FingerprintConfig (no LibraryEntry wrapper) — wrap on the
+        // fly so user-imported files that came straight from ShardX
+        // still show up.
+        let id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("imported")
+            .to_string();
+        return Ok(Some(wrap_payload(&id, &payload)));
+    }
+    Ok(None)
+}
+
 pub fn list_all() -> Result<Vec<LibraryEntry>> {
     // Pure filesystem read.  Everything in
     //   $CONFIG/shardx-launcher/fingerprints/*.json
     // becomes a library entry, no matter how it got there — UI
     // imports, drag-and-drop, or the user dumping files in by hand.
     // No bundled set, no compile-time tables, no "builtin" concept.
+    //
+    // The payload is dropped from each entry here: with a large library
+    // (user-imported sets can run into the thousands) shipping every
+    // full FingerprintConfig over IPC on every list call makes the UI
+    // visibly lag. Callers that need the payload for one entry (GPU
+    // pick, profile save) fetch it with `get(id)` instead.
     let dir = store::fingerprints_dir()?;
     let mut out = Vec::new();
     for entry in fs::read_dir(&dir)? {
         let entry = entry?;
-        if entry.path().extension().and_then(|s| s.to_str()) != Some("json") {
-            continue;
-        }
-        let body = fs::read_to_string(entry.path())?;
-        if let Ok(e) = serde_json::from_str::<LibraryEntry>(&body) {
+        if let Some(mut e) = read_entry(&entry.path())? {
+            e.payload = Value::Null;
             out.push(e);
-        } else if let Ok(payload) = serde_json::from_str::<Value>(&body) {
-            // Bare FingerprintConfig (no LibraryEntry wrapper) — wrap on
-            // the fly so user-imported files that came straight from
-            // ShardX still show up.
-            let id = entry
-                .path()
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("imported")
-                .to_string();
-            out.push(wrap_payload(&id, &payload));
         }
     }
     out.sort_by(|a, b| a.label.cmp(&b.label));
@@ -135,7 +153,14 @@ fn wrap_payload(id: &str, p: &Value) -> LibraryEntry {
 }
 
 pub fn get(id: &str) -> Result<Option<LibraryEntry>> {
-    Ok(list_all()?.into_iter().find(|e| e.id == id))
+    // Read the one target file directly rather than scanning/parsing the
+    // whole library — the bulk `list_all` path already strips payloads,
+    // so this is the only place a full FingerprintConfig gets loaded.
+    let path = path_for(id)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    read_entry(&path)
 }
 
 /// Import a raw FingerprintConfig JSON.  Accepts the user's text and

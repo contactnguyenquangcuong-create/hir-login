@@ -349,8 +349,19 @@ pub async fn launch_profile_synced(
     }
 
     // Operator's own switches, last so they win a repeat.
-    for a in settings::parse_extra_args(&s.extra_args) {
+    let extra_args = settings::parse_extra_args(&s.extra_args);
+    let operator_start_url = extra_args.iter().any(|a| !a.starts_with('-'));
+    for a in &extra_args {
         cmd.arg(a);
+    }
+    // A bare Chromium invocation opens the engine's own branded New Tab Page
+    // (chrome://shardx) — and the engine redirects the stock
+    // chrome://new-tab-page there too, so `about:blank` (a different scheme
+    // entirely, outside their WebUI override) is the only start page that
+    // reliably isn't intercepted. Skipped if the operator already configured
+    // one via a positional URL in Extra Args.
+    if !operator_start_url {
+        cmd.arg("about:blank");
     }
 
     cmd.stdout(Stdio::null()).stderr(Stdio::null());

@@ -8,11 +8,12 @@ import { readTextFile } from "../../../shared/lib/utils";
 import { storeBus } from "../../../shared/lib/storeBus";
 import { t } from "../../../shared/i18n";
 import { proxyList, type ProxyEntry } from "../../proxy";
-import { fingerprintList, type FingerprintEntry } from "../../fingerprint";
+import { fingerprintList, fingerprintGet, type FingerprintEntry } from "../../fingerprint";
 import type { ProfileMeta, ProfileForm } from "../model/types";
 import {
   profileList, profileGet, profileSave, profileDelete, profileClone,
-  profileSetPin, profileSetFolder, profileBindProxy, profileImport,
+  profileSetPin, profileSetFolder, profileBindProxy,
+  profileExportFolder, profileImportFolder,
   profileCreateFromTemplate, processList, processKill, launch, syncLaunch,
   folderDelete, cookiesExportToFile, cookiesImport,
 } from "../model/api";
@@ -194,7 +195,12 @@ export type ProfileStore = {
   bulkStop: () => Promise<void>;
   bulkDelete: () => Promise<void>;
   bulkExport: () => Promise<void>;
-  bulkImport: () => Promise<void>;
+  /** Export the current selection (or every profile, if none selected) as a
+   *  folder-per-profile bundle — carry it to another machine and import it
+   *  back with `importProfilesFromFolder`. */
+  exportProfilesToFolder: () => Promise<void>;
+  /** Import every subfolder of a chosen folder as a profile. */
+  importProfilesFromFolder: () => Promise<void>;
 };
 
 export const useProfile = create<ProfileStore>((set, get) => ({
@@ -342,10 +348,12 @@ export const useProfile = create<ProfileStore>((set, get) => ({
   cancelEdit: () => set({ expanded: null, draft: null }),
 
   saveDraft: async () => {
-    const { draft, fingerprints, folder } = get();
+    const { draft, folder } = get();
     if (!draft) return;
     try {
-      const fp = fingerprints.find((g) => g.id === draft.gpu_preset_id) ?? null;
+      // `fingerprints` (the bulk list) carries no payload — fetch the one
+      // entry we're about to write to disk directly.
+      const fp = draft.gpu_preset_id ? await fingerprintGet(draft.gpu_preset_id) : null;
       const saved = await profileSave(toStored(draft, fp));
       await profileBindProxy(saved.id, draft.proxy_id);
       // A profile created while a folder tab is active should land in that
@@ -605,14 +613,25 @@ export const useProfile = create<ProfileStore>((set, get) => ({
     } catch (e) { toast.err(String(e)); }
   },
 
-  // Paste profile JSON from clipboard → fresh profiles.
-  bulkImport: async () => {
+  // Selection (or everything) → one subfolder per profile, picked destination.
+  exportProfilesToFolder: async () => {
+    const { selected, profiles } = get();
+    const ids = selected.size > 0 ? [...selected] : profiles.map((p) => p.id);
+    if (ids.length === 0) return;
     try {
-      const text = await clip.read();
-      if (!text.trim()) { toast.err(t("useProfile.clipboardEmpty")); return; }
-      const data = JSON.parse(text);
-      const arr = Array.isArray(data) ? data : [data];
-      const n = await profileImport(arr);
+      const dest = await open({ directory: true, title: t("useProfile.exportPickFolderTitle") });
+      if (!dest || Array.isArray(dest)) return;
+      const n = await profileExportFolder(ids, dest);
+      toast.ok(t("useProfile.profilesExportedMany", { n }));
+    } catch (e) { toast.err(t("useProfile.exportFailed", { e: String(e) })); }
+  },
+
+  // Picked folder's subfolders → fresh profiles (each subfolder = one profile).
+  importProfilesFromFolder: async () => {
+    try {
+      const src = await open({ directory: true, title: t("useProfile.importPickFolderTitle") });
+      if (!src || Array.isArray(src)) return;
+      const n = await profileImportFolder(src);
       get().reload();
       toast.ok(n === 1
         ? t("useProfile.profileImportedOne")

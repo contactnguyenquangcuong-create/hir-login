@@ -10,6 +10,9 @@ export const profileSetPin = (id: string, pinned: boolean) => invoke("profile_se
 export const profileSetFolder = (id: string, folder: string) => invoke("profile_set_folder", { id, folder });
 export const profileBindProxy = (profileId: string, proxyId: string | null) => invoke("profile_bind_proxy", { profileId, proxyId });
 export const profileImport = (payloads: any[]) => invoke<number>("profile_import", { payloads });
+/// Folder-per-profile bundle: pairs with profileImportFolder for machine-to-machine moves.
+export const profileExportFolder = (ids: string[], dest: string) => invoke<number>("profile_export_folder", { ids, dest });
+export const profileImportFolder = (src: string) => invoke<number>("profile_import_folder", { src });
 export const profileCreateFromTemplate = (templateId: string) => invoke<ProfileMeta>("profile_create_from_template", { templateId });
 export const processList = () => invoke<{ profile_id: string; pid: number; uptime_ms: number }[]>("process_list");
 export const processKill = (profileId: string) => invoke<boolean>("process_kill", { profileId });

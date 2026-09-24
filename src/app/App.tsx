@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { TitleBar } from "../widgets/TitleBar/TitleBar";
 import { Sidebar } from "../widgets/Sidebar/Sidebar";
+import { ActivationGate } from "../widgets/ActivationGate";
 import { FirstRunGate } from "../widgets/FirstRunGate/FirstRunGate";
 import { ToastHost } from "../widgets/ToastHost/ToastHost";
 import { ConfirmHost } from "../widgets/ConfirmHost/ConfirmHost";
@@ -29,30 +30,32 @@ export function App() {
   return (
     <>
       <TitleBar />
-      <HelperWatcher />
-      <WhatsNewGate />
-      <FirstRunGate>
-        <div
-          className="grid overflow-hidden bg-bg-weak-50 [grid-template-columns:240px_1fr] [@media(min-width:1700px)]:[grid-template-columns:280px_1fr]"
-          style={{ height: "100vh", paddingTop: "var(--titlebar-h)" }}
-        >
-          <Sidebar />
-          <main className="overflow-y-auto px-7 py-6">
-            {section === "browsers" && <BrowsersPage />}
-            {section === "proxies" && <ProxiesPage />}
-            {section === "proxyshard" && <ProxyShardPage />}
-            {section === "fingerprints" && <FingerprintsPage />}
-            {section === "extensions" && <ExtensionsPage />}
-            {section === "bookmarks" && <BookmarksPage />}
-            {section === "automation" && <AutomationPage />}
-            {section === "trash" && <TrashPage />}
-            {section === "patchlog" && <PatchLogPage />}
-            {section === "settings" && <SettingsPage />}
-          </main>
-          <ToastHost />
-          <ConfirmHost />
-        </div>
-      </FirstRunGate>
+      <ActivationGate>
+        <HelperWatcher />
+        <WhatsNewGate />
+        <FirstRunGate>
+          <div
+            className="grid overflow-hidden bg-bg-weak-50 [grid-template-columns:240px_1fr] [@media(min-width:1700px)]:[grid-template-columns:280px_1fr]"
+            style={{ height: "100vh", paddingTop: "var(--titlebar-h)" }}
+          >
+            <Sidebar />
+            <main className="overflow-y-auto px-7 py-6">
+              {section === "browsers" && <BrowsersPage />}
+              {section === "proxies" && <ProxiesPage />}
+              {section === "proxyshard" && <ProxyShardPage />}
+              {section === "fingerprints" && <FingerprintsPage />}
+              {section === "extensions" && <ExtensionsPage />}
+              {section === "bookmarks" && <BookmarksPage />}
+              {section === "automation" && <AutomationPage />}
+              {section === "trash" && <TrashPage />}
+              {section === "patchlog" && <PatchLogPage />}
+              {section === "settings" && <SettingsPage />}
+            </main>
+            <ToastHost />
+            <ConfirmHost />
+          </div>
+        </FirstRunGate>
+      </ActivationGate>
     </>
   );
 }

@@ -21,6 +21,7 @@ import { useNav } from "../../shared/model/navigation";
 import { useT } from "../../shared/i18n";
 import { DownloadMcp } from "../../features/DownloadMcp";
 import { ThemeSwitch } from "../../features/ThemeSwitch";
+import { AppUpdateBanner } from "../../features/AppUpdateBanner/AppUpdateBanner";
 
 function VersionPill() {
   const t = useT();
@@ -114,6 +115,7 @@ export function Sidebar() {
         ))}
       </nav>
       <div className="mt-auto border-t border-stroke-soft-200 pt-2">
+        <AppUpdateBanner />
         <div className="mb-2.5 flex flex-col gap-[7px] rounded-xl bg-bg-weak-50 p-2.5 ring-1 ring-inset ring-stroke-soft-200">
           <div className="flex items-center justify-between">
             <span className="text-subheading-2xs text-text-soft-400">{t("sidebar.apiTitle")}</span>

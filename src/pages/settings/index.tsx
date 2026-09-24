@@ -12,6 +12,8 @@ import { HELPER_KINDS } from "../../entities/settings";
 import { settingsGet, settingsSave, settingsLoadError, apiInfo, apiRegenerateToken, mcpDownload, teamSyncList } from "../../entities/settings";
 import { DataRootCard } from "../../features/manage-profiles/ui/DataRootCard";
 import { useT, useLang, LANG_OPTIONS, type Lang } from "../../shared/i18n";
+import type { LicenseInfo } from "../../entities/license";
+import { licenseInfo } from "../../entities/license";
 
 function SettingsCard({ title, children }: { title: string; children: React.ReactNode }) {
   return (
@@ -44,6 +46,11 @@ export function SettingsPage() {
     settingsGet().then(setS);
     settingsLoadError().then(setLoadError).catch(() => {});
     refreshApi();
+  }, []);
+
+  const [license, setLicense] = useState<LicenseInfo | null>(null);
+  useEffect(() => {
+    licenseInfo().then(setLicense).catch(() => {});
   }, []);
   const regenToken = async () => {
     try { setApi(await apiRegenerateToken()); toast.ok(t("settings.tokenRegenerated")); }
@@ -91,6 +98,33 @@ export function SettingsPage() {
           <strong>{t("settings.loadErrorTitle")}</strong>{t("settings.loadErrorBody1")}<code>settings.json.bad</code>{t("settings.loadErrorBody2")}<code>Set-Content -Encoding UTF8</code>{t("settings.loadErrorBody3")}
           <div className="mt-1 text-paragraph-xs text-text-soft-400">{loadError}</div>
         </div>
+      )}
+
+      {license && (
+        <SettingsCard title={t("settings.licenseTitle")}>
+          <div className="mb-3 flex flex-col gap-1.5 text-paragraph-xs">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-text-soft-400">{t("settings.licenseKeyLabel")}</span>
+              <span className="mono text-text-strong-950">{license.key}</span>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-text-soft-400">{t("settings.licenseNameLabel")}</span>
+              <span className="text-text-sub-600">{license.customer_name ?? "—"}</span>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-text-soft-400">{t("settings.licensePhoneLabel")}</span>
+              <span className="text-text-sub-600">{license.customer_phone ?? "—"}</span>
+            </div>
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-text-soft-400">{t("settings.licenseEmailLabel")}</span>
+              <span className="text-text-sub-600">{license.customer_email ?? "—"}</span>
+            </div>
+          </div>
+          <label className="flex flex-col gap-1.5">
+            <span className="text-label-xs text-text-sub-600">{t("settings.licenseDeviceLabel")}</span>
+            <CopyField value={license.device_id} />
+          </label>
+        </SettingsCard>
       )}
 
       <SettingsCard title={t("settings.languageTitle")}>

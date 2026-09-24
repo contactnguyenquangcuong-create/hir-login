@@ -1,6 +1,7 @@
 import {
   BulkActionsBar,
   ImportProfilesButton,
+  ExportProfilesButton,
   FromTemplateButton,
   NewProfileButton,
   ProfileFilterBar,
@@ -12,6 +13,7 @@ export function ProfileToolbar() {
       <BulkActionsBar />
       <ProfileFilterBar />
       <ImportProfilesButton />
+      <ExportProfilesButton />
       <FromTemplateButton />
       <NewProfileButton />
     </div>

@@ -403,6 +403,156 @@ fn save_raw_locked(stored: &mut StoredProfile) -> Result<()> {
     Ok(())
 }
 
+fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let to = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&entry.path(), &to)?;
+        } else {
+            fs::copy(entry.path(), &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Turn a profile name into a filesystem-safe folder name, deduped against
+/// what the caller has already used in this batch.
+fn dedup_folder_name(name: &str, used: &mut std::collections::HashSet<String>) -> String {
+    let base: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ' ' { c } else { '_' })
+        .collect();
+    let base = base.trim().to_string();
+    let base = if base.is_empty() { "profile".to_string() } else { base };
+    let mut candidate = base.clone();
+    let mut n = 2;
+    while used.contains(&candidate) {
+        candidate = format!("{base} ({n})");
+        n += 1;
+    }
+    used.insert(candidate.clone());
+    candidate
+}
+
+/// Export profiles as a portable bundle: one subfolder per profile under
+/// `dest`, each holding `profile.json` (the on-disk StoredProfile) plus a
+/// `userdata/` copy of that profile's browser data — the pair `import_bundle`
+/// expects back, so a folder of these can be carried to another machine and
+/// re-imported whole.
+pub fn export_bundle(ids: &[String], dest: &Path) -> Result<usize> {
+    fs::create_dir_all(dest)?;
+    let mut used = std::collections::HashSet::new();
+    let mut n = 0;
+    for id in ids {
+        let stored = load_raw(id)?;
+        let name = stored
+            .config
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(id.as_str());
+        let folder = dedup_folder_name(name, &mut used);
+        let out_dir = dest.join(&folder);
+        fs::create_dir_all(&out_dir)?;
+        fs::write(
+            out_dir.join("profile.json"),
+            serde_json::to_string_pretty(&stored)?,
+        )?;
+        let udd = store::user_data_root()?.join(id);
+        if udd.exists() {
+            copy_dir_all(&udd, &out_dir.join("userdata"))?;
+        }
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// True if `path` is itself the top of one Chromium profile's data (a
+/// `user-data-dir`, or a single profile folder inside one) rather than a
+/// folder that merely holds several such folders as children. Without this
+/// check, pointing the picker straight at one real Chrome profile would make
+/// its own internal folders (`Default`, `Profile 1`, `Local State`'s
+/// sibling dirs) each get imported as if they were separate profiles.
+fn looks_like_browser_profile_dir(path: &Path) -> bool {
+    path.join("Local State").is_file()
+        || path.join("Default").is_dir()
+        || path.join("Preferences").is_file()
+}
+
+/// Import one profile from `dir`: `dir/profile.json` (written by
+/// `export_bundle`) round-trips its config and `dir/userdata/` verbatim; a
+/// bare browser-profile folder is adopted as the user-data itself and given
+/// a random fingerprint from the library, named after the folder.
+fn import_one_profile_dir(dir: &Path) -> Result<()> {
+    let folder_name = dir
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "profile".into());
+    let profile_json = dir.join("profile.json");
+
+    let mut stored = if profile_json.exists() {
+        let body = fs::read_to_string(&profile_json)?;
+        serde_json::from_str::<StoredProfile>(&body)
+            .with_context(|| format!("{}: invalid profile.json", dir.display()))?
+    } else {
+        let library = crate::fingerprints::list_all()?;
+        let base = if library.is_empty() {
+            serde_json::json!({})
+        } else {
+            let pick = uuid::Uuid::new_v4().as_bytes()[0] as usize % library.len();
+            crate::fingerprints::get(&library[pick].id)?
+                .map(|e| e.payload)
+                .unwrap_or_else(|| serde_json::json!({}))
+        };
+        let mut config = base.as_object().cloned().unwrap_or_default();
+        config.insert("name".into(), serde_json::Value::String(folder_name));
+        StoredProfile { meta: StoredMeta::default(), config }
+    };
+
+    let _guard = file_lock();
+    let new_id = uuid::Uuid::new_v4().to_string();
+    stored.meta.id = new_id.clone();
+    stored.meta.last_launched_at = None;
+    stored.meta.created_at = None;
+    stored.meta.pinned = false;
+    stored.meta.rev = 0;
+    save_raw_locked(&mut stored)?;
+    drop(_guard);
+
+    let src_userdata = if profile_json.exists() { dir.join("userdata") } else { dir.to_path_buf() };
+    if src_userdata.exists() {
+        let dst = user_data_dir(&new_id)?;
+        copy_dir_all(&src_userdata, &dst)?;
+    }
+    Ok(())
+}
+
+/// Import a portable bundle directory. If `src` is itself one profile's data
+/// (a bundle with `profile.json`, or a real Chromium profile folder), it is
+/// imported as that single profile. Otherwise every immediate subfolder of
+/// `src` is imported as one profile each — see `import_one_profile_dir`.
+pub fn import_bundle(src: &Path) -> Result<usize> {
+    if src.join("profile.json").exists() || looks_like_browser_profile_dir(src) {
+        import_one_profile_dir(src)?;
+        return Ok(1);
+    }
+    let mut n = 0;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let subdir = entry.path();
+        if !subdir.join("profile.json").exists() && !looks_like_browser_profile_dir(&subdir) {
+            continue;
+        }
+        import_one_profile_dir(&subdir)?;
+        n += 1;
+    }
+    Ok(n)
+}
+
 pub fn delete(id: &str) -> Result<()> {
     let path = path_for(id)?;
     if path.exists() {

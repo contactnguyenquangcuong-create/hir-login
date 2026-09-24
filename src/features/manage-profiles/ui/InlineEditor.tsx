@@ -20,6 +20,7 @@ import {
 } from "../../../shared/constants";
 import type { ProfileForm, GeoMode, WebRtcMode } from "../../../entities/profile";
 import type { FingerprintEntry } from "../../../entities/fingerprint";
+import { fingerprintGet } from "../../../entities/fingerprint";
 import type { ProxyEntry } from "../../../entities/proxy";
 import { enrichPicksForPreset, claimsMobile } from "../../../entities/profile";
 import { useGpuCompat } from "../../../shared/model/gpuCompat";
@@ -81,7 +82,8 @@ export function InlineEditor({
     return ["", ...fits.map(([w, h]) => `${w}x${h}`)];
   }, [hostScreen]);
 
-  /// Pick GPU = full fingerprint snap; toStored carries lib.payload at save.
+  /// Pick GPU = full fingerprint snap (fetched lazily); toStored re-fetches
+  /// the payload at save time since the bulk list doesn't carry it.
   // The verdict map and the "stop warning me" flag; the load is once per app run.
   const compatById = useGpuCompat((s) => s.byId);
   const suppressed = useGpuCompat((s) => s.suppressed);
@@ -91,9 +93,11 @@ export function InlineEditor({
   const [pendingGpu, setPendingGpu] = useState<string | null>(null);
 
   const setGpu = async (id: string) => {
-    const fp = fingerprints.find((x) => x.id === id);
-    if (!fp) return;
-    const nav = fp.payload?.navigator ?? {};
+    if (!fingerprints.some((x) => x.id === id)) return;
+    // The bulk `fingerprints` list carries no payload (kept light for speed
+    // with large libraries) — fetch this one entry's full config directly.
+    const fp = await fingerprintGet(id);
+    const nav = fp?.payload?.navigator ?? {};
     // Ask Rust for the same hw + platform_version triplet save uses.
     let picks: { hardware_concurrency?: number; device_memory?: number; platform_version?: string } = {};
     try {

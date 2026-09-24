@@ -5,14 +5,14 @@ import { useT } from "../../../shared/i18n";
 
 export function ImportProfilesButton() {
   const t = useT();
-  const bulkImport = useProfile((s) => s.bulkImport);
+  const importProfilesFromFolder = useProfile((s) => s.importProfilesFromFolder);
   return (
     <Button
       variant="neutral"
       mode="stroke"
       size="small"
       leftIcon={<DownloadIcon className="size-4" />}
-      onClick={bulkImport}
+      onClick={importProfilesFromFolder}
       title={t("importProfilesButton.tooltip")}
     >
       {t("importProfilesButton.label")}

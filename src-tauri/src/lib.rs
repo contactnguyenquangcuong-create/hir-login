@@ -4,6 +4,7 @@ mod profile_icon;
 mod api;
 mod bookmarks;
 mod cloud_sync;
+mod license;
 mod cookies;
 mod extensions;
 mod fingerprints;
@@ -1081,6 +1082,22 @@ fn profile_import(payloads: Vec<Value>) -> Result<usize, String> {
     Ok(n)
 }
 
+/// Export profiles as a folder-per-profile bundle under `dest` — carry the
+/// whole folder to another machine and import it back with `profile_import_folder`.
+#[tauri::command]
+fn profile_export_folder(ids: Vec<String>, dest: String) -> Result<usize, String> {
+    profile::export_bundle(&ids, std::path::Path::new(&dest)).map_err(|e| e.to_string())
+}
+
+/// Import every subfolder of `src` as a profile: a folder written by
+/// `profile_export_folder` round-trips its config + browser data; a bare
+/// folder of raw browser data (from another install) is adopted as-is and
+/// given a random library fingerprint.
+#[tauri::command]
+fn profile_import_folder(src: String) -> Result<usize, String> {
+    profile::import_bundle(std::path::Path::new(&src)).map_err(|e| e.to_string())
+}
+
 // ---- Clipboard (via tauri-plugin-clipboard-manager; webview navigator.clipboard throws) ----
 
 #[tauri::command]
@@ -1752,6 +1769,37 @@ fn cookies_import(profile_id: String, cookies: Vec<cookies::Cookie>) -> Result<u
     cookies::import(&profile_id, &cookies).map_err(|e| e.to_string())
 }
 
+// ---- License activation ----
+
+/// Whether this machine already has a valid local activation. Offline check.
+#[tauri::command]
+fn license_status() -> bool {
+    license::is_activated()
+}
+
+/// Redeems a key against Supabase; writes the local activation record on
+/// success so this machine never needs the network for this again.
+#[tauri::command]
+async fn license_activate(key: String) -> Result<(), String> {
+    license::activate(&key).await.map_err(|e| e.to_string())
+}
+
+/// For the Settings page: this machine's key, device id, and whatever
+/// customer info has been submitted. None before activation.
+#[tauri::command]
+fn license_info() -> Option<license::LicenseInfo> {
+    license::local_info()
+}
+
+/// Sends/updates the customer's name, phone/Zalo and email for this
+/// machine's license. Callable again later to fix a typo.
+#[tauri::command]
+async fn license_submit_info(name: String, phone: String, email: String) -> Result<(), String> {
+    license::submit_customer_info(&name, &phone, &email)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // ---- Settings ----
 
 #[tauri::command]
@@ -2108,6 +2156,150 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
+/// Mirrors Tauri's own `Menu::default()`, with one change: the native "Quit"
+/// item is a plain `MenuItem` (`app_quit`) instead of `PredefinedMenuItem::quit`.
+/// The predefined one calls `[NSApp terminate:]` straight through AppKit,
+/// which ends the process immediately and never reaches Rust at all — not
+/// `RunEvent::ExitRequested`, nothing — so Cmd+Q could never be made to wait
+/// for a running profile. Routing it through our own menu item means Cmd+Q
+/// (its accelerator) reaches `on_menu_event` like any other menu click.
+fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{AboutMetadata, Menu, MenuItem, PredefinedMenuItem, Submenu};
+    let pkg_info = app.package_info();
+    let config = app.config();
+    let about_metadata = AboutMetadata {
+        name: Some(pkg_info.name.clone()),
+        version: Some(pkg_info.version.to_string()),
+        copyright: config.bundle.copyright.clone(),
+        authors: config.bundle.publisher.clone().map(|p| vec![p]),
+        ..Default::default()
+    };
+
+    let window_menu = Submenu::with_items(
+        app,
+        "Window",
+        true,
+        &[
+            &PredefinedMenuItem::minimize(app, None)?,
+            &PredefinedMenuItem::maximize(app, None)?,
+            #[cfg(target_os = "macos")]
+            &PredefinedMenuItem::separator(app)?,
+            &PredefinedMenuItem::close_window(app, None)?,
+        ],
+    )?;
+
+    let help_menu = Submenu::with_items(
+        app,
+        "Help",
+        true,
+        &[
+            #[cfg(not(target_os = "macos"))]
+            &PredefinedMenuItem::about(app, None, Some(about_metadata.clone()))?,
+        ],
+    )?;
+
+    // "Cmd" only means Command on macOS; elsewhere it's the Super/Windows key,
+    // which isn't the accelerator anyone expects here, so it's mac-only.
+    #[cfg(target_os = "macos")]
+    let quit_accelerator = Some("Cmd+Q");
+    #[cfg(not(target_os = "macos"))]
+    let quit_accelerator: Option<&str> = None;
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+    )))]
+    let quit_item = MenuItem::with_id(app, "app_quit", "Quit Hir-Login", true, quit_accelerator)?;
+
+    Menu::with_items(
+        app,
+        &[
+            #[cfg(target_os = "macos")]
+            &Submenu::with_items(
+                app,
+                pkg_info.name.clone(),
+                true,
+                &[
+                    &PredefinedMenuItem::about(app, None, Some(about_metadata))?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::services(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::hide(app, None)?,
+                    &PredefinedMenuItem::hide_others(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &quit_item,
+                ],
+            )?,
+            #[cfg(not(any(
+                target_os = "linux",
+                target_os = "dragonfly",
+                target_os = "freebsd",
+                target_os = "netbsd",
+                target_os = "openbsd"
+            )))]
+            &Submenu::with_items(
+                app,
+                "File",
+                true,
+                &[
+                    &PredefinedMenuItem::close_window(app, None)?,
+                    #[cfg(not(target_os = "macos"))]
+                    &quit_item,
+                ],
+            )?,
+            &Submenu::with_items(
+                app,
+                "Edit",
+                true,
+                &[
+                    &PredefinedMenuItem::undo(app, None)?,
+                    &PredefinedMenuItem::redo(app, None)?,
+                    &PredefinedMenuItem::separator(app)?,
+                    &PredefinedMenuItem::cut(app, None)?,
+                    &PredefinedMenuItem::copy(app, None)?,
+                    &PredefinedMenuItem::paste(app, None)?,
+                    &PredefinedMenuItem::select_all(app, None)?,
+                ],
+            )?,
+            #[cfg(target_os = "macos")]
+            &Submenu::with_items(
+                app,
+                "View",
+                true,
+                &[&PredefinedMenuItem::fullscreen(app, None)?],
+            )?,
+            &window_menu,
+            &help_menu,
+        ],
+    )
+}
+
+/// Refuse to quit while any profile is still running. Each profile already
+/// checks its data back in to Team Sync when its own browser window closes
+/// (see `process.rs`) — quitting the app out from under a running profile
+/// would skip that and leave its lock stuck for the rest of the team, so the
+/// operator is asked to close their profiles first instead.
+fn quit_gracefully(app: &tauri::AppHandle) {
+    let running = process::Tracker::shared().running();
+    eprintln!("[launcher] quit requested; {} profile(s) running", running.len());
+    if running.is_empty() {
+        app.exit(0);
+        return;
+    }
+    use tauri_plugin_dialog::DialogExt;
+    show_main_window(app);
+    app.dialog()
+        .message(
+            "Còn profile đang chạy. Đóng hết trình duyệt của các profile đó trước khi thoát \
+             Hir-Login, để dữ liệu được đồng bộ đầy đủ lên Team Sync.",
+        )
+        .title("Chưa thể thoát")
+        .kind(tauri_plugin_dialog::MessageDialogKind::Warning)
+        .show(|_| {});
+}
+
 pub fn run() {
     tauri::Builder::default()
         // Must be the first plugin: a second launch focuses the running window.
@@ -2117,6 +2309,14 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        .menu(build_app_menu)
+        .on_menu_event(|app, event| {
+            if event.id.as_ref() == "app_quit" {
+                quit_gracefully(app);
+            }
+        })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let to_tray = settings::load().map(|s| s.minimize_to_tray).unwrap_or(true);
@@ -2188,6 +2388,8 @@ pub fn run() {
             profile_bind_proxy,
             profile_clone,
             profile_import,
+            profile_export_folder,
+            profile_import_folder,
             clipboard_write,
             clipboard_read,
             profile_set_pin,
@@ -2223,6 +2425,10 @@ pub fn run() {
             settings_get,
             settings_save,
             team_sync_list,
+            license_status,
+            license_activate,
+            license_info,
+            license_submit_info,
             settings_load_error,
             host_screen,
             api_info,
@@ -2277,7 +2483,7 @@ pub fn run() {
                         .show_menu_on_left_click(false)
                         .on_menu_event(|app, e| match e.id.as_ref() {
                             "tray_show" => show_main_window(app),
-                            "tray_quit" => app.exit(0),
+                            "tray_quit" => quit_gracefully(app),
                             _ => {}
                         })
                         .on_tray_icon_event(|tray, e| {
@@ -2344,6 +2550,29 @@ pub fn run() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            match event {
+                // Cmd+Q / Dock "Quit" / OS shutdown — refuse while a profile
+                // is running, same as the tray's Quit item, so this can't
+                // bypass Team Sync checkin. Only prevent when we're actually
+                // going to block: `api.prevent_exit()` here is unconditional,
+                // and this handler's own `app.exit(0)` (the "nothing running"
+                // path in `quit_gracefully`) re-enters this same event —
+                // preventing that one too would loop forever instead of exiting.
+                tauri::RunEvent::ExitRequested { api, .. } => {
+                    if !process::Tracker::shared().running().is_empty() {
+                        api.prevent_exit();
+                        quit_gracefully(app_handle);
+                    }
+                }
+                // Clicking the Dock icon after the window was closed to tray:
+                // `.hide()` leaves no visible window, and macOS otherwise does
+                // nothing on its own in that case.
+                #[cfg(target_os = "macos")]
+                tauri::RunEvent::Reopen { .. } => show_main_window(app_handle),
+                _ => {}
+            }
+        });
 }

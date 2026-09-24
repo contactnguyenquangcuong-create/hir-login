@@ -578,9 +578,15 @@ fn version_lt(a: &str, b: &str) -> bool {
     false
 }
 
-/// This launcher's own version, as published.
+/// The upstream engine-compatibility version this launcher speaks — separate
+/// from `Cargo.toml`'s own version (shown to the operator as "Hir-Login
+/// v0.1.0"). ProxyShard's manifest gates the engine download on this number
+/// (`min_launcher_version`); it has nothing to do with our own release count,
+/// so it is pinned here rather than tracking CARGO_PKG_VERSION. Bump it only
+/// if a future engine build ever requires a newer one (check runtime.json's
+/// `min_launcher_version`).
 fn launcher_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+    "2.0.3"
 }
 
 /// Whether this launcher is new enough for the engine build the manifest

@@ -12,6 +12,7 @@ export { ProfileRowActions } from "./ui/ProfileRowActions";
 export { BulkActionsBar } from "./ui/BulkActionsBar";
 export { NewProfileButton } from "./ui/NewProfileButton";
 export { ImportProfilesButton } from "./ui/ImportProfilesButton";
+export { ExportProfilesButton } from "./ui/ExportProfilesButton";
 export { FromTemplateButton } from "./ui/FromTemplateButton";
 export { ExtensionPicker } from "./ui/ExtensionPicker";
 export { ProxySelect } from "./ui/ProxySelect";

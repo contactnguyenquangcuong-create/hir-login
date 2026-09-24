@@ -5,3 +5,5 @@ dist/
 ui-kit/dist/
 ui-kit/node_modules/
 /src-tauri/target
+.DS_Store
+license-system/supabase/.temp/
