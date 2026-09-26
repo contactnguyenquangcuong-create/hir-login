@@ -9,7 +9,7 @@ import { toast } from "../../shared/model/toast";
 import { withUtm } from "../../shared/lib/utils";
 import type { Settings, ApiInfo, RemoteProfileStatus } from "../../entities/settings";
 import { HELPER_KINDS } from "../../entities/settings";
-import { settingsGet, settingsSave, settingsLoadError, apiInfo, apiRegenerateToken, mcpDownload, teamSyncList } from "../../entities/settings";
+import { settingsGet, settingsSave, settingsLoadError, apiInfo, apiRegenerateToken, mcpDownload, teamSyncList, teamServerStart, teamServerStop, teamServerStatus, teamInviteGenerate, teamInviteGenerateWithAuth, teamInviteJoin, tailscaleStatus } from "../../entities/settings";
 import { DataRootCard } from "../../features/manage-profiles/ui/DataRootCard";
 import { useT, useLang, LANG_OPTIONS, type Lang } from "../../shared/i18n";
 import type { LicenseInfo } from "../../entities/license";
@@ -313,6 +313,20 @@ export function SettingsPage() {
         <p className="m-0 mb-2 text-paragraph-xs text-text-soft-400">
           {t("settings.syncHelp1")}
         </p>
+        {/* --- Invite code join (for team members) --- */}
+        <div className="mb-3 flex flex-col gap-2 rounded-lg bg-bg-weak-50 p-3">
+          <span className="text-label-xs text-text-sub-600">Tham gia team bằng mã</span>
+          <p className="m-0 text-paragraph-xs text-text-soft-400">Dán mã team (HIR-XXXX-...) mà admin gửi để tự kết nối. Nếu chưa cài HirLogin Server, bấm nút cài bên dưới.</p>
+          <InviteJoinCard />
+        </div>
+
+        {/* --- Host mode: run embedded server --- */}
+        <div className="mb-3 flex flex-col gap-2 rounded-lg bg-bg-weak-50 p-3">
+          <span className="text-label-xs text-text-sub-600">Làm máy chủ (PC online 24/24)</span>
+          <p className="m-0 text-paragraph-xs text-text-soft-400">Bật để máy này làm HirLogin Server cho cả team. Chia sẻ mã team cho nhân sự.</p>
+          <TeamServerCard sync={s.sync} onTokenChange={(v) => setS({ ...s, sync: { ...s.sync!, token: v } })} />
+        </div>
+
         <div className="flex flex-col gap-3">
           <Switch
             label={t("settings.syncEnableLabel")}
@@ -326,7 +340,7 @@ export function SettingsPage() {
                 inputSize="small"
                 value={s.sync?.server_url ?? ""}
                 onChange={(e) => setS({ ...s, sync: { ...s.sync!, server_url: e.target.value } })}
-                placeholder="https://sync.yourcompany.com"
+                placeholder="http://100.x.x.x:8787  hoặc  https://sync.yourdomain.com"
               />
               <Input
                 label={t("settings.syncTokenLabel")}
@@ -401,5 +415,118 @@ export function SettingsPage() {
         </Button>
       </div>
     </section>
+  );
+}
+
+function InviteJoinCard() {
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [tsInstalled, setTsInstalled] = useState<boolean | null>(null);
+  useEffect(() => { tailscaleStatus().then((s) => setTsInstalled(s.installed)).catch(() => setTsInstalled(false)); }, []);
+  const join = async () => {
+    if (!code.trim()) return;
+    setBusy(true);
+    try {
+      const res = await teamInviteJoin(code.trim());
+      toast.ok(`Đã kết nối tới ${res.url}`);
+    } catch (e) { toast.err(String(e)); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex gap-2">
+        <Input inputSize="small" value={code} onChange={(e) => setCode(e.target.value)} placeholder="HIR-XXXX-XXXX-..." className="flex-1" />
+        <Button variant="primary" mode="filled" size="small" onClick={join} isLoading={busy}>Kết nối</Button>
+      </div>
+      {tsInstalled === false && (
+        <div className="flex items-center gap-2 text-paragraph-xs">
+          <span className="text-warning-base">Chưa cài HirLogin Server</span>
+          <Button variant="neutral" mode="stroke" size="small" onClick={() => openUrl("https://tailscale.com/download").catch(() => {})}>Cài HirLogin Server</Button>
+          <span className="text-text-soft-400">(cài xong dán mã team ở trên là tự kết nối)</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TeamServerCard({ sync, onTokenChange }: { sync: Settings["sync"]; onTokenChange: (v: string) => void }) {
+  const [running, setRunning] = useState(false);
+  const [port, setPort] = useState(8787);
+  const [ip, setIp] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [inviteCode, setInviteCode] = useState<string | null>(null);
+  const [tailscaleKey, setTailscaleKey] = useState("");
+
+  const refresh = async () => {
+    try {
+      const st = await teamServerStatus();
+      setRunning(st.running);
+      if (st.running) { setPort(st.port ?? 8787); setIp(st.tailscale_ip ?? null); }
+    } catch {}
+  };
+  useEffect(() => { refresh(); }, []);
+
+  const toggle = async () => {
+    setBusy(true);
+    try {
+      if (running) {
+        await teamServerStop();
+        setRunning(false);
+        setInviteCode(null);
+      } else {
+        const token = (sync?.token ?? "").trim();
+        if (token.length < 8) { toast.err("Nhập token (≥8 ký tự) trước khi bật server."); return; }
+        const actualPort = await teamServerStart(port, token);
+        setPort(actualPort);
+        setRunning(true);
+        const st = await teamServerStatus();
+        setIp(st.tailscale_ip ?? null);
+        const hostIp = st.tailscale_ip ?? "127.0.0.1";
+        const url = `http://${hostIp}:${actualPort}`;
+        const code = await teamInviteGenerate(url, token);
+        setInviteCode(code);
+      }
+    } catch (e) { toast.err(String(e)); }
+    finally { setBusy(false); }
+  };
+
+  const genCode = async () => {
+    const token = (sync?.token ?? "").trim();
+    if (!token) { toast.err("Chưa có token."); return; }
+    const hostIp = ip ?? "127.0.0.1";
+    const url = `http://${hostIp}:${port}`;
+    try {
+      const ak = tailscaleKey.trim() || undefined;
+      const code = ak ? await teamInviteGenerateWithAuth(url, token, ak) : await teamInviteGenerate(url, token);
+      setInviteCode(code);
+    } catch (e) { toast.err(String(e)); }
+  };
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center gap-2">
+        <Button variant={running ? "neutral" : "primary"} mode={running ? "stroke" : "filled"} size="small" onClick={toggle} isLoading={busy}>
+          {running ? "Tắt server" : "Bật server"}
+        </Button>
+        <span className={`text-paragraph-xs ${running ? "text-success-base" : "text-text-soft-400"}`}>{running ? `Đang chạy :${port}` : "Đang tắt"}</span>
+        {running && ip && <span className="mono text-paragraph-xs text-text-sub-600">Server IP: {ip}</span>}
+      </div>
+      {!running && (
+        <div className="flex items-center gap-2">
+          <Input inputSize="small" type="number" value={port} onChange={(e) => setPort(Number(e.target.value) || 8787)} label="Port" className="w-28" />
+          <Input inputSize="small" type="password" value={sync?.token ?? ""} onChange={(e) => onTokenChange(e.target.value)} placeholder="Token chung cho team" label="Token" className="flex-1" />
+        </div>
+      )}
+      {running && (
+        <div className="flex flex-col gap-1.5">
+          <div className="flex items-center gap-2">
+            <Input inputSize="small" value={tailscaleKey} onChange={(e) => setTailscaleKey(e.target.value)} placeholder="Tailscale Auth Key (để gộp vào mã team, tùy chọn)" label="Auth Key" className="flex-1" />
+          </div>
+          <Button variant="neutral" mode="stroke" size="small" onClick={genCode}>Tạo mã team</Button>
+          {inviteCode && <CopyField value={inviteCode} />}
+          <p className="m-0 text-paragraph-xs text-text-soft-400">Gửi mã này cho nhân sự. Nếu có Auth Key trong mã, nhân sự chỉ cần cài HirLogin Server + dán mã là tự vào mạng.</p>
+        </div>
+      )}
+    </div>
   );
 }

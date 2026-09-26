@@ -16,3 +16,12 @@ export const dataRootMigrate = (path: string) => invoke<number>("data_root_migra
 /** "Test connection": lists what the sync server currently knows. Throws if
  *  sync isn't enabled or the server/token is wrong. */
 export const teamSyncList = () => invoke<RemoteProfileStatus[]>("team_sync_list");
+
+export type TeamServerStatus = { running: boolean; port?: number; tailscale_ip?: string | null };
+export const teamServerStart = (port: number, token: string) => invoke<number>("team_server_start", { port, token });
+export const teamServerStop = () => invoke<void>("team_server_stop");
+export const teamServerStatus = () => invoke<TeamServerStatus>("team_server_status");
+export const teamInviteGenerate = (serverUrl: string, token: string) => invoke<string>("team_invite_generate", { serverUrl, token });
+export const teamInviteGenerateWithAuth = (serverUrl: string, token: string, authKey: string) => invoke<string>("team_invite_generate_with_auth", { serverUrl, token, authKey });
+export const teamInviteJoin = (code: string) => invoke<{ url: string; token: string }>("team_invite_join", { code });
+export const tailscaleStatus = () => invoke<{ installed: boolean; connected: boolean; ip: string | null }>("tailscale_status");

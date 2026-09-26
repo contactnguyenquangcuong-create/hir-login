@@ -28,6 +28,9 @@ mod modguard;
 mod runner;
 mod wasm;
 mod trash;
+mod team_server;
+mod team_invite;
+mod tailscale;
 
 use serde_json::Value;
 
@@ -1872,6 +1875,91 @@ async fn team_sync_list() -> Result<Vec<cloud_sync::RemoteProfileStatus>, String
     cloud_sync::list_remote().await.map_err(|e| e.to_string())
 }
 
+// ---- Team Server (embedded sync server) + Invite codes ----
+
+#[tauri::command]
+async fn team_server_start(port: u16, token: String) -> Result<u16, String> {
+    team_server::start(port, token).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn team_server_stop() -> Result<(), String> {
+    team_server::stop().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn team_server_status() -> Value {
+    if let Some((port, _)) = team_server::running_info() {
+        let ip = team_server::tailscale_ip();
+        serde_json::json!({"running": true, "port": port, "tailscale_ip": ip})
+    } else {
+        serde_json::json!({"running": false})
+    }
+}
+
+#[tauri::command]
+fn team_invite_generate(server_url: String, token: String) -> String {
+    team_invite::generate_invite_code(&server_url, &token)
+}
+
+#[tauri::command]
+fn team_invite_generate_with_auth(server_url: String, token: String, auth_key: String) -> String {
+    let ak = if auth_key.trim().is_empty() { None } else { Some(auth_key.trim()) };
+    team_invite::generate_invite_code_with_auth(&server_url, &token, ak)
+}
+
+#[tauri::command]
+fn team_invite_parse(code: String) -> Result<Value, String> {
+    let (url, token, _auth) = team_invite::parse_invite_code(&code).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({"url": url, "token": token}))
+}
+
+#[tauri::command]
+fn tailscale_status() -> Value {
+    serde_json::json!({
+        "installed": tailscale::is_installed(),
+        "connected": tailscale::is_connected(),
+        "ip": tailscale::tailscale_ip(),
+    })
+}
+
+#[tauri::command]
+async fn team_invite_join(code: String) -> Result<Value, String> {
+    let (url, token, auth_key) = team_invite::parse_invite_code(&code).map_err(|e| e.to_string())?;
+    // Auto-join Tailscale if auth key is embedded and not yet connected
+    if let Some(ak) = auth_key.as_deref().filter(|s| !s.is_empty()) {
+        if !tailscale::is_connected() {
+            // Best-effort: if tailscale not installed, tell user but don't block — they may use non-Tailscale URL
+            if tailscale::is_installed() {
+                tailscale::join_with_auth_key(ak).map_err(|e| format!("Tailscale join thất bại: {e}"))?;
+                // Give Tailscale a moment to get an IP
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
+    }
+    // Verify connectivity before saving
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .get(format!("{}/health", url.trim_end_matches('/')))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .map_err(|e| format!("không kết nối được tới máy chủ: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("máy chủ trả về lỗi: {}", resp.status()));
+    }
+    // Save to settings
+    let mut s = settings::load().map_err(|e| e.to_string())?;
+    s.sync.enabled = true;
+    s.sync.server_url = Some(url.clone());
+    s.sync.token = Some(token.clone());
+    settings::save(&s).map_err(|e| e.to_string())?;
+    Ok(serde_json::json!({"url": url, "token": token}))
+}
+
 // ---- Automation API ----
 
 /// API connection info: base URL + permanent Bearer JWT (no raw key exposed).
@@ -2432,6 +2520,14 @@ pub fn run() {
             settings_get,
             settings_save,
             team_sync_list,
+            team_server_start,
+            team_server_stop,
+            team_server_status,
+            team_invite_generate,
+            team_invite_generate_with_auth,
+            team_invite_parse,
+            team_invite_join,
+            tailscale_status,
             license_status,
             license_activate,
             license_info,
