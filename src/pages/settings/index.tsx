@@ -9,7 +9,7 @@ import { toast } from "../../shared/model/toast";
 import { withUtm } from "../../shared/lib/utils";
 import type { Settings, ApiInfo, RemoteProfileStatus } from "../../entities/settings";
 import { HELPER_KINDS } from "../../entities/settings";
-import { settingsGet, settingsSave, settingsLoadError, apiInfo, apiRegenerateToken, mcpDownload, teamSyncList, teamServerStart, teamServerStop, teamServerStatus, teamInviteGenerate, teamInviteGenerateWithAuth, teamInviteJoin, tailscaleStatus } from "../../entities/settings";
+import { settingsGet, settingsSave, settingsLoadError, apiInfo, apiRegenerateToken, mcpDownload, teamSyncList, teamSyncPull, teamServerStart, teamServerStop, teamServerStatus, teamInviteGenerate, teamInviteGenerateWithAuth, teamInviteJoin, tailscaleStatus } from "../../entities/settings";
 import { DataRootCard } from "../../features/manage-profiles/ui/DataRootCard";
 import { useT, useLang, LANG_OPTIONS, type Lang } from "../../shared/i18n";
 import type { LicenseInfo } from "../../entities/license";
@@ -379,6 +379,7 @@ function SyncSection({
   const [joinBusy, setJoinBusy] = useState(false);
   const [tsInstalled, setTsInstalled] = useState<boolean | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [pulling, setPulling] = useState(false);
 
   const isConnected = !!(sync?.enabled && sync?.server_url && sync?.token);
   const connectedUrl = sync?.server_url ?? "";
@@ -390,7 +391,8 @@ function SyncSection({
       if (st.running) { setServerPort(st.port ?? 8787); setServerIp(st.tailscale_ip ?? null); }
     } catch {}
   };
-  useEffect(() => { refreshServer(); tailscaleStatus().then((s) => setTsInstalled(s.installed)).catch(() => setTsInstalled(false)); }, []);
+  const refreshTs = () => tailscaleStatus().then((s) => setTsInstalled(s.installed)).catch(() => setTsInstalled(false));
+  useEffect(() => { refreshServer(); refreshTs(); }, []);
 
   const toggleServer = async () => {
     setServerBusy(true);
@@ -439,6 +441,7 @@ function SyncSection({
       onSyncChange({ enabled: true, server_url: res.url, token: res.token as string });
       toast.ok(`Đã kết nối tới ${res.url}`);
       setJoinCode("");
+      refreshTs();
     } catch (e) { toast.err(String(e)); }
     finally { setJoinBusy(false); }
   };
@@ -449,7 +452,18 @@ function SyncSection({
       {isConnected && !serverRunning && (
         <div className="flex items-center justify-between rounded-lg bg-success-alpha-10 px-3 py-2 ring-1 ring-inset ring-success-alpha-16">
           <span className="text-paragraph-xs text-success-base">Đã kết nối tới <span className="mono font-medium">{connectedUrl}</span></span>
-          <Button variant="neutral" mode="stroke" size="small" onClick={onDisconnect}>Ngắt</Button>
+          <div className="flex items-center gap-2">
+            <Button variant="neutral" mode="stroke" size="small" isLoading={pulling} onClick={async () => {
+              setPulling(true);
+              try {
+                const n = await teamSyncPull();
+                if (n === 0) toast.ok("Đã đồng bộ — không có profile mới");
+                else { toast.ok(`Đã kéo ${n} profile mới — tắt mở lại danh sách sẽ thấy`); window.dispatchEvent(new CustomEvent("store-changed")); }
+              } catch (e) { toast.err(String(e)); }
+              finally { setPulling(false); }
+            }}>Đồng bộ ngay</Button>
+            <Button variant="neutral" mode="stroke" size="small" onClick={onDisconnect}>Ngắt</Button>
+          </div>
         </div>
       )}
       {serverRunning && (
@@ -473,7 +487,7 @@ function SyncSection({
             <Input inputSize="small" value={joinCode} onChange={(e) => setJoinCode(e.target.value)} placeholder="HIR-XXXX-XXXX-..." className="flex-1" />
             <Button variant="primary" mode="filled" size="small" onClick={join} isLoading={joinBusy}>Kết nối</Button>
           </div>
-          {tsInstalled === false && (
+          {tsInstalled === false && !isConnected && (
             <div className="flex flex-wrap items-center gap-2 text-paragraph-xs">
               <span className="text-warning-base">Chưa cài HirLogin Server</span>
               <Button variant="neutral" mode="stroke" size="small" onClick={() => openUrl("https://tailscale.com/download").catch(() => {})}>Cài HirLogin Server</Button>

@@ -285,6 +285,39 @@ pub struct RemoteProfileStatus {
     pub updated_at: Option<String>,
 }
 
+/// Pulls any remote profiles that don't exist locally. Returns count pulled.
+pub async fn pull_missing() -> Result<usize> {
+    let Some((_cfg, base, token)) = active_config()? else {
+        anyhow::bail!("sync is not enabled");
+    };
+    let remote = list_remote().await?;
+    let c = client();
+    let mut pulled = 0usize;
+    for r in &remote {
+        // Skip if profile already exists locally
+        if crate::profile::load_raw(&r.id).is_ok() {
+            continue;
+        }
+        let resp = c
+            .get(format!("{base}/profiles/{}/bundle", r.id))
+            .bearer_auth(&token)
+            .send()
+            .await
+            .context("download bundle")?;
+        if !resp.status().is_success() {
+            eprintln!("[sync] pull {} failed: {}", r.id, resp.status());
+            continue;
+        }
+        let bytes = resp.bytes().await.context("read bundle")?;
+        if let Err(e) = apply_bundle(&r.id, &bytes) {
+            eprintln!("[sync] apply {} failed: {e}", r.id);
+            continue;
+        }
+        pulled += 1;
+    }
+    Ok(pulled)
+}
+
 /// Lists what the server knows about every profile it has seen. Used by the
 /// Settings page to prove the connection works before the operator relies on it.
 pub async fn list_remote() -> Result<Vec<RemoteProfileStatus>> {

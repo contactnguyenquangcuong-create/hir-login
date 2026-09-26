@@ -2245,6 +2245,11 @@ async fn team_sync_list() -> Result<Vec<cloud_sync::RemoteProfileStatus>, String
     cloud_sync::list_remote().await.map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn team_sync_pull() -> Result<usize, String> {
+    cloud_sync::pull_missing().await.map_err(|e| e.to_string())
+}
+
 // ---- Team Server (embedded sync server) + Invite codes ----
 
 #[tauri::command]
@@ -2892,6 +2897,7 @@ pub fn run() {
             settings_get,
             settings_save,
             team_sync_list,
+            team_sync_pull,
             team_server_start,
             team_server_stop,
             team_server_status,

@@ -24,4 +24,5 @@ export const teamServerStatus = () => invoke<TeamServerStatus>("team_server_stat
 export const teamInviteGenerate = (serverUrl: string, token: string) => invoke<string>("team_invite_generate", { serverUrl, token });
 export const teamInviteGenerateWithAuth = (serverUrl: string, token: string, authKey: string) => invoke<string>("team_invite_generate_with_auth", { serverUrl, token, authKey });
 export const teamInviteJoin = (code: string) => invoke<{ url: string; token: string }>("team_invite_join", { code });
+export const teamSyncPull = () => invoke<number>("team_sync_pull");
 export const tailscaleStatus = () => invoke<{ installed: boolean; connected: boolean; ip: string | null }>("tailscale_status");

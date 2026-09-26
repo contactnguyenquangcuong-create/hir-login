@@ -1,7 +1,21 @@
 use std::process::Command;
 
 pub fn is_installed() -> bool {
-    Command::new("tailscale").arg("version").output().map(|o| o.status.success()).unwrap_or(false)
+    if Command::new("tailscale").arg("version").output().map(|o| o.status.success()).unwrap_or(false) {
+        return true;
+    }
+    // macOS App Store bundle not in PATH
+    for p in [
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+        "/opt/homebrew/bin/tailscale",
+        "/usr/local/bin/tailscale",
+    ] {
+        if std::path::Path::new(p).exists() {
+            return true;
+        }
+    }
+    // fallback: 100.x IP means Tailscale is running
+    is_connected()
 }
 
 pub fn is_connected() -> bool {
