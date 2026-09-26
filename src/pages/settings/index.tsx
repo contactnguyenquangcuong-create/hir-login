@@ -310,80 +310,15 @@ export function SettingsPage() {
       </SettingsCard>
 
       <SettingsCard title={t("settings.syncTitle")}>
-        <p className="m-0 mb-2 text-paragraph-xs text-text-soft-400">
-          {t("settings.syncHelp1")}
-        </p>
-        {/* --- Invite code join (for team members) --- */}
-        <div className="mb-3 flex flex-col gap-2 rounded-lg bg-bg-weak-50 p-3">
-          <span className="text-label-xs text-text-sub-600">Tham gia team bằng mã</span>
-          <p className="m-0 text-paragraph-xs text-text-soft-400">Dán mã team (HIR-XXXX-...) mà admin gửi để tự kết nối. Nếu chưa cài HirLogin Server, bấm nút cài bên dưới.</p>
-          <InviteJoinCard />
-        </div>
-
-        {/* --- Host mode: run embedded server --- */}
-        <div className="mb-3 flex flex-col gap-2 rounded-lg bg-bg-weak-50 p-3">
-          <span className="text-label-xs text-text-sub-600">Làm máy chủ (PC online 24/24)</span>
-          <p className="m-0 text-paragraph-xs text-text-soft-400">Bật để máy này làm HirLogin Server cho cả team. Chia sẻ mã team cho nhân sự.</p>
-          <TeamServerCard sync={s.sync} onTokenChange={(v) => setS({ ...s, sync: { ...s.sync!, token: v } })} />
-        </div>
-
-        <div className="flex flex-col gap-3">
-          <Switch
-            label={t("settings.syncEnableLabel")}
-            checked={s.sync?.enabled ?? false}
-            onChange={(checked) => setS({ ...s, sync: { ...s.sync, enabled: checked, server_url: s.sync?.server_url ?? null, token: s.sync?.token ?? null, device_name: s.sync?.device_name ?? null, slim_local: s.sync?.slim_local ?? true } })}
-          />
-          {(s.sync?.enabled ?? false) && (
-            <>
-              <Input
-                label={t("settings.syncServerUrlLabel")}
-                inputSize="small"
-                value={s.sync?.server_url ?? ""}
-                onChange={(e) => setS({ ...s, sync: { ...s.sync!, server_url: e.target.value } })}
-                placeholder="http://100.x.x.x:8787  hoặc  https://sync.yourdomain.com"
-              />
-              <Input
-                label={t("settings.syncTokenLabel")}
-                inputSize="small"
-                type="password"
-                value={s.sync?.token ?? ""}
-                onChange={(e) => setS({ ...s, sync: { ...s.sync!, token: e.target.value } })}
-              />
-              <Switch
-                label={t("settings.syncSlimLocalLabel")}
-                checked={s.sync?.slim_local ?? true}
-                onChange={(checked) => setS({ ...s, sync: { ...s.sync!, slim_local: checked } })}
-              />
-              <p className="m-0 text-paragraph-xs text-text-soft-400">{t("settings.syncSlimLocalHint")}</p>
-              <Input
-                label={t("settings.syncDeviceNameLabel")}
-                inputSize="small"
-                value={s.sync?.device_name ?? ""}
-                onChange={(e) => setS({ ...s, sync: { ...s.sync!, device_name: e.target.value } })}
-                placeholder={t("settings.syncDeviceNamePlaceholder")}
-              />
-              <div className="flex items-center gap-2.5">
-                <Button variant="neutral" mode="stroke" size="small" onClick={testSync} isLoading={syncTesting}>
-                  {t("settings.syncTestBtn")}
-                </Button>
-                <span className="text-paragraph-xs text-text-soft-400">{t("settings.syncTestHint")}</span>
-              </div>
-              {syncRows && (
-                <div className="flex flex-col gap-1 rounded-lg bg-bg-weak-50 p-2.5 text-paragraph-xs">
-                  {syncRows.length === 0 && <span className="text-text-soft-400">{t("settings.syncNoProfilesYet")}</span>}
-                  {syncRows.map((r) => (
-                    <div key={r.id} className="flex items-center justify-between gap-2">
-                      <span className="mono truncate text-text-sub-600">{r.id}</span>
-                      <span className={r.locked ? "text-warning-base" : "text-success-base"}>
-                        {r.locked ? t("settings.syncLockedBy", { holder: r.holder ?? "?" }) : t("settings.syncFree")}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </>
-          )}
-        </div>
+        <p className="m-0 mb-3 text-paragraph-xs text-text-soft-400">{t("settings.syncHelp1")}</p>
+        <SyncSection
+          sync={s.sync}
+          onSyncChange={(patch) => setS({ ...s, sync: { ...s.sync!, ...patch } as typeof s.sync })}
+          onDisconnect={() => setS({ ...s, sync: { ...s.sync!, enabled: false, server_url: null, token: null } })}
+          syncTesting={syncTesting}
+          syncRows={syncRows}
+          testSync={testSync}
+        />
       </SettingsCard>
 
       <SettingsCard title={t("settings.mcpTitle")}>
@@ -418,113 +353,212 @@ export function SettingsPage() {
   );
 }
 
-function InviteJoinCard() {
-  const [code, setCode] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [tsInstalled, setTsInstalled] = useState<boolean | null>(null);
-  useEffect(() => { tailscaleStatus().then((s) => setTsInstalled(s.installed)).catch(() => setTsInstalled(false)); }, []);
-  const join = async () => {
-    if (!code.trim()) return;
-    setBusy(true);
-    try {
-      const res = await teamInviteJoin(code.trim());
-      toast.ok(`Đã kết nối tới ${res.url}`);
-    } catch (e) { toast.err(String(e)); }
-    finally { setBusy(false); }
-  };
-  return (
-    <div className="flex flex-col gap-2">
-      <div className="flex gap-2">
-        <Input inputSize="small" value={code} onChange={(e) => setCode(e.target.value)} placeholder="HIR-XXXX-XXXX-..." className="flex-1" />
-        <Button variant="primary" mode="filled" size="small" onClick={join} isLoading={busy}>Kết nối</Button>
-      </div>
-      {tsInstalled === false && (
-        <div className="flex items-center gap-2 text-paragraph-xs">
-          <span className="text-warning-base">Chưa cài HirLogin Server</span>
-          <Button variant="neutral" mode="stroke" size="small" onClick={() => openUrl("https://tailscale.com/download").catch(() => {})}>Cài HirLogin Server</Button>
-          <span className="text-text-soft-400">(cài xong dán mã team ở trên là tự kết nối)</span>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function TeamServerCard({ sync, onTokenChange }: { sync: Settings["sync"]; onTokenChange: (v: string) => void }) {
-  const [running, setRunning] = useState(false);
-  const [port, setPort] = useState(8787);
-  const [ip, setIp] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+function SyncSection({
+  sync,
+  onSyncChange,
+  onDisconnect,
+  syncTesting,
+  syncRows,
+  testSync,
+}: {
+  sync: Settings["sync"];
+  onSyncChange: (patch: Record<string, unknown>) => void;
+  onDisconnect: () => void;
+  syncTesting: boolean;
+  syncRows: RemoteProfileStatus[] | null;
+  testSync: () => void;
+}) {
+  const t = useT();
+  const [serverRunning, setServerRunning] = useState(false);
+  const [serverPort, setServerPort] = useState(8787);
+  const [serverIp, setServerIp] = useState<string | null>(null);
+  const [serverBusy, setServerBusy] = useState(false);
   const [inviteCode, setInviteCode] = useState<string | null>(null);
-  const [tailscaleKey, setTailscaleKey] = useState("");
+  const [authKey, setAuthKey] = useState("");
+  const [joinCode, setJoinCode] = useState("");
+  const [joinBusy, setJoinBusy] = useState(false);
+  const [tsInstalled, setTsInstalled] = useState<boolean | null>(null);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
 
-  const refresh = async () => {
+  const isConnected = !!(sync?.enabled && sync?.server_url && sync?.token);
+  const connectedUrl = sync?.server_url ?? "";
+
+  const refreshServer = async () => {
     try {
       const st = await teamServerStatus();
-      setRunning(st.running);
-      if (st.running) { setPort(st.port ?? 8787); setIp(st.tailscale_ip ?? null); }
+      setServerRunning(st.running);
+      if (st.running) { setServerPort(st.port ?? 8787); setServerIp(st.tailscale_ip ?? null); }
     } catch {}
   };
-  useEffect(() => { refresh(); }, []);
+  useEffect(() => { refreshServer(); tailscaleStatus().then((s) => setTsInstalled(s.installed)).catch(() => setTsInstalled(false)); }, []);
 
-  const toggle = async () => {
-    setBusy(true);
+  const toggleServer = async () => {
+    setServerBusy(true);
     try {
-      if (running) {
+      if (serverRunning) {
         await teamServerStop();
-        setRunning(false);
+        setServerRunning(false);
         setInviteCode(null);
       } else {
         const token = (sync?.token ?? "").trim();
-        if (token.length < 8) { toast.err("Nhập token (≥8 ký tự) trước khi bật server."); return; }
-        const actualPort = await teamServerStart(port, token);
-        setPort(actualPort);
-        setRunning(true);
+        if (token.length < 8) { toast.err("Nhập Token chung (≥8 ký tự) trước khi bật server."); return; }
+        const actualPort = await teamServerStart(serverPort, token);
+        setServerPort(actualPort);
+        setServerRunning(true);
         const st = await teamServerStatus();
-        setIp(st.tailscale_ip ?? null);
+        setServerIp(st.tailscale_ip ?? null);
         const hostIp = st.tailscale_ip ?? "127.0.0.1";
         const url = `http://${hostIp}:${actualPort}`;
         const code = await teamInviteGenerate(url, token);
         setInviteCode(code);
+        // host itself is also synced
+        onSyncChange({ enabled: true, server_url: url, token, device_name: sync?.device_name ?? null, slim_local: sync?.slim_local ?? true });
       }
     } catch (e) { toast.err(String(e)); }
-    finally { setBusy(false); }
+    finally { setServerBusy(false); }
   };
 
   const genCode = async () => {
     const token = (sync?.token ?? "").trim();
     if (!token) { toast.err("Chưa có token."); return; }
-    const hostIp = ip ?? "127.0.0.1";
-    const url = `http://${hostIp}:${port}`;
+    const hostIp = serverIp ?? "127.0.0.1";
+    const url = `http://${hostIp}:${serverPort}`;
     try {
-      const ak = tailscaleKey.trim() || undefined;
+      const ak = authKey.trim() || undefined;
       const code = ak ? await teamInviteGenerateWithAuth(url, token, ak) : await teamInviteGenerate(url, token);
       setInviteCode(code);
     } catch (e) { toast.err(String(e)); }
   };
 
+  const join = async () => {
+    if (!joinCode.trim()) return;
+    setJoinBusy(true);
+    try {
+      const res = await teamInviteJoin(joinCode.trim());
+      // team_invite_join already saved settings on disk — reflect in UI
+      onSyncChange({ enabled: true, server_url: res.url, token: res.token as string });
+      toast.ok(`Đã kết nối tới ${res.url}`);
+      setJoinCode("");
+    } catch (e) { toast.err(String(e)); }
+    finally { setJoinBusy(false); }
+  };
+
   return (
-    <div className="flex flex-col gap-2">
-      <div className="flex items-center gap-2">
-        <Button variant={running ? "neutral" : "primary"} mode={running ? "stroke" : "filled"} size="small" onClick={toggle} isLoading={busy}>
-          {running ? "Tắt server" : "Bật server"}
-        </Button>
-        <span className={`text-paragraph-xs ${running ? "text-success-base" : "text-text-soft-400"}`}>{running ? `Đang chạy :${port}` : "Đang tắt"}</span>
-        {running && ip && <span className="mono text-paragraph-xs text-text-sub-600">Server IP: {ip}</span>}
-      </div>
-      {!running && (
-        <div className="flex items-center gap-2">
-          <Input inputSize="small" type="number" value={port} onChange={(e) => setPort(Number(e.target.value) || 8787)} label="Port" className="w-28" />
-          <Input inputSize="small" type="password" value={sync?.token ?? ""} onChange={(e) => onTokenChange(e.target.value)} placeholder="Token chung cho team" label="Token" className="flex-1" />
+    <div className="flex flex-col gap-3">
+      {/* Connection badge */}
+      {isConnected && !serverRunning && (
+        <div className="flex items-center justify-between rounded-lg bg-success-alpha-10 px-3 py-2 ring-1 ring-inset ring-success-alpha-16">
+          <span className="text-paragraph-xs text-success-base">Đã kết nối tới <span className="mono font-medium">{connectedUrl}</span></span>
+          <Button variant="neutral" mode="stroke" size="small" onClick={onDisconnect}>Ngắt</Button>
         </div>
       )}
-      {running && (
-        <div className="flex flex-col gap-1.5">
-          <div className="flex items-center gap-2">
-            <Input inputSize="small" value={tailscaleKey} onChange={(e) => setTailscaleKey(e.target.value)} placeholder="Tailscale Auth Key (để gộp vào mã team, tùy chọn)" label="Auth Key" className="flex-1" />
+      {serverRunning && (
+        <div className="flex items-center gap-2 rounded-lg bg-primary-alpha-10 px-3 py-2 ring-1 ring-inset ring-primary-alpha-16">
+          <span className="text-paragraph-xs text-primary-base">Đang làm máy chủ :{serverPort}</span>
+          {serverIp && <span className="mono text-paragraph-xs text-text-sub-600">· {serverIp}</span>}
+          <span className="ml-auto text-paragraph-xs text-success-base">Đã kết nối</span>
+        </div>
+      )}
+
+      {/* Join by code — hidden when already hosting (host already has a code) */}
+      {!serverRunning && (
+        <div className="flex flex-col gap-2 rounded-lg bg-bg-weak-50 p-3">
+          <span className="text-label-xs text-text-sub-600">Tham gia team bằng mã</span>
+          {isConnected ? (
+            <p className="m-0 text-paragraph-xs text-text-soft-400">Đã tham gia. Mã mới sẽ ghi đè kết nối hiện tại.</p>
+          ) : (
+            <p className="m-0 text-paragraph-xs text-text-soft-400">Dán mã <span className="mono">HIR-XXXX-...</span> mà admin gửi để tự kết nối.</p>
+          )}
+          <div className="flex gap-2">
+            <Input inputSize="small" value={joinCode} onChange={(e) => setJoinCode(e.target.value)} placeholder="HIR-XXXX-XXXX-..." className="flex-1" />
+            <Button variant="primary" mode="filled" size="small" onClick={join} isLoading={joinBusy}>Kết nối</Button>
           </div>
-          <Button variant="neutral" mode="stroke" size="small" onClick={genCode}>Tạo mã team</Button>
-          {inviteCode && <CopyField value={inviteCode} />}
-          <p className="m-0 text-paragraph-xs text-text-soft-400">Gửi mã này cho nhân sự. Nếu có Auth Key trong mã, nhân sự chỉ cần cài HirLogin Server + dán mã là tự vào mạng.</p>
+          {tsInstalled === false && (
+            <div className="flex flex-wrap items-center gap-2 text-paragraph-xs">
+              <span className="text-warning-base">Chưa cài HirLogin Server</span>
+              <Button variant="neutral" mode="stroke" size="small" onClick={() => openUrl("https://tailscale.com/download").catch(() => {})}>Cài HirLogin Server</Button>
+              <span className="text-text-soft-400">(cài xong dán mã ở trên là tự kết nối)</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Host card */}
+      <div className="flex flex-col gap-2 rounded-lg bg-bg-weak-50 p-3">
+        <span className="text-label-xs text-text-sub-600">Làm máy chủ (PC online 24/24)</span>
+        <p className="m-0 text-paragraph-xs text-text-soft-400">Bật để máy này làm HirLogin Server cho cả team, sinh mã cho nhân sự.</p>
+        <div className="flex items-center gap-2">
+          <Button variant={serverRunning ? "neutral" : "primary"} mode={serverRunning ? "stroke" : "filled"} size="small" onClick={toggleServer} isLoading={serverBusy}>
+            {serverRunning ? "Tắt server" : "Bật server"}
+          </Button>
+          <span className={`text-paragraph-xs ${serverRunning ? "text-success-base" : "text-text-soft-400"}`}>{serverRunning ? `Đang chạy :${serverPort}` : "Đang tắt"}</span>
+          {serverRunning && serverIp && <span className="mono text-paragraph-xs text-text-sub-600">IP: {serverIp}</span>}
+        </div>
+        {!serverRunning && (
+          <div className="flex items-center gap-2">
+            <Input inputSize="small" type="number" value={serverPort} onChange={(e) => setServerPort(Number(e.target.value) || 8787)} label="Port" className="w-28" />
+            <Input inputSize="small" type="password" value={sync?.token ?? ""} onChange={(e) => onSyncChange({ token: e.target.value })} placeholder="Token chung (≥8 ký tự)" label="Token chung" className="flex-1" />
+          </div>
+        )}
+        {serverRunning && (
+          <div className="flex flex-col gap-1.5">
+            <Input inputSize="small" value={authKey} onChange={(e) => setAuthKey(e.target.value)} placeholder="Tailscale Auth Key (gộp vào mã, tùy chọn)" label="Auth Key" className="flex-1" />
+            <Button variant="neutral" mode="stroke" size="small" onClick={genCode}>Tạo mã team</Button>
+            {inviteCode && <CopyField value={inviteCode} />}
+            <p className="m-0 text-paragraph-xs text-text-soft-400">Gửi mã này cho nhân sự. Nếu có Auth Key trong mã, họ chỉ cần cài HirLogin Server + dán mã là tự vào mạng.</p>
+          </div>
+        )}
+      </div>
+
+      {/* Advanced — replaces the old standalone enabled/url/token block */}
+      <button type="button" onClick={() => setAdvancedOpen((v) => !v)} className="self-start text-paragraph-xs text-text-soft-400 hover:text-text-sub-600">
+        {advancedOpen ? "▾ Ẩn cấu hình nâng cao" : "▸ Cấu hình nâng cao"}
+      </button>
+      {advancedOpen && (
+        <div className="flex flex-col gap-3 rounded-lg border border-stroke-soft-200 p-3">
+          <p className="m-0 text-paragraph-xs text-text-soft-400">Các ô dưới tự điền khi dùng mã team. Chỉ chỉnh tay nếu bạn tự host sync server riêng.</p>
+          <Input
+            label={t("settings.syncServerUrlLabel")}
+            inputSize="small"
+            value={sync?.server_url ?? ""}
+            onChange={(e) => onSyncChange({ server_url: e.target.value, enabled: !!(e.target.value.trim() && (sync?.token ?? "").trim()) })}
+            placeholder="http://100.x.x.x:8787  hoặc  https://sync.yourdomain.com"
+          />
+          <Input
+            label={t("settings.syncTokenLabel")}
+            inputSize="small"
+            type="password"
+            value={sync?.token ?? ""}
+            onChange={(e) => onSyncChange({ token: e.target.value, enabled: !!(e.target.value.trim() && (sync?.server_url ?? "").trim()) })}
+          />
+          <Switch
+            label={t("settings.syncSlimLocalLabel")}
+            checked={sync?.slim_local ?? true}
+            onChange={(checked) => onSyncChange({ slim_local: checked })}
+          />
+          <p className="m-0 text-paragraph-xs text-text-soft-400">{t("settings.syncSlimLocalHint")}</p>
+          <Input
+            label={t("settings.syncDeviceNameLabel")}
+            inputSize="small"
+            value={sync?.device_name ?? ""}
+            onChange={(e) => onSyncChange({ device_name: e.target.value })}
+            placeholder={t("settings.syncDeviceNamePlaceholder")}
+          />
+          <div className="flex items-center gap-2.5">
+            <Button variant="neutral" mode="stroke" size="small" onClick={testSync} isLoading={syncTesting}>{t("settings.syncTestBtn")}</Button>
+            <span className="text-paragraph-xs text-text-soft-400">{t("settings.syncTestHint")}</span>
+          </div>
+          {syncRows && (
+            <div className="flex flex-col gap-1 rounded-lg bg-bg-weak-50 p-2.5 text-paragraph-xs">
+              {syncRows.length === 0 && <span className="text-text-soft-400">{t("settings.syncNoProfilesYet")}</span>}
+              {syncRows.map((r) => (
+                <div key={r.id} className="flex items-center justify-between gap-2">
+                  <span className="mono truncate text-text-sub-600">{r.id}</span>
+                  <span className={r.locked ? "text-warning-base" : "text-success-base"}>{r.locked ? t("settings.syncLockedBy", { holder: r.holder ?? "?" }) : t("settings.syncFree")}</span>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>
