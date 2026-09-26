@@ -4,18 +4,56 @@ export const AUTO_LANG = "auto";
 
 export const TIMEZONES = [
   AUTO_TZ,
-  "America/Chicago", "America/Denver", "America/Los_Angeles", "America/New_York",
-  "America/Sao_Paulo", "America/Toronto",
-  "Asia/Bangkok", "Asia/Dubai", "Asia/Hong_Kong", "Asia/Jakarta", "Asia/Kolkata",
-  "Asia/Seoul", "Asia/Shanghai", "Asia/Singapore", "Asia/Tokyo",
-  "Australia/Sydney",
-  "Europe/Amsterdam", "Europe/Athens", "Europe/Berlin", "Europe/Bucharest",
+  "UTC",
+  // Americas
+  "America/Anchorage", "America/Argentina/Buenos_Aires", "America/Bogota",
+  "America/Caracas", "America/Chicago", "America/Denver", "America/Halifax",
+  "America/Lima", "America/Los_Angeles", "America/Mexico_City", "America/New_York",
+  "America/Phoenix", "America/Santiago", "America/Sao_Paulo", "America/Toronto",
+  "America/Vancouver", "Pacific/Honolulu",
+  // Europe
+  "Europe/Amsterdam", "Europe/Athens", "Europe/Berlin", "Europe/Brussels",
+  "Europe/Bucharest", "Europe/Budapest", "Europe/Copenhagen", "Europe/Dublin",
   "Europe/Helsinki", "Europe/Istanbul", "Europe/Kyiv", "Europe/Lisbon",
-  "Europe/London", "Europe/Madrid", "Europe/Moscow", "Europe/Paris",
-  "Europe/Prague", "Europe/Rome", "Europe/Stockholm", "Europe/Warsaw",
-  "Europe/Vienna", "Europe/Zurich",
-  "Pacific/Auckland", "UTC",
+  "Europe/London", "Europe/Madrid", "Europe/Moscow", "Europe/Oslo",
+  "Europe/Paris", "Europe/Prague", "Europe/Rome", "Europe/Stockholm",
+  "Europe/Vienna", "Europe/Warsaw", "Europe/Zurich",
+  // Africa / Middle East
+  "Africa/Cairo", "Africa/Johannesburg", "Africa/Lagos", "Africa/Nairobi",
+  "Asia/Dubai", "Asia/Jerusalem", "Asia/Riyadh", "Asia/Tehran",
+  // Asia / Pacific
+  "Asia/Bangkok", "Asia/Colombo", "Asia/Dhaka", "Asia/Ho_Chi_Minh",
+  "Asia/Hong_Kong", "Asia/Jakarta", "Asia/Karachi", "Asia/Kathmandu",
+  "Asia/Kolkata", "Asia/Kuala_Lumpur", "Asia/Manila", "Asia/Phnom_Penh",
+  "Asia/Seoul", "Asia/Shanghai", "Asia/Singapore", "Asia/Taipei", "Asia/Tashkent",
+  "Asia/Tokyo", "Asia/Yangon",
+  "Australia/Adelaide", "Australia/Brisbane", "Australia/Melbourne",
+  "Australia/Perth", "Australia/Sydney", "Pacific/Auckland",
 ];
+
+/// Current UTC offset of an IANA zone in minutes (DST-aware, as of now).
+export function tzOffsetMinutes(tz: string): number {
+  try {
+    const part = new Intl.DateTimeFormat("en-US", { timeZone: tz, timeZoneName: "longOffset" })
+      .formatToParts(new Date())
+      .find((p) => p.type === "timeZoneName")?.value ?? "GMT";
+    const m = part.match(/GMT([+-])(\d{1,2})(?::(\d{2}))?/);
+    if (!m) return 0;
+    return (m[1] === "-" ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3] ?? 0));
+  } catch {
+    return 0;
+  }
+}
+
+/// "UTC+07:00" style label for a zone.
+export function tzOffsetLabel(tz: string): string {
+  const mins = tzOffsetMinutes(tz);
+  const sign = mins < 0 ? "-" : "+";
+  const abs = Math.abs(mins);
+  const hh = String(Math.floor(abs / 60)).padStart(2, "0");
+  const mm = String(abs % 60).padStart(2, "0");
+  return `UTC${sign}${hh}:${mm}`;
+}
 
 export const LOCALES: { code: string; label: string }[] = [
   { code: AUTO_LANG, label: "Auto (from proxy geo)" },

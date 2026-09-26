@@ -13,7 +13,7 @@ import { ExtensionPicker } from "./ExtensionPicker";
 import { ProxySelect } from "./ProxySelect";
 import { HOST_OS } from "../../../shared/lib/utils";
 import {
-  AUTO_TZ, AUTO_LANG, TIMEZONES, LOCALES,
+  AUTO_TZ, AUTO_LANG, TIMEZONES, LOCALES, tzOffsetMinutes, tzOffsetLabel,
   MEMORY_OPTIONS, CPU_OPTIONS, MEDIA_COUNT_OPTIONS, REFRESH_RATE_OPTIONS,
   SCREEN_RESOLUTIONS,
   OS_OPTIONS, matchesOs, osIdFor,
@@ -69,6 +69,17 @@ export function InlineEditor({
   const gpusForOs = useMemo(
     () => fingerprints.filter((fp) => matchesOs(fp.platform, osFilter)),
     [fingerprints, osFilter],
+  );
+
+  // "auto" first, then zones from west to east so a region is easy to find by offset.
+  const tzOptions = useMemo(
+    () => [
+      AUTO_TZ,
+      ...TIMEZONES.filter((z) => z !== AUTO_TZ).sort(
+        (a, b) => tzOffsetMinutes(a) - tzOffsetMinutes(b) || a.localeCompare(b),
+      ),
+    ],
+    [],
   );
 
   const hostScreen = useHostScreen();
@@ -258,9 +269,9 @@ export function InlineEditor({
                 value={f.timezone}
                 title={t("inlineEditor.timezoneLabel")}
                 onChange={(v) => u("timezone", v)}
-                options={TIMEZONES.map((tz) => ({
+                options={tzOptions.map((tz) => ({
                   value: tz,
-                  label: tz === AUTO_TZ ? t("inlineEditor.timezoneAuto") : tz,
+                  label: tz === AUTO_TZ ? t("inlineEditor.timezoneAuto") : `(${tzOffsetLabel(tz)}) ${tz}`,
                 }))}
               />
             </label>
