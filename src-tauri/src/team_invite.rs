@@ -35,11 +35,13 @@ pub fn generate_invite_code_with_auth(server_url: &str, token: &str, auth_key: O
 
 /// Returns (url, token, auth_key)
 pub fn parse_invite_code(code: &str) -> Result<(String, String, Option<String>)> {
-    let raw = code.trim().to_uppercase().replace(' ', "");
-    let stripped = raw
-        .strip_prefix(PREFIX)
-        .unwrap_or(raw.as_str())
-        .replace('-', "");
+    let trimmed = code.trim().replace(' ', "").replace(['\n', '\r', '\t'], "");
+    let without_prefix = if trimmed.to_uppercase().starts_with(PREFIX) {
+        trimmed[PREFIX.len()..].to_string()
+    } else {
+        trimmed.clone()
+    };
+    let stripped = without_prefix.replace('-', "");
     if stripped.is_empty() {
         bail!("mã team trống");
     }
@@ -75,10 +77,14 @@ mod tests {
     }
     #[test]
     fn parse_with_lowercase_and_spaces() {
+        // Prefix/dashes are case-insensitive; the base64 payload itself stays case-sensitive.
         let code = generate_invite_code("http://10.0.0.1:8787", "tok");
-        let lower = code.to_lowercase();
-        let (url, _, _) = parse_invite_code(&lower).unwrap();
+        let with_spaces = code.replace('-', " - ");
+        let prefixed_lower = format!("hir-{}", &code[4..]);
+        let (url, _, _) = parse_invite_code(&prefixed_lower).unwrap();
         assert_eq!(url, "http://10.0.0.1:8787");
+        let (url2, _, _) = parse_invite_code(&with_spaces).unwrap();
+        assert_eq!(url2, "http://10.0.0.1:8787");
     }
     #[test]
     fn old_code_still_parses() {
