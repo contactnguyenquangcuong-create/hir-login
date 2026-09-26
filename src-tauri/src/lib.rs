@@ -1064,6 +1064,376 @@ fn profile_clone(id: String) -> Result<profile::ProfileMeta, String> {
     profile::clone_profile(&id).map_err(|e| e.to_string())
 }
 
+#[derive(Debug, Clone, serde::Deserialize)]
+struct BulkRow {
+    name: String,
+    #[serde(default)]
+    folder: String,
+    #[serde(default)]
+    notes: String,
+    #[serde(default)]
+    proxy: String,
+    #[serde(default)]
+    color: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct BulkCreateItem {
+    index: usize,
+    ok: bool,
+    id: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct BulkParseRow {
+    row: usize,
+    name: String,
+    folder: String,
+    notes: String,
+    proxy: String,
+    color: String,
+    error: Option<String>,
+}
+
+fn is_valid_hex_color(s: &str) -> bool {
+    let t = s.trim();
+    if t.is_empty() { return true; }
+    let h = t.strip_prefix('#').unwrap_or(t);
+    h.len() == 6 && h.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn normalize_color(s: &str) -> Option<String> {
+    let t = s.trim();
+    if t.is_empty() { return None; }
+    let h = if t.starts_with('#') { t.to_string() } else { format!("#{t}") };
+    if is_valid_hex_color(&h) { Some(h.to_lowercase()) } else { None }
+}
+
+fn parse_csv_rows(text: &str) -> Vec<BulkParseRow> {
+    let mut out = Vec::new();
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    let mut in_q = false;
+    for ch in text.chars() {
+        if ch == '"' {
+            in_q = !in_q;
+            cur.push(ch);
+        } else if ch == '\n' && !in_q {
+            lines.push(cur.clone());
+            cur.clear();
+        } else if ch == '\r' {
+        } else {
+            cur.push(ch);
+        }
+    }
+    if !cur.trim().is_empty() || !lines.is_empty() && cur.len() > 0 {
+        lines.push(cur);
+    }
+    if lines.is_empty() { return out; }
+    let header = split_csv_line(&lines[0]);
+    let lower: Vec<String> = header.iter().map(|h| h.trim().to_lowercase()).collect();
+    let ci = |names: &[&str]| lower.iter().position(|h| names.contains(&h.as_str()));
+    let name_i = ci(&["name", "tên", "ten"]);
+    let folder_i = ci(&["folder", "thư mục", "thu muc", "group"]);
+    let notes_i = ci(&["notes", "note", "ghi chú", "ghi chu"]);
+    let proxy_i = ci(&["proxy"]);
+    let color_i = ci(&["color", "màu", "mau"]);
+    let start = if name_i.is_some() || proxy_i.is_some() || notes_i.is_some() { 1 } else { 0 };
+    for (idx, line) in lines.iter().skip(start).enumerate() {
+        if line.trim().is_empty() { continue; }
+        let cols = split_csv_line(line);
+        let g = |opt: Option<usize>| opt.and_then(|i| cols.get(i).map(|s| s.trim().to_string())).unwrap_or_default();
+        let name = g(name_i);
+        let folder = g(folder_i);
+        let notes = g(notes_i);
+        let proxy = g(proxy_i);
+        let color = g(color_i);
+        let row_num = start + idx + 1;
+        let mut err: Option<String> = None;
+        if name.is_empty() { err = Some("thiếu name".into()); }
+        else if !color.is_empty() && !is_valid_hex_color(&color) && !is_valid_hex_color(&format!("#{color}")) {
+            err = Some("color phải dạng #rrggbb".into());
+        } else if !proxy.is_empty() && proxy::parse_single(&proxy).is_none() {
+            err = Some("proxy không hợp lệ".into());
+        }
+        // also support headerless: if no header detected and 5 cols, map positionally
+        let (name, folder, notes, proxy, color) = if start == 0 && cols.len() >= 1 {
+            // positional fallback already handled by ci miss; use cols[0] as name if name_i None
+            if name_i.is_none() && !cols.is_empty() {
+                let n = cols[0].trim().to_string();
+                let f = cols.get(1).map(|s| s.trim().to_string()).unwrap_or_default();
+                let no = cols.get(2).map(|s| s.trim().to_string()).unwrap_or_default();
+                let pr = cols.get(3).map(|s| s.trim().to_string()).unwrap_or_default();
+                let co = cols.get(4).map(|s| s.trim().to_string()).unwrap_or_default();
+                let e = if n.is_empty() { Some("thiếu name".into()) } else { err.clone() };
+                out.push(BulkParseRow { row: row_num, name: n, folder: f, notes: no, proxy: pr, color: co, error: e });
+                continue;
+            }
+            (name, folder, notes, proxy, color)
+        } else { (name, folder, notes, proxy, color) };
+        out.push(BulkParseRow { row: row_num, name, folder, notes, proxy, color, error: err });
+    }
+    out
+}
+
+fn split_csv_line(line: &str) -> Vec<String> {
+    let mut cols = Vec::new();
+    let mut cur = String::new();
+    let mut in_q = false;
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '"' {
+            if in_q && chars.peek() == Some(&'"') { cur.push('"'); chars.next(); }
+            else { in_q = !in_q; }
+        } else if ch == ',' && !in_q {
+            cols.push(cur.trim().to_string());
+            cur.clear();
+        } else {
+            cur.push(ch);
+        }
+    }
+    cols.push(cur.trim().to_string());
+    // strip surrounding quotes
+    for c in &mut cols {
+        if c.len() >= 2 && c.starts_with('"') && c.ends_with('"') {
+            *c = c[1..c.len()-1].replace("\"\"", "\"");
+        }
+    }
+    cols
+}
+
+fn parse_xlsx_rows(path: &std::path::Path) -> Result<Vec<BulkParseRow>, String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("không đọc được .xlsx (zip): {e}"))?;
+    // shared strings
+    let mut shared: Vec<String> = Vec::new();
+    if let Ok(mut f) = zip.by_name("xl/sharedStrings.xml") {
+        let mut s = String::new();
+        let _ = f.read_to_string(&mut s);
+        // extract <t>...</t>
+        let mut rest = s.as_str();
+        while let Some(a) = rest.find("<t>") {
+            rest = &rest[a+3..];
+            if let Some(b) = rest.find("</t>") {
+                shared.push(rest[..b].to_string());
+                rest = &rest[b+4..];
+            } else { break; }
+        }
+        // if si has is via <t ...> with attrs, fallback regex for <t ...>
+        if shared.is_empty() {
+            // try splitting on <si>
+            for part in s.split("<si>") {
+                if let Some(a) = part.find("<t") {
+                    if let Some(gt) = part[a..].find('>') {
+                        let start = a + gt + 1;
+                        if let Some(b) = part[start..].find("</t>") {
+                            shared.push(part[start..start+b].to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut sheet_xml = String::new();
+    // try sheet1, else first worksheet
+    let mut found = false;
+    for name in ["xl/worksheets/sheet1.xml", "xl/worksheets/sheet.xml"] {
+        if let Ok(mut f) = zip.by_name(name) {
+            let _ = f.read_to_string(&mut sheet_xml);
+            found = true;
+            break;
+        }
+    }
+    if !found {
+        // find any worksheet
+        for i in 0..zip.len() {
+            let n = zip.by_index(i).map(|f| f.name().to_string()).unwrap_or_default();
+            if n.starts_with("xl/worksheets/sheet") && n.ends_with(".xml") {
+                if let Ok(mut f) = zip.by_name(&n) {
+                    let _ = f.read_to_string(&mut sheet_xml);
+                    found = true;
+                    break;
+                }
+            }
+        }
+    }
+    if !found || sheet_xml.is_empty() {
+        return Err("không tìm thấy sheet trong .xlsx".into());
+    }
+    // parse rows: collect Vec<Vec<String>>
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut rest = sheet_xml.as_str();
+    while let Some(a) = rest.find("<row") {
+        rest = &rest[a..];
+        let Some(end_tag) = rest.find("</row>") else { break; };
+        let row_xml = &rest[..end_tag+6];
+        rest = &rest[end_tag+6..];
+        let mut cols: Vec<String> = Vec::new();
+        let mut r2 = row_xml;
+        while let Some(cpos) = r2.find("<c ") .or_else(|| r2.find("<c>")) {
+            r2 = &r2[cpos..];
+            let tag_end = r2.find('>').unwrap_or(0);
+            let tag = &r2[..tag_end+1];
+            let is_s = tag.contains("t=\"s\"");
+            // find <v>value</v>
+            let v_start = r2.find("<v>").map(|p| p+3);
+            let v_end = r2.find("</v>");
+            let raw = match (v_start, v_end) {
+                (Some(s), Some(e)) if e > s => &r2[s..e],
+                _ => {
+                    // inlineStr <is><t>..</t></is>
+                    if let Some(a) = r2.find("<t>") {
+                        if let Some(b) = r2[a+3..].find("</t>") {
+                            &r2[a+3..a+3+b]
+                        } else { "" }
+                    } else { "" }
+                }
+            };
+            let val = if is_s {
+                raw.parse::<usize>().ok().and_then(|i| shared.get(i).cloned()).unwrap_or_else(|| raw.to_string())
+            } else {
+                // numeric or inline
+                if raw.contains('<') { String::new() } else { raw.to_string() }
+            };
+            cols.push(val);
+            // move past this <c>
+            if let Some(c_end) = r2.find("</c>") {
+                r2 = &r2[c_end+4..];
+            } else { break; }
+        }
+        rows.push(cols);
+    }
+    if rows.is_empty() { return Ok(Vec::new()); }
+    // header detection
+    let header: Vec<String> = rows[0].iter().map(|h| h.trim().to_lowercase()).collect();
+    let ci = |names: &[&str]| header.iter().position(|h| names.contains(&h.as_str()));
+    let name_i = ci(&["name", "tên", "ten"]);
+    let folder_i = ci(&["folder", "thư mục", "thu muc", "group"]);
+    let notes_i = ci(&["notes", "note", "ghi chú", "ghi chu"]);
+    let proxy_i = ci(&["proxy"]);
+    let color_i = ci(&["color", "màu", "mau"]);
+    let has_header = name_i.is_some() || proxy_i.is_some() || notes_i.is_some();
+    let start = if has_header { 1 } else { 0 };
+    let mut out = Vec::new();
+    for (idx, cols) in rows.iter().skip(start).enumerate() {
+        if cols.iter().all(|c| c.trim().is_empty()) { continue; }
+        let g = |opt: Option<usize>| opt.and_then(|i| cols.get(i).map(|s| s.trim().to_string())).unwrap_or_default();
+        let (name, folder, notes, proxy, color) = if has_header {
+            (g(name_i), g(folder_i), g(notes_i), g(proxy_i), g(color_i))
+        } else {
+            (
+                cols.get(0).map(|s| s.trim().to_string()).unwrap_or_default(),
+                cols.get(1).map(|s| s.trim().to_string()).unwrap_or_default(),
+                cols.get(2).map(|s| s.trim().to_string()).unwrap_or_default(),
+                cols.get(3).map(|s| s.trim().to_string()).unwrap_or_default(),
+                cols.get(4).map(|s| s.trim().to_string()).unwrap_or_default(),
+            )
+        };
+        let row_num = start + idx + 1;
+        let mut err: Option<String> = None;
+        if name.is_empty() { err = Some("thiếu name".into()); }
+        else if !color.is_empty() && !is_valid_hex_color(&color) && !is_valid_hex_color(&format!("#{color}")) {
+            err = Some("color phải dạng #rrggbb".into());
+        } else if !proxy.is_empty() && proxy::parse_single(&proxy).is_none() {
+            err = Some("proxy không hợp lệ".into());
+        }
+        out.push(BulkParseRow { row: row_num, name, folder, notes, proxy, color, error: err });
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+fn bulk_parse_file(path: String) -> Result<Vec<BulkParseRow>, String> {
+    let p = std::path::Path::new(&path);
+    if !p.exists() { return Err("file không tồn tại".into()); }
+    let ext = p.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+    if ext == "xlsx" {
+        parse_xlsx_rows(p)
+    } else {
+        let text = std::fs::read_to_string(p).map_err(|e| e.to_string())?;
+        Ok(parse_csv_rows(&text))
+    }
+}
+
+#[tauri::command]
+fn profile_bulk_create(rows: Vec<BulkRow>) -> Result<Vec<BulkCreateItem>, String> {
+    let fps = fingerprints::list_all().map_err(|e| e.to_string())?;
+    if fps.is_empty() { return Err("chưa có fingerprint nào — hãy thêm fingerprint trước".into()); }
+    let mut out = Vec::new();
+    for (idx, r) in rows.into_iter().enumerate() {
+        if r.name.trim().is_empty() {
+            out.push(BulkCreateItem { index: idx, ok: false, id: None, error: Some("thiếu name".into()) });
+            continue;
+        }
+        if !r.color.trim().is_empty() && normalize_color(&r.color).is_none() {
+            out.push(BulkCreateItem { index: idx, ok: false, id: None, error: Some("color phải dạng #rrggbb".into()) });
+            continue;
+        }
+        let proxy_id: Option<String> = if r.proxy.trim().is_empty() {
+            None
+        } else {
+            match proxy::parse_single(r.proxy.trim()) {
+                Some(entry) => match proxy::upsert_dedup(entry) {
+                    Ok(e) => Some(e.id),
+                    Err(e) => {
+                        out.push(BulkCreateItem { index: idx, ok: false, id: None, error: Some(format!("proxy lỗi: {e}")) });
+                        continue;
+                    }
+                },
+                None => {
+                    out.push(BulkCreateItem { index: idx, ok: false, id: None, error: Some("proxy không hợp lệ".into()) });
+                    continue;
+                }
+            }
+        };
+        // pick random fingerprint
+        let pick = {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut h = DefaultHasher::new();
+            r.name.hash(&mut h);
+            idx.hash(&mut h);
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos().hash(&mut h);
+            (h.finish() as usize) % fps.len()
+        };
+        let tpl_id = fps[pick].id.clone();
+        let mut merged = match merge_library_fingerprint(&tpl_id) {
+            Ok(m) => m,
+            Err(e) => {
+                out.push(BulkCreateItem { index: idx, ok: false, id: None, error: Some(e) });
+                continue;
+            }
+        };
+        merged.insert("name".into(), Value::String(r.name.trim().to_string()));
+        merged.insert("notes".into(), Value::String(r.notes.clone()));
+        if let Some(col) = normalize_color(&r.color) {
+            if let Some(meta) = merged.get_mut("_meta").and_then(|v| v.as_object_mut()) {
+                meta.insert("color".into(), Value::String(col));
+            }
+        }
+        if let Some(pid) = proxy_id.clone() {
+            if let Some(meta) = merged.get_mut("_meta").and_then(|v| v.as_object_mut()) {
+                meta.insert("proxy_id".into(), Value::String(pid));
+            }
+        }
+        if !r.folder.trim().is_empty() {
+            if let Some(meta) = merged.get_mut("_meta").and_then(|v| v.as_object_mut()) {
+                meta.insert("folder".into(), Value::String(r.folder.trim().to_string()));
+            }
+        }
+        // enrich picks random platform/hw/noise seed
+        enrich_new_config(None, &mut merged);
+        ensure_default_noise(&mut merged);
+        match save_profile_core(None, Value::Object(merged), false) {
+            Ok(meta) => out.push(BulkCreateItem { index: idx, ok: true, id: Some(meta.id), error: None }),
+            Err(e) => out.push(BulkCreateItem { index: idx, ok: false, id: None, error: Some(e) }),
+        }
+    }
+    Ok(out)
+}
+
 /// Import profiles verbatim under fresh ids; returns the count.
 #[tauri::command]
 fn profile_import(payloads: Vec<Value>) -> Result<usize, String> {
@@ -2482,6 +2852,8 @@ pub fn run() {
             profile_bind_proxy,
             profile_clone,
             profile_import,
+            bulk_parse_file,
+            profile_bulk_create,
             profile_export_folder,
             profile_import_folder,
             clipboard_write,

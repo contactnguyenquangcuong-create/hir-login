@@ -1,5 +1,6 @@
 import {
   BulkActionsBar,
+  BulkCreateButton,
   ImportProfilesButton,
   ExportProfilesButton,
   FromTemplateButton,
@@ -12,6 +13,7 @@ export function ProfileToolbar() {
     <div className="flex items-center flex-none gap-2">
       <BulkActionsBar />
       <ProfileFilterBar />
+      <BulkCreateButton />
       <ImportProfilesButton />
       <ExportProfilesButton />
       <FromTemplateButton />
