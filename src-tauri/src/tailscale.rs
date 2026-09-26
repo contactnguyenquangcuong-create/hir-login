@@ -1,36 +1,58 @@
 use std::process::Command;
 
-pub fn is_installed() -> bool {
+fn tailscale_bin() -> Option<String> {
+    // Try PATH first
     if Command::new("tailscale").arg("version").output().map(|o| o.status.success()).unwrap_or(false) {
-        return true;
+        return Some("tailscale".into());
     }
-    // macOS App Store bundle not in PATH
     for p in [
         "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
         "/opt/homebrew/bin/tailscale",
         "/usr/local/bin/tailscale",
     ] {
         if std::path::Path::new(p).exists() {
-            return true;
+            // verify it actually runs
+            if Command::new(p).arg("version").output().map(|o| o.status.success()).unwrap_or(false) {
+                return Some(p.into());
+            }
+            // App Store binary may be there but version fails — still return it for `up`
+            return Some(p.into());
         }
     }
-    // fallback: 100.x IP means Tailscale is running
-    is_connected()
+    None
 }
 
-pub fn is_connected() -> bool {
-    // tailscale status --json or simple check: tailscale ip -4 returns 100.x
-    if let Ok(out) = Command::new("tailscale").args(["ip", "-4"]).output() {
-        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        return s.starts_with("100.");
+fn has_100_ip() -> bool {
+    #[cfg(unix)]
+    {
+        if let Ok(out) = Command::new("sh").arg("-c").arg("ifconfig 2>/dev/null | grep -o '100\\.[0-9]*\\.[0-9]*\\.[0-9]*' | head -1").output() {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if s.starts_with("100.") && !s.is_empty() { return true; }
+        }
     }
     false
 }
 
+pub fn is_installed() -> bool {
+    tailscale_bin().is_some() || has_100_ip()
+}
+
+pub fn is_connected() -> bool {
+    if let Some(bin) = tailscale_bin() {
+        if let Ok(out) = Command::new(&bin).args(["ip", "-4"]).output() {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if s.starts_with("100.") { return true; }
+        }
+    }
+    has_100_ip()
+}
+
 pub fn tailscale_ip() -> Option<String> {
-    if let Ok(out) = Command::new("tailscale").args(["ip", "-4"]).output() {
-        let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if s.starts_with("100.") { return Some(s); }
+    if let Some(bin) = tailscale_bin() {
+        if let Ok(out) = Command::new(&bin).args(["ip", "-4"]).output() {
+            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if s.starts_with("100.") { return Some(s); }
+        }
     }
     #[cfg(unix)]
     {
@@ -50,10 +72,8 @@ pub fn join_with_auth_key(auth_key: &str) -> anyhow::Result<()> {
     if is_connected() {
         return Ok(());
     }
-    if !is_installed() {
-        anyhow::bail!("chưa cài Tailscale — tải tại https://tailscale.com/download");
-    }
-    let out = Command::new("tailscale")
+    let bin = tailscale_bin().ok_or_else(|| anyhow::anyhow!("chưa cài Tailscale — tải tại https://tailscale.com/download"))?;
+    let out = Command::new(&bin)
         .args(["up", "--authkey", auth_key.trim()])
         .output()
         .map_err(|e| anyhow::anyhow!("không chạy được tailscale: {e}"))?;

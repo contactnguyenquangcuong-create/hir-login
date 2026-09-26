@@ -2301,14 +2301,22 @@ fn tailscale_status() -> Value {
 #[tauri::command]
 async fn team_invite_join(code: String) -> Result<Value, String> {
     let (url, token, auth_key) = team_invite::parse_invite_code(&code).map_err(|e| e.to_string())?;
-    // Auto-join Tailscale if auth key is embedded and not yet connected
+    // Auto-join Tailscale if auth key is embedded and not yet connected.
+    // Hard failure blocks joining even though the binary path was wrong — the
+    // /health probe will give a clearer "không kết nối được" if the tailnet
+    // is really unreachable, so the join is best-effort.
+    let mut join_err: Option<String> = None;
     if let Some(ak) = auth_key.as_deref().filter(|s| !s.is_empty()) {
         if !tailscale::is_connected() {
-            // Best-effort: if tailscale not installed, tell user but don't block — they may use non-Tailscale URL
             if tailscale::is_installed() {
-                tailscale::join_with_auth_key(ak).map_err(|e| format!("Tailscale join thất bại: {e}"))?;
-                // Give Tailscale a moment to get an IP
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                if let Err(e) = tailscale::join_with_auth_key(ak) {
+                    join_err = Some(e.to_string());
+                    eprintln!("[launcher] tailscale join failed (will still try /health): {join_err:?}");
+                } else {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            } else {
+                join_err = Some("chưa cài Tailscale".into());
             }
         }
     }
@@ -2317,14 +2325,25 @@ async fn team_invite_join(code: String) -> Result<Value, String> {
         .timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|e| e.to_string())?;
-    let resp = client
+    let resp = match client
         .get(format!("{}/health", url.trim_end_matches('/')))
         .bearer_auth(&token)
         .send()
         .await
-        .map_err(|e| format!("không kết nối được tới máy chủ: {e}"))?;
+    {
+        Ok(r) => r,
+        Err(e) => {
+            if let Some(je) = join_err {
+                return Err(format!("không kết nối được tới máy chủ: {e} (Tailscale: {je})"));
+            }
+            return Err(format!("không kết nối được tới máy chủ: {e}"));
+        }
+    };
     if !resp.status().is_success() {
         return Err(format!("máy chủ trả về lỗi: {}", resp.status()));
+    }
+    if let Some(je) = join_err {
+        eprintln!("[launcher] connected despite join warning: {je}");
     }
     // Save to settings
     let mut s = settings::load().map_err(|e| e.to_string())?;
