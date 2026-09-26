@@ -187,8 +187,25 @@ pub fn list_all() -> Result<Vec<ProfileMeta>> {
             continue;
         }
         let path = entry.path();
-        let body = fs::read_to_string(&path)?;
+        // One unreadable file must not fail the whole listing: `?` here made a
+        // single momentarily-locked profile (Windows, mid-write by another
+        // thread) return an error and the whole table read as empty. Retry
+        // once, then skip just that profile.
+        let body = match fs::read_to_string(&path) {
+            Ok(b) => b,
+            Err(_) => {
+                std::thread::sleep(std::time::Duration::from_millis(60));
+                match fs::read_to_string(&path) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!("[launcher] profile {} unreadable, skipped: {e}", path.display());
+                        continue;
+                    }
+                }
+            }
+        };
         let Ok(mut stored): std::result::Result<StoredProfile, _> = serde_json::from_str(&body) else {
+            eprintln!("[launcher] profile {} is not valid JSON, skipped", path.display());
             continue;
         };
         // Hide ephemeral profiles.

@@ -61,19 +61,45 @@ pub struct ProxyStore {
     pub proxies: Vec<ProxyEntry>,
 }
 
+/// Serialises every read-modify-write of the proxy list. Without it two
+/// writers (an edit and the background country test that follows it) could each
+/// load the old list and the later save would drop the other's change.
+fn store_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Temp file + rename, so a reader never sees a half-written (or empty) file.
+fn write_atomic(path: &std::path::Path, body: &[u8]) -> Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, body)?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 pub fn load() -> Result<ProxyStore> {
     let path = store::proxies_path()?;
     if !path.exists() {
         return Ok(ProxyStore::default());
     }
     let body = fs::read_to_string(&path)?;
-    Ok(serde_json::from_str(&body).unwrap_or_default())
+    match serde_json::from_str(&body) {
+        Ok(s) => Ok(s),
+        Err(e) => {
+            // Never treat an unreadable list as an empty one: the next save would
+            // overwrite every proxy. Keep a copy and report the error instead.
+            let backup = path.with_extension("json.corrupt");
+            let _ = fs::copy(&path, &backup);
+            anyhow::bail!("proxies.json could not be read ({e}); a copy was kept at {}", backup.display())
+        }
+    }
 }
 
 fn save(s: &ProxyStore) -> Result<()> {
     let body = serde_json::to_string_pretty(s)?;
-    fs::write(store::proxies_path()?, body)?;
-    Ok(())
+    write_atomic(&store::proxies_path()?, body.as_bytes())
 }
 
 pub fn list() -> Result<Vec<ProxyEntry>> {
@@ -81,6 +107,7 @@ pub fn list() -> Result<Vec<ProxyEntry>> {
 }
 
 pub fn upsert(mut entry: ProxyEntry) -> Result<ProxyEntry> {
+    let _g = store_guard();
     if entry.id.is_empty() {
         entry.id = uuid::Uuid::new_v4().to_string();
     }
@@ -96,6 +123,7 @@ pub fn upsert(mut entry: ProxyEntry) -> Result<ProxyEntry> {
 
 /// Upsert that reuses an entry with the same kind/host/port/username.
 pub fn upsert_dedup(mut entry: ProxyEntry) -> Result<ProxyEntry> {
+    let _g = store_guard();
     let mut s = load()?;
     if let Some(existing) = s.proxies.iter().find(|p| {
         p.kind == entry.kind
@@ -114,6 +142,7 @@ pub fn upsert_dedup(mut entry: ProxyEntry) -> Result<ProxyEntry> {
 }
 
 pub fn delete(id: &str) -> Result<()> {
+    let _g = store_guard();
     let mut s = load()?;
     s.proxies.retain(|p| p.id != id);
     save(&s)?;
@@ -131,6 +160,15 @@ pub fn get(id: &str) -> Result<Option<ProxyEntry>> {
 
 /// SOCKS5/HTTP CONNECT probe; returns RTT in ms on success.
 pub async fn probe(entry: &ProxyEntry) -> Result<u128> {
+    // Only the connect had a timeout; every read after it could wait forever on
+    // a proxy that accepts the TCP connection but never answers the handshake
+    // (an HTTPS proxy declared as SOCKS5, for one) and hang the launch with it.
+    tokio::time::timeout(std::time::Duration::from_secs(12), probe_inner(entry))
+        .await
+        .context("proxy did not answer — check the proxy type (SOCKS5/HTTP/HTTPS)")?
+}
+
+async fn probe_inner(entry: &ProxyEntry) -> Result<u128> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
     use tokio::time::{timeout, Duration, Instant};
@@ -301,6 +339,7 @@ fn parse_one(line: &str, default_kind: &ProxyKind) -> Option<ProxyEntry> {
 
 /// Save many entries; returns count actually persisted (deduped on host:port:user).
 pub fn bulk_save(entries: Vec<ProxyEntry>) -> Result<usize> {
+    let _g = store_guard();
     let mut store_data = load()?;
     let mut added = 0usize;
     for mut e in entries {
@@ -368,6 +407,12 @@ pub async fn can_send_udp_directly() -> bool {
 }
 
 pub async fn probe_udp(entry: &ProxyEntry) -> Result<u128> {
+    tokio::time::timeout(std::time::Duration::from_secs(12), probe_udp_inner(entry))
+        .await
+        .context("proxy did not answer the UDP handshake")?
+}
+
+async fn probe_udp_inner(entry: &ProxyEntry) -> Result<u128> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpStream, UdpSocket};
     use tokio::time::{timeout, Duration, Instant};
@@ -758,13 +803,13 @@ fn load_history() -> Result<HistoryStore> {
         return Ok(HistoryStore::default());
     }
     let body = fs::read_to_string(&path)?;
+    // History is a log, not user data: an unreadable file just starts over.
     Ok(serde_json::from_str(&body).unwrap_or_default())
 }
 
 fn save_history(s: &HistoryStore) -> Result<()> {
     let body = serde_json::to_string_pretty(s)?;
-    fs::write(history_path()?, body)?;
-    Ok(())
+    write_atomic(&history_path()?, body.as_bytes())
 }
 
 /// Persist a test result; same-IP entries collapse, capped at 50 per proxy.
@@ -775,6 +820,7 @@ fn record_test(proxy_id: &str, mut snap: TestSnapshot) -> Result<TestSnapshot> {
         }
         return Ok(snap);
     }
+    let _g = store_guard();
     let mut hs = load_history()?;
     let entries = hs.by_proxy.entry(proxy_id.into()).or_default();
     if let Some(last) = entries.last_mut() {
@@ -881,6 +927,7 @@ pub async fn full_test(entry: &ProxyEntry) -> Result<TestSnapshot> {
     // forever — a proxy first seen as VN kept the VN flag after later tests
     // correctly reported PH.
     if !recorded.country_code.is_empty() {
+        let _g = store_guard();
         let mut store_data = load()?;
         if let Some(p) = store_data.proxies.iter_mut().find(|p| p.id == entry.id) {
             if p.country != recorded.country_code {
@@ -899,6 +946,7 @@ pub fn set_country_tag(id: &str, country_code: &str) {
     if country_code.is_empty() {
         return;
     }
+    let _g = store_guard();
     let Ok(mut store_data) = load() else { return };
     if let Some(p) = store_data.proxies.iter_mut().find(|p| p.id == id) {
         if p.country != country_code {
