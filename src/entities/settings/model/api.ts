@@ -26,3 +26,5 @@ export const teamInviteGenerateWithAuth = (serverUrl: string, token: string, aut
 export const teamInviteJoin = (code: string) => invoke<{ url: string; token: string }>("team_invite_join", { code });
 export const teamSyncPull = () => invoke<number>("team_sync_pull");
 export const tailscaleStatus = () => invoke<{ installed: boolean; connected: boolean; ip: string | null }>("tailscale_status");
+export const autostartGet = () => invoke<boolean>("autostart_get");
+export const autostartSet = (enabled: boolean) => invoke<void>("autostart_set", { enabled });

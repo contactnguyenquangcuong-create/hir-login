@@ -20,6 +20,7 @@ mod runtime;
 mod settings;
 mod store;
 mod sync_bus;
+mod autostart;
 mod automation;
 mod cdp;
 mod requests;
@@ -2231,6 +2232,10 @@ fn settings_save(mut value: settings::Settings) -> Result<(), String> {
     // and would reset it while the data sits on another disk.
     if let Ok(cur) = settings::load() {
         value.data_root = cur.data_root;
+        // Owned by team_server_start/stop, not the form: the form has no such
+        // field, so saving any setting used to reset it to "off" and the server
+        // stayed down after the next launch.
+        value.server_host = cur.server_host;
         if value.api_secret.is_empty() {
             value.api_secret = cur.api_secret;
         }
@@ -2254,12 +2259,32 @@ async fn team_sync_pull() -> Result<usize, String> {
 
 #[tauri::command]
 async fn team_server_start(port: u16, token: String) -> Result<u16, String> {
-    team_server::start(port, token).await.map_err(|e| e.to_string())
+    let actual = team_server::start(port, token.clone()).await.map_err(|e| e.to_string())?;
+    // Persist so setup() auto-resumes after reboot.
+    if let Ok(mut s) = settings::load() {
+        s.server_host.enabled = true;
+        s.server_host.port = actual;
+        s.server_host.token = Some(token.clone());
+        s.sync.token = Some(token.clone());
+        // keep existing sync url sane if possible
+        if s.sync.server_url.is_none() {
+            let ip = team_server::tailscale_ip().unwrap_or_else(|| "127.0.0.1".into());
+            s.sync.server_url = Some(format!("http://{ip}:{actual}"));
+            s.sync.enabled = true;
+        }
+        let _ = settings::save(&s);
+    }
+    Ok(actual)
 }
 
 #[tauri::command]
 fn team_server_stop() -> Result<(), String> {
-    team_server::stop().map_err(|e| e.to_string())
+    team_server::stop().map_err(|e| e.to_string())?;
+    if let Ok(mut s) = settings::load() {
+        s.server_host.enabled = false;
+        let _ = settings::save(&s);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -2288,6 +2313,12 @@ fn team_invite_parse(code: String) -> Result<Value, String> {
     let (url, token, _auth) = team_invite::parse_invite_code(&code).map_err(|e| e.to_string())?;
     Ok(serde_json::json!({"url": url, "token": token}))
 }
+
+#[tauri::command]
+fn autostart_get() -> bool { autostart::is_enabled() }
+
+#[tauri::command]
+fn autostart_set(enabled: bool) -> Result<(), String> { autostart::set_enabled(enabled).map_err(|e| e.to_string()) }
 
 #[tauri::command]
 fn tailscale_status() -> Value {
@@ -2925,6 +2956,8 @@ pub fn run() {
             team_invite_parse,
             team_invite_join,
             tailscale_status,
+            autostart_get,
+            autostart_set,
             license_status,
             license_activate,
             license_info,
@@ -3030,11 +3063,58 @@ pub fn run() {
                 }
             }
 
+            // --minimized flag from autostart: start hidden to tray (if enabled)
+            {
+                use tauri::Manager;
+                let minimized = std::env::args().any(|a| a == "--minimized");
+                if minimized {
+                    if let Some(w) = app.get_webview_window("main") {
+                        let _ = w.hide();
+                    }
+                }
+            }
+
             // Point the heavy directories wherever the operator moved them,
             // before anything reads a profile.
             if let Ok(s) = settings::load() {
                 if let Some(root) = s.data_root.as_deref().filter(|r| !r.is_empty()) {
                     store::set_data_root(Some(std::path::PathBuf::from(root)));
+                }
+            }
+
+            // Auto-resume hosted team server if the operator left "Làm máy chủ" on.
+            if let Ok(s) = settings::load() {
+                if s.server_host.enabled {
+                    let token = s.server_host.token.clone()
+                        .filter(|t| t.len() >= 8)
+                        .or_else(|| s.sync.token.clone().filter(|t| t.len() >= 8));
+                    if let Some(token) = token {
+                        let port = if s.server_host.port != 0 { s.server_host.port } else { 8787 };
+                        tauri::async_runtime::spawn(async move {
+                            // The port can still be held for a moment by the instance
+                            // that just quit (an update relaunch, a quick restart), so
+                            // try a few times before giving up.
+                            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                            for attempt in 1..=6 {
+                                match team_server::start(port, token.clone()).await {
+                                    Ok(actual) => {
+                                        eprintln!("[launcher] team server auto-resumed :{actual}");
+                                        return;
+                                    }
+                                    Err(e) if team_server::is_running() => {
+                                        let _ = e;
+                                        return;
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[launcher] team server auto-resume attempt {attempt} failed: {e}");
+                                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                    }
+                                }
+                            }
+                        });
+                    } else {
+                        eprintln!("[launcher] team server auto-resume skipped: no team token saved");
+                    }
                 }
             }
 

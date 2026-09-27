@@ -388,8 +388,45 @@ pub async fn start(port: u16, token: String) -> Result<u16> {
     // Small delay to let bind succeed
     tokio::time::sleep(Duration::from_millis(100)).await;
 
+    let _ = tokio::task::spawn_blocking(move || ensure_firewall_rule(actual_port));
+
     Ok(actual_port)
 }
+
+/// Windows Firewall drops inbound connections on the Tailscale interface (it is
+/// classed as a Public network) unless a rule allows the port, so other machines
+/// time out even though Tailscale itself is fine. Add one rule per port, once;
+/// creating it needs administrator rights, so it goes through a UAC prompt.
+/// Best effort: a refused prompt leaves the server running, just unreachable.
+#[cfg(target_os = "windows")]
+fn ensure_firewall_rule(port: u16) {
+    use std::os::windows::process::CommandExt;
+    const NO_WINDOW: u32 = 0x08000000;
+    let name = format!("Hir-Login Team Server {port}");
+    let exists = std::process::Command::new("netsh")
+        .args(["advfirewall", "firewall", "show", "rule", &format!("name={name}")])
+        .creation_flags(NO_WINDOW)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if exists {
+        return;
+    }
+    let add = format!(
+        "advfirewall firewall add rule name=\"{name}\" dir=in action=allow protocol=TCP localport={port} profile=any"
+    );
+    let ps = format!(
+        "Start-Process netsh -ArgumentList '{}' -Verb RunAs -WindowStyle Hidden -Wait",
+        add.replace('\'', "''")
+    );
+    let _ = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &ps])
+        .creation_flags(NO_WINDOW)
+        .status();
+}
+
+#[cfg(not(target_os = "windows"))]
+fn ensure_firewall_rule(_port: u16) {}
 
 pub fn stop() -> Result<()> {
     let tx = shutdown_cell().lock().unwrap().take();

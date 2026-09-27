@@ -9,7 +9,7 @@ import { toast } from "../../shared/model/toast";
 import { withUtm } from "../../shared/lib/utils";
 import type { Settings, ApiInfo, RemoteProfileStatus } from "../../entities/settings";
 import { HELPER_KINDS } from "../../entities/settings";
-import { settingsGet, settingsSave, settingsLoadError, apiInfo, apiRegenerateToken, mcpDownload, teamSyncList, teamSyncPull, teamServerStart, teamServerStop, teamServerStatus, teamInviteGenerate, teamInviteGenerateWithAuth, teamInviteJoin, tailscaleStatus } from "../../entities/settings";
+import { settingsGet, settingsSave, settingsLoadError, apiInfo, apiRegenerateToken, mcpDownload, teamSyncList, teamSyncPull, teamServerStart, teamServerStop, teamServerStatus, teamInviteGenerate, teamInviteGenerateWithAuth, teamInviteJoin, tailscaleStatus, autostartGet, autostartSet } from "../../entities/settings";
 import { DataRootCard } from "../../features/manage-profiles/ui/DataRootCard";
 import { useT, useLang, LANG_OPTIONS, type Lang } from "../../shared/i18n";
 import type { LicenseInfo } from "../../entities/license";
@@ -380,6 +380,7 @@ function SyncSection({
   const [tsInstalled, setTsInstalled] = useState<boolean | null>(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [pulling, setPulling] = useState(false);
+  const [autoStart, setAutoStart] = useState(false);
 
   const isConnected = !!(sync?.enabled && sync?.server_url && sync?.token);
   const connectedUrl = sync?.server_url ?? "";
@@ -392,7 +393,17 @@ function SyncSection({
     } catch {}
   };
   const refreshTs = () => tailscaleStatus().then((s) => setTsInstalled(s.installed)).catch(() => setTsInstalled(false));
-  useEffect(() => { refreshServer(); refreshTs(); }, []);
+  useEffect(() => { refreshServer(); refreshTs(); autostartGet().then(setAutoStart).catch(() => {}); }, []);
+
+  // After a restart the server resumes on its own, but the invite code lived only in
+  // this page's state — rebuild it (it is derived from URL + token, so it is the same code).
+  useEffect(() => {
+    const token = (sync?.token ?? "").trim();
+    if (!serverRunning || inviteCode || token.length < 8) return;
+    teamInviteGenerate(`http://${serverIp ?? "127.0.0.1"}:${serverPort}`, token)
+      .then(setInviteCode)
+      .catch(() => {});
+  }, [serverRunning, serverIp, serverPort, sync?.token, inviteCode]);
 
   const toggleServer = async () => {
     setServerBusy(true);
@@ -508,6 +519,11 @@ function SyncSection({
           <span className={`text-paragraph-xs ${serverRunning ? "text-success-base" : "text-text-soft-400"}`}>{serverRunning ? `Đang chạy :${serverPort}` : "Đang tắt"}</span>
           {serverRunning && serverIp && <span className="mono text-paragraph-xs text-text-sub-600">IP: {serverIp}</span>}
         </div>
+        <Switch
+          label="Tự mở khi bật máy (server tự chạy lại, thu nhỏ vào khay)"
+          checked={autoStart}
+          onChange={async (v) => { try { await autostartSet(v); setAutoStart(v); toast.ok(v ? "Sẽ tự mở khi bật máy" : "Đã tắt tự mở"); } catch (e) { toast.err(String(e)); } }}
+        />
         {!serverRunning && (
           <div className="flex items-center gap-2">
             <Input inputSize="small" type="number" value={serverPort} onChange={(e) => setServerPort(Number(e.target.value) || 8787)} label="Port" className="w-28" />

@@ -56,7 +56,31 @@ pub struct Settings {
     // ---- Team profile sync (self-hosted server, see cloud_sync.rs) ----
     #[serde(default)]
     pub sync: SyncConfig,
+    /// Server hosting for the team — "Làm máy chủ" mode on this machine.
+    #[serde(default)]
+    pub server_host: ServerHostConfig,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ServerHostConfig {
+    /// Whether "Làm máy chủ" is on — survives save/load so the host
+    /// auto-resumes after restart without the operator re-doing it.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Port the team server listens on.
+    #[serde(default = "default_server_port")]
+    pub port: u16,
+    /// Last generated HIR-... code (kept so the admin doesn't lose it).
+    #[serde(default)]
+    pub last_invite_code: Option<String>,
+    /// The team token this machine serves with. Kept here, not only in `sync`,
+    /// so the server still resumes after a reboot if the client-side sync
+    /// settings are edited or cleared.
+    #[serde(default)]
+    pub token: Option<String>,
+}
+
+fn default_server_port() -> u16 { 8787 }
 
 /// Points at a self-hosted sync server (see `sync-server/`). Off by default:
 /// an empty `server_url` or `token` disables checkout/checkin silently, so a
@@ -123,6 +147,7 @@ fn defaults() -> Settings {
         api_port: default_api_port(),
         api_secret: String::new(),
         sync: SyncConfig::default(),
+        server_host: ServerHostConfig::default(),
     }
 }
 
