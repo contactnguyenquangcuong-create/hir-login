@@ -3181,6 +3181,14 @@ pub fn run() {
                 }
             }
 
+            // Extensions imported before ids became canonical: merge duplicates.
+            std::thread::spawn(|| {
+                let n = extensions::canonicalize_all();
+                if n > 0 {
+                    eprintln!("[launcher] extensions: {n} renamed/merged to canonical ids");
+                }
+            });
+
             // Keep profiles in step with the team server without any click.
             tauri::async_runtime::spawn(cloud_sync::run_forever());
 
@@ -3286,6 +3294,7 @@ mod bulk_file_tests {
     /// rows: those would write the real proxies.json).
     #[test]
     fn bulk_create_makes_profiles() {
+        let _g = cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let tmp = std::env::temp_dir().join(format!("hir-bulk-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&tmp).unwrap();
         store::set_data_root(Some(tmp.clone()));

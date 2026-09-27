@@ -4,7 +4,7 @@ use axum::{
     extract::Path as AxumPath,
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::{get, post, put},
+    routing::{get, post},
     Json, Router,
 };
 use serde_json::{json, Value};
@@ -227,6 +227,7 @@ async fn list_profiles(
             "updatedAt": m.and_then(|v| v.get("updatedAt")).cloned().unwrap_or(Value::Null),
             "updatedBy": m.and_then(|v| v.get("updatedBy")).cloned().unwrap_or(Value::Null),
             "sizeBytes": m.and_then(|v| v.get("sizeBytes")).cloned().unwrap_or(Value::Null),
+            "deleted": m.and_then(|v| v.get("deleted")).and_then(|v| v.as_bool()).unwrap_or(false),
             "locked": held,
             "holder": if held { lock.get("holder").cloned().unwrap_or(Value::Null) } else { Value::Null },
             "lockExpiresAt": if held { lock.get("expiresAt").cloned().unwrap_or(Value::Null) } else { Value::Null },
@@ -371,6 +372,135 @@ async fn put_bundle(
     Json(json!({"ok": true, "sizeBytes": body.len()})).into_response()
 }
 
+/// A profile deleted on some machine: drop its bundle and lock and leave a
+/// tombstone (with a fresh `updatedAt`) so the other machines learn about it. A
+/// later upload of the same profile (a restore from the trash) overwrites it.
+async fn delete_profile(
+    headers: HeaderMap,
+    axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
+    AxumPath(id): AxumPath<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    if !check_auth(&headers, &state.token) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"ok":false,"error":"unauthorized"}))).into_response();
+    }
+    if !safe_id(&id) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"ok":false,"error":"bad id"}))).into_response();
+    }
+    let by = serde_json::from_slice::<Value>(&body)
+        .ok()
+        .and_then(|v| v.get("holder").and_then(|h| h.as_str().map(|s| s.to_string())))
+        .unwrap_or_default();
+    if let Ok(dir) = bundles_dir() {
+        let _ = std::fs::remove_file(dir.join(format!("{id}.zip")));
+    }
+    if let Ok(lp) = locks_path() {
+        let mut locks = load_json(&lp, json!({}));
+        if let Some(m) = locks.as_object_mut() {
+            m.remove(&id);
+        }
+        let _ = save_json_atomic(&lp, &locks);
+    }
+    if let Ok(mp) = meta_path() {
+        let mut meta = load_json(&mp, json!({}));
+        if let Some(m) = meta.as_object_mut() {
+            m.insert(id.clone(), json!({
+                "deleted": true,
+                "updatedAt": time_format(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()),
+                "updatedBy": by,
+            }));
+        }
+        let _ = save_json_atomic(&mp, &meta);
+    }
+    publish_event(&id);
+    Json(json!({"ok": true})).into_response()
+}
+
+// ---- shared library (extensions, custom fingerprints) ----
+
+fn safe_kind(kind: &str) -> bool {
+    kind == "fingerprints"
+}
+
+fn library_dir(kind: &str) -> Result<PathBuf> {
+    let d = server_data_dir()?.join("library").join(kind);
+    std::fs::create_dir_all(&d)?;
+    Ok(d)
+}
+
+async fn library_list(
+    headers: HeaderMap,
+    axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
+    AxumPath(kind): AxumPath<String>,
+) -> Response {
+    if !check_auth(&headers, &state.token) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"ok":false,"error":"unauthorized"}))).into_response();
+    }
+    if !safe_kind(&kind) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"ok":false,"error":"bad kind"}))).into_response();
+    }
+    let mut items: Vec<Value> = Vec::new();
+    if let Ok(dir) = library_dir(&kind) {
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if let Some(id) = name.strip_suffix(".bin") {
+                    let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+                    items.push(json!({"id": id, "sizeBytes": size}));
+                }
+            }
+        }
+    }
+    Json(json!({"ok": true, "items": items})).into_response()
+}
+
+async fn library_get(
+    headers: HeaderMap,
+    axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
+    AxumPath((kind, id)): AxumPath<(String, String)>,
+) -> Response {
+    if !check_auth(&headers, &state.token) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"ok":false,"error":"unauthorized"}))).into_response();
+    }
+    if !safe_kind(&kind) || !safe_id(&id) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"ok":false,"error":"bad request"}))).into_response();
+    }
+    let path = match library_dir(&kind) {
+        Ok(d) => d.join(format!("{id}.bin")),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok":false,"error":e.to_string()}))).into_response(),
+    };
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => (StatusCode::OK, Body::from(bytes)).into_response(),
+        Err(_) => (StatusCode::NOT_FOUND, Json(json!({"ok":false,"error":"not found"}))).into_response(),
+    }
+}
+
+async fn library_put(
+    headers: HeaderMap,
+    axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
+    AxumPath((kind, id)): AxumPath<(String, String)>,
+    body: axum::body::Bytes,
+) -> Response {
+    if !check_auth(&headers, &state.token) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"ok":false,"error":"unauthorized"}))).into_response();
+    }
+    if !safe_kind(&kind) || !safe_id(&id) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"ok":false,"error":"bad request"}))).into_response();
+    }
+    if body.len() > MAX_BUNDLE_BYTES {
+        return (StatusCode::PAYLOAD_TOO_LARGE, Json(json!({"ok":false,"error":"too large"}))).into_response();
+    }
+    let path = match library_dir(&kind) {
+        Ok(d) => d.join(format!("{id}.bin")),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok":false,"error":e.to_string()}))).into_response(),
+    };
+    if let Err(e) = tokio::fs::write(&path, &body).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok":false,"error":e.to_string()}))).into_response();
+    }
+    publish_event(&format!("lib:{kind}/{id}"));
+    Json(json!({"ok": true})).into_response()
+}
+
 fn time_format(secs: u64) -> String {
     // Format as ISO 8601 using simple calculation — avoid extra dep
     // Use chrono-like output: 2026-09-26T12:34:56Z
@@ -431,6 +561,9 @@ pub async fn start(port: u16, token: String) -> Result<u16> {
         .route("/profiles/:id/unlock", post(unlock_profile))
         .route("/profiles/:id/bundle", get(get_bundle).put(put_bundle))
         .route("/events/wait", get(wait_events))
+        .route("/profiles/:id/delete", post(delete_profile))
+        .route("/library/:kind", get(library_list))
+        .route("/library/:kind/:id", get(library_get).put(library_put))
         .with_state(state.clone());
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await

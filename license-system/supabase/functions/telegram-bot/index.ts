@@ -11,7 +11,7 @@
 // Supabase for every Edge Function — you do not set those yourself.
 //
 // Commands (DM the bot, admin only — everyone else is ignored):
-//   /taomoi [ghi chú]  Create a key, optionally tagged with a note.
+//   /taomoi [số lượng] [ghi chú]  Create 1 key, or N keys at once (max 100), optionally tagged.
 //   /ds [n]            Show the n most recent keys (default 10).
 //   /khoa <key>        Immediately invalidate a key, even if activated.
 //   /bokhoa <key>      Undo a revoke.
@@ -27,6 +27,9 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 
 const TG_API = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}`;
+
+// Telegram caps a message at 4096 characters; 100 keys stay well under it.
+const MAX_KEYS_PER_CALL = 100;
 
 function randomKey(): string {
   // Avoids 0/O/1/I/L so a human typing it from a screenshot doesn't guess wrong.
@@ -68,15 +71,30 @@ async function sb(path: string, init: RequestInit & { prefer?: string } = {}) {
   return text ? JSON.parse(text) : null;
 }
 
-async function cmdNewKey(chatId: number, note: string) {
-  const key = randomKey();
+/** `/taomoi` = 1 key, `/taomoi 15` = 15 keys, `/taomoi 15 ghi chú` or `/taomoi ghi chú` add a note. */
+async function cmdNewKey(chatId: number, arg: string) {
+  const m = arg.trim().match(/^(\d+)(?:\s+(.*))?$/);
+  const count = m ? Math.min(Math.max(parseInt(m[1], 10), 1), MAX_KEYS_PER_CALL) : 1;
+  const note = (m ? (m[2] ?? "") : arg).trim();
+  if (m && parseInt(m[1], 10) > MAX_KEYS_PER_CALL) {
+    await sendMessage(chatId, `Tối đa ${MAX_KEYS_PER_CALL} key mỗi lần — sẽ tạo ${MAX_KEYS_PER_CALL} key.`);
+  }
+  const keys = new Set<string>();
+  while (keys.size < count) keys.add(randomKey());
+  const list = [...keys];
   await sb("license_keys", {
     method: "POST",
-    body: JSON.stringify({ key, note: note || null, created_by: chatId }),
+    body: JSON.stringify(list.map((key) => ({ key, note: note || null, created_by: chatId }))),
   });
+  const noteLine = note ? `\nGhi chú: ${note}` : "";
+  const tail = "\n\nGửi key cho khách — key tự khoá vào máy đầu tiên kích hoạt nó.";
+  if (list.length === 1) {
+    await sendMessage(chatId, `🔑 Key mới:\n<code>${list[0]}</code>${noteLine}${tail}`);
+    return;
+  }
   await sendMessage(
     chatId,
-    `🔑 Key mới:\n<code>${key}</code>${note ? `\nGhi chú: ${note}` : ""}\n\nGửi key này cho khách — key sẽ tự khoá vào máy đầu tiên kích hoạt nó.`,
+    `🔑 Đã tạo ${list.length} key mới:\n${list.map((k) => `<code>${k}</code>`).join("\n")}${noteLine}${tail}`,
   );
 }
 
@@ -163,7 +181,7 @@ async function cmdDelete(chatId: number, key: string) {
 }
 
 const HELP = [
-  "/taomoi [ghi chú] — tạo key mới",
+  "/taomoi [số lượng] [ghi chú] — tạo key mới (vd /taomoi 15 = tạo 15 key)",
   "/ds [số lượng] — xem key gần đây (mặc định 10)",
   "/khoa <key> — khoá (thu hồi) 1 key",
   "/bokhoa <key> — bỏ khoá",

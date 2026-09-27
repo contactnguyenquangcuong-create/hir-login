@@ -417,6 +417,8 @@ fn save_raw_locked(stored: &mut StoredProfile) -> Result<()> {
     let path = path_for(&stored.meta.id)?;
     let body = serde_json::to_string_pretty(stored)?;
     write_atomic(&path, body.as_bytes())?;
+    // A change made here (edit, pin, folder, colour) should reach the team now.
+    crate::cloud_sync::kick();
     Ok(())
 }
 

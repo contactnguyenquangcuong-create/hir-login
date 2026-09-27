@@ -181,6 +181,32 @@ fn device_name(cfg: &SyncConfig) -> String {
         .unwrap_or_else(|| "unknown-device".into())
 }
 
+/// What travels between machines besides `trash::KEEP` (the account data a
+/// restored-from-trash profile needs): the open tabs and the history-adjacent
+/// state, so a profile picks up where it was left. Caches stay out.
+const SYNC_EXTRA: &[&str] = &[
+    "Default/Sessions",
+    "Default/Session Storage",
+    "Default/Top Sites",
+    "Default/Shortcuts",
+    "Default/Network Action Predictor",
+    "Default/Account Web Data",
+    "Default/Extension Rules",
+    "Default/Extension Scripts",
+    "Default/WebStorage",
+    "Default/Storage",
+    "Default/DIPS",
+    // Extensions installed inside the profile and the data they keep.
+    "Default/Extensions",
+    "Default/Managed Extension Settings",
+    "Default/Sync Extension Settings",
+    "Default/Local App Settings",
+];
+
+fn synced_paths() -> impl Iterator<Item = &'static str> {
+    trash::KEEP.iter().copied().chain(SYNC_EXTRA.iter().copied())
+}
+
 /// The proxy a profile is bound to, if any. It travels inside the bundle so a
 /// profile arriving on another machine finds its proxy there too, instead of
 /// pointing at an id that machine has never heard of.
@@ -219,12 +245,22 @@ fn build_bundle(id: &str) -> Result<Vec<u8>> {
 
         let udd = store::user_data_root()?.join(id);
         if udd.exists() {
-            for rel in trash::KEEP {
+            for rel in synced_paths() {
                 let src = udd.join(rel);
                 if src.is_dir() {
                     add_dir(&mut zip, &src, &format!("user-data/{rel}"), opts)?;
                 } else if src.is_file() {
                     add_file(&mut zip, &src, &format!("user-data/{rel}"), opts)?;
+                }
+            }
+        }
+        // The extensions this profile uses travel with it, so it never depends on
+        // a shared library on the server: each one is a folder named by its id.
+        if let Ok(ext_root) = store::extensions_dir() {
+            for ext_id in &stored.meta.extensions {
+                let dir = ext_root.join(ext_id);
+                if dir.is_dir() {
+                    add_dir(&mut zip, &dir, &format!("extensions/{ext_id}"), opts)?;
                 }
             }
         }
@@ -271,8 +307,32 @@ fn apply_bundle(id: &str, bytes: &[u8]) -> Result<()> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
     let udd = store::user_data_root()?.join(id);
     fs::create_dir_all(&udd)?;
+    // Several of these are databases made of many files (Local Storage,
+    // IndexedDB, Session Storage, Sessions). Writing the bundle's files over a
+    // local copy mixes two generations of the same database — a stale manifest
+    // pointing at the wrong table files — so every path the bundle carries is
+    // cleared first and then written whole.
+    let mut roots: std::collections::HashSet<&'static str> = std::collections::HashSet::new();
+    for i in 0..zip.len() {
+        let Ok(f) = zip.by_index(i) else { continue };
+        let name = f.name().replace('\\', "/");
+        let Some(sub) = name.strip_prefix("user-data/") else { continue };
+        if let Some(root) = synced_paths().find(|r| sub == *r || sub.starts_with(&format!("{r}/"))) {
+            roots.insert(root);
+        }
+    }
+    for root in roots {
+        let p = udd.join(root);
+        if p.is_dir() {
+            let _ = fs::remove_dir_all(&p);
+        } else if p.is_file() {
+            let _ = fs::remove_file(&p);
+        }
+    }
     // Some(None) = the bundle says "no proxy"; None = an older bundle that says nothing.
     let mut proxy_in_bundle: Option<Option<crate::proxy::ProxyEntry>> = None;
+    // extension id -> (relative path, bytes) of every file the bundle carries for it
+    let mut bundled_ext: HashMap<String, Vec<(String, Vec<u8>)>> = HashMap::new();
     for i in 0..zip.len() {
         let mut f = zip.by_index(i)?;
         let Some(rel) = f.enclosed_name() else { continue };
@@ -282,6 +342,14 @@ fn apply_bundle(id: &str, bytes: &[u8]) -> Result<()> {
         }
         let mut buf = Vec::with_capacity(f.size() as usize);
         f.read_to_end(&mut buf)?;
+        if let Some(rest) = rel_str.strip_prefix("extensions/") {
+            if let Some((ext_id, sub)) = rest.split_once('/') {
+                if !ext_id.is_empty() && !ext_id.starts_with('.') && !ext_id.contains("..") {
+                    bundled_ext.entry(ext_id.to_string()).or_default().push((sub.to_string(), buf));
+                }
+            }
+            continue;
+        }
         if rel_str == "proxy.json" {
             if let Ok(p) = serde_json::from_slice::<Option<crate::proxy::ProxyEntry>>(&buf) {
                 proxy_in_bundle = Some(p);
@@ -293,9 +361,24 @@ fn apply_bundle(id: &str, bytes: &[u8]) -> Result<()> {
             // machine's own _meta (folder, pin, extensions) as-is so a pull
             // never reshuffles local organisation.
             if let Ok(remote) = serde_json::from_slice::<crate::profile::StoredProfile>(&buf) {
+                let existed = crate::profile::load_raw(id).is_ok();
                 let mut local = crate::profile::load_raw(id).unwrap_or(remote.clone());
                 local.config = remote.config;
+                // How the team organises the profile follows it across machines.
+                local.meta.extensions = remote.meta.extensions.clone();
+                local.meta.color = remote.meta.color.clone();
+                local.meta.android_media = remote.meta.android_media;
                 let _ = crate::profile::save_raw(&mut local);
+                if existed {
+                    // `save_raw` keeps this machine's pin and folder on purpose
+                    // (they have their own setters), so set them explicitly.
+                    if crate::profile::load_raw(id).map(|l| l.meta.pinned).ok() != Some(remote.meta.pinned) {
+                        let _ = crate::profile::set_pin(id, remote.meta.pinned);
+                    }
+                    if crate::profile::load_raw(id).map(|l| l.meta.folder).ok().as_deref() != Some(remote.meta.folder.as_str()) {
+                        let _ = crate::profile::set_folder(id, &remote.meta.folder);
+                    }
+                }
             }
             continue;
         }
@@ -306,6 +389,10 @@ fn apply_bundle(id: &str, bytes: &[u8]) -> Result<()> {
         }
         fs::write(out, buf)?;
     }
+    install_bundled_extensions(bundled_ext);
+    // A bundle from an older build may carry random-id extensions; fold them into
+    // the ones already here so nothing is installed twice.
+    crate::extensions::canonicalize_all();
     // Bring the proxy across and point the profile at it (same id, so the
     // binding survives). Remote wins: the profile's proxy is part of what the
     // team shares.
@@ -327,6 +414,66 @@ fn apply_bundle(id: &str, bytes: &[u8]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Puts the extensions that came in a bundle into this machine's extension
+/// folder. An extension already here with the same files is left alone; a
+/// different copy (an updated version) is replaced whole.
+fn install_bundled_extensions(bundled: HashMap<String, Vec<(String, Vec<u8>)>>) {
+    let Ok(root) = store::extensions_dir() else { return };
+    for (id, files) in bundled {
+        let dst = root.join(&id);
+        let wanted: std::collections::BTreeMap<&str, usize> =
+            files.iter().map(|(p, b)| (p.as_str(), b.len())).collect();
+        let same = dst.is_dir() && {
+            let mut have: std::collections::BTreeMap<String, usize> = Default::default();
+            fn walk(base: &Path, dir: &Path, out: &mut std::collections::BTreeMap<String, usize>) {
+                if let Ok(rd) = fs::read_dir(dir) {
+                    for e in rd.flatten() {
+                        let p = e.path();
+                        if p.is_dir() {
+                            walk(base, &p, out);
+                        } else if let Ok(m) = e.metadata() {
+                            let rel = p.strip_prefix(base).unwrap_or(&p).to_string_lossy().replace('\\', "/");
+                            out.insert(rel, m.len() as usize);
+                        }
+                    }
+                }
+            }
+            walk(&dst, &dst, &mut have);
+            have.len() == wanted.len() && have.iter().all(|(k, v)| wanted.get(k.as_str()) == Some(v))
+        };
+        if same {
+            continue;
+        }
+        // Never let an older copy from another machine replace a newer one here.
+        if dst.is_dir() {
+            let bundle_version = files
+                .iter()
+                .filter(|(p, _)| p == "manifest.json" || p.ends_with("/manifest.json"))
+                .min_by_key(|(p, _)| p.matches('/').count())
+                .and_then(|(_, b)| serde_json::from_slice::<serde_json::Value>(b).ok())
+                .and_then(|m| m.get("version").and_then(|v| v.as_str().map(String::from)))
+                .unwrap_or_default();
+            if crate::extensions::version_lt(&bundle_version, &crate::extensions::version_of(&dst)) {
+                continue;
+            }
+        }
+        let tmp = root.join(format!(".incoming-{id}"));
+        let _ = fs::remove_dir_all(&tmp);
+        let wrote = files.iter().all(|(rel, bytes)| {
+            let out = tmp.join(rel);
+            out.parent().map_or(true, |p| fs::create_dir_all(p).is_ok()) && fs::write(out, bytes).is_ok()
+        });
+        if wrote {
+            let _ = fs::remove_dir_all(&dst);
+            if fs::rename(&tmp, &dst).is_err() {
+                let _ = fs::remove_dir_all(&tmp);
+            }
+        } else {
+            let _ = fs::remove_dir_all(&tmp);
+        }
+    }
 }
 
 /// Call before spawning the browser. Locks the profile on the server (fails
@@ -466,6 +613,7 @@ pub struct RemoteProfileStatus {
     pub holder: Option<String>,
     pub updated_by: Option<String>,
     pub updated_at: Option<String>,
+    pub deleted: bool,
 }
 
 /// Pulls any remote profiles that don't exist locally. Returns count pulled.
@@ -526,6 +674,8 @@ pub async fn list_remote() -> Result<Vec<RemoteProfileStatus>> {
         updated_by: Option<String>,
         #[serde(rename = "updatedAt")]
         updated_at: Option<String>,
+        #[serde(default)]
+        deleted: bool,
     }
     #[derive(serde::Deserialize)]
     struct Resp {
@@ -541,10 +691,141 @@ pub async fn list_remote() -> Result<Vec<RemoteProfileStatus>> {
             holder: r.holder,
             updated_by: r.updated_by,
             updated_at: r.updated_at,
+            deleted: r.deleted,
         })
         .collect())
 }
 
+
+// ---- deletions ----
+
+/// Ids being trashed *because the team deleted them*, so the trash hook does not
+/// report them straight back.
+fn sync_trashing() -> &'static Mutex<std::collections::HashSet<String>> {
+    static S: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+async fn report_deleted(id: String) {
+    let Ok(Some((cfg, base, token))) = active_config() else { return };
+    let holder = device_name(&cfg);
+    let res = client()
+        .post(format!("{base}/profiles/{id}/delete"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "holder": holder }))
+        .send()
+        .await;
+    match res {
+        Ok(r) if r.status().is_success() => mark_synced(&id).await,
+        Ok(r) => eprintln!("[sync] delete report {id}: {}", r.status()),
+        Err(e) => eprintln!("[sync] delete report {id}: {e}"),
+    }
+}
+
+/// Called after a profile went to the trash on this machine.
+pub fn on_trashed(id: &str) {
+    if sync_trashing().lock().map(|s| s.contains(id)).unwrap_or(false) {
+        return;
+    }
+    let id = id.to_string();
+    tauri::async_runtime::spawn(report_deleted(id));
+}
+
+/// Called after a profile came back from the trash: put it back on the server
+/// (which clears the tombstone) so the other machines get it again.
+pub fn on_restored(id: &str) {
+    let id = id.to_string();
+    tauri::async_runtime::spawn(async move {
+        let Ok(Some((cfg, base, token))) = active_config() else { return };
+        let holder = device_name(&cfg);
+        let Some(_guard) = try_begin(&id, "push") else { return };
+        match push_profile(&base, &token, &holder, &id).await {
+            Ok(_) => mark_synced(&id).await,
+            Err(e) => eprintln!("[sync] republish {id}: {e:#}"),
+        }
+    });
+}
+
+// ---- shared library: custom fingerprints ----
+
+async fn library_ids(base: &str, token: &str, kind: &str) -> Result<std::collections::HashSet<String>> {
+    let resp = client()
+        .get(format!("{base}/library/{kind}"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .context("contact sync server")?;
+    if !resp.status().is_success() {
+        anyhow::bail!("library list rejected: {}", resp.status());
+    }
+    let v: serde_json::Value = resp.json().await.context("parse library list")?;
+    Ok(v.get("items")
+        .and_then(|i| i.as_array())
+        .map(|a| a.iter().filter_map(|x| x.get("id").and_then(|i| i.as_str()).map(String::from)).collect())
+        .unwrap_or_default())
+}
+
+async fn library_put(base: &str, token: &str, kind: &str, id: &str, bytes: Vec<u8>) -> Result<()> {
+    let resp = client()
+        .put(format!("{base}/library/{kind}/{id}"))
+        .bearer_auth(token)
+        .body(bytes)
+        .send()
+        .await
+        .context("upload library item")?;
+    if !resp.status().is_success() {
+        anyhow::bail!("library upload rejected: {}", resp.status());
+    }
+    Ok(())
+}
+
+async fn library_get(base: &str, token: &str, kind: &str, id: &str) -> Result<Vec<u8>> {
+    let resp = client()
+        .get(format!("{base}/library/{kind}/{id}"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .context("download library item")?;
+    if !resp.status().is_success() {
+        anyhow::bail!("library download rejected: {}", resp.status());
+    }
+    Ok(resp.bytes().await.context("read library item")?.to_vec())
+}
+
+/// Brings the two machines' fingerprint libraries to the union: what the server lacks goes
+/// up, what this machine lacks comes down. Additive only — deleting an
+/// extension or fingerprint on one machine does not delete it on the others.
+/// Returns how many items were installed locally.
+async fn sync_library(base: &str, token: &str) -> usize {
+    let mut installed = 0usize;
+
+    // Fingerprints the operator added themselves (the shipped set is already everywhere).
+    if let (Ok(remote), Ok(dir)) = (library_ids(base, token, "fingerprints").await, store::fingerprints_dir()) {
+        for id in crate::fingerprints::custom_ids().iter().filter(|id| !remote.contains(*id)) {
+            if let Ok(bytes) = fs::read(dir.join(format!("{id}.json"))) {
+                if let Err(e) = library_put(base, token, "fingerprints", id, bytes).await {
+                    eprintln!("[sync] fingerprint {id} up: {e:#}");
+                }
+            }
+        }
+        for id in remote.iter() {
+            let path = dir.join(format!("{id}.json"));
+            if path.exists() {
+                continue;
+            }
+            match library_get(base, token, "fingerprints", id).await {
+                Ok(bytes) => {
+                    if fs::write(&path, bytes).is_ok() {
+                        crate::fingerprints::note_custom(id);
+                        installed += 1;
+                    }
+                }
+                Err(e) => eprintln!("[sync] fingerprint {id} down: {e:#}"),
+            }
+        }
+    }
+    installed
+}
 
 // ---- background sync ----
 
@@ -647,10 +928,37 @@ pub async fn sync_round() -> Result<usize> {
         let known = state.items.get(id);
         let Some(_guard) = try_begin(id, "pull") else { continue };
 
+        if r.deleted {
+            // Deleted on another machine. Only follow if this machine has synced
+            // the profile before; otherwise it is just an old copy of something
+            // that is gone, and is left alone.
+            if local.contains(id) && known.is_some() {
+                if let Ok(mut set) = sync_trashing().lock() {
+                    set.insert(id.to_string());
+                }
+                let res = crate::trash::move_to_trash(id);
+                if let Ok(mut set) = sync_trashing().lock() {
+                    set.remove(id);
+                }
+                match res {
+                    Ok(_) => changed += 1,
+                    Err(e) => eprintln!("[sync] trash {id}: {e:#}"),
+                }
+            }
+            if let Some(u) = r.updated_at.clone() {
+                update_state(|st| { st.items.insert(id.to_string(), StateItem { remote: u, at: unix_now(), proxy: String::new() }); });
+            }
+            continue;
+        }
+
         if !local.contains(id) {
-            // Synced before but gone here: deleted on this machine — do not bring it back.
-            if known.is_some() {
-                continue;
+            // Synced before but gone here: deleted on this machine — do not bring it
+            // back, unless the server has a newer version than the deletion we saw
+            // (it was restored elsewhere).
+            if let Some(k) = known {
+                if r.updated_at.as_deref().map_or(true, |u| u == k.remote) {
+                    continue;
+                }
             }
             match pull_profile(&base, &token, id).await {
                 Ok(true) => { changed += 1; touched.push(id.to_string()); }
@@ -701,6 +1009,7 @@ pub async fn sync_round() -> Result<usize> {
     for id in &touched {
         mark_synced(id).await;
     }
+    changed += sync_library(&base, &token).await;
     if changed > 0 {
         GENERATION.fetch_add(1, Ordering::Relaxed);
     }
@@ -802,5 +1111,270 @@ pub async fn run_forever() {
                 last_full = std::time::Instant::now();
             }
         }
+    }
+}
+
+#[cfg(test)]
+pub(crate) static TEST_ROOT_LOCK: Mutex<()> = Mutex::new(());
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Extensions ride inside the profile's own bundle: a machine that never had
+    /// them installs them on pull, leaves identical ones alone, and replaces changed ones.
+    #[test]
+    fn extensions_travel_inside_the_profile_bundle() {
+        let _g = TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let a = std::env::temp_dir().join(format!("hir-exta-{}", uuid::Uuid::new_v4()));
+        let b = std::env::temp_dir().join(format!("hir-extb-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let id = "profile-ext-1";
+
+        // Machine A: a profile that uses one extension (stored under its canonical id).
+        store::set_data_root(Some(a.clone()));
+        let staging = store::extensions_dir().unwrap().join("staging");
+        std::fs::create_dir_all(staging.join("_locales/vi")).unwrap();
+        std::fs::write(staging.join("manifest.json"), "{\"name\":\"x\",\"version\":\"1\"}").unwrap();
+        std::fs::write(staging.join("_locales/vi/messages.json"), "{}").unwrap();
+        let ext = crate::extensions::canonical_id(&staging).unwrap();
+        let ext = ext.as_str();
+        let ext_dir = store::extensions_dir().unwrap().join(ext);
+        std::fs::rename(&staging, &ext_dir).unwrap();
+        let mut stored = crate::profile::StoredProfile::default();
+        stored.meta.id = id.to_string();
+        stored.meta.extensions = vec![ext.to_string()];
+        stored.config.insert("name".into(), serde_json::json!("P"));
+        crate::profile::save_raw(&mut stored).unwrap();
+        let bytes = build_bundle(id).unwrap();
+
+        // Machine B: nothing installed yet.
+        store::set_data_root(Some(b.clone()));
+        apply_bundle(id, &bytes).unwrap();
+        let dst = store::extensions_dir().unwrap().join(ext);
+        let installed = dst.join("manifest.json").exists() && dst.join("_locales/vi/messages.json").exists();
+        let uses = crate::profile::load_raw(id).map(|p| p.meta.extensions).unwrap_or_default();
+
+        // Identical bundle again: untouched (the marker survives). Changed manifest: replaced.
+        let stamp = || std::fs::metadata(dst.join("manifest.json")).unwrap().modified().unwrap();
+        let before = stamp();
+        std::thread::sleep(Duration::from_millis(1100));
+        apply_bundle(id, &bytes).unwrap();
+        let untouched = stamp() == before;
+        store::set_data_root(Some(a.clone()));
+        std::fs::write(ext_dir.join("manifest.json"), "{\"name\":\"x\",\"version\":\"2.0\"}").unwrap();
+        let bytes2 = build_bundle(id).unwrap();
+        store::set_data_root(Some(b.clone()));
+        apply_bundle(id, &bytes2).unwrap();
+        let replaced = std::fs::read_to_string(dst.join("manifest.json")).unwrap().contains("\"2.0\"");
+
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+        assert!(installed, "extension was not installed from the bundle");
+        assert_eq!(uses, vec![ext.to_string()], "profile should keep using the extension");
+        assert!(untouched, "an identical extension was needlessly rewritten");
+        assert!(replaced, "a changed extension was not replaced");
+    }
+
+    /// A pulled bundle must replace whole databases, not blend into the local
+    /// files, must bring the open tabs along, and must leave caches alone.
+    #[test]
+    fn apply_bundle_replaces_databases_and_carries_tabs() {
+        let _g = TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-sync-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        store::set_data_root(Some(tmp.clone()));
+        let id = "test-profile-1";
+
+        // Stale local state from an earlier session on this machine.
+        let udd = store::user_data_root().unwrap().join(id);
+        for (rel, body) in [
+            ("Default/Sessions/Tabs_OLD", "old tabs"),
+            ("Default/Local Storage/leveldb/000003.ldb", "stale table"),
+            ("Default/Cache/keep-me", "cache"),
+        ] {
+            let p = udd.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        }
+
+        // The other machine's bundle: new tabs, a new database generation.
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut buf);
+            let opts = zip::write::SimpleFileOptions::default();
+            let mut put = |name: &str, body: &str| {
+                zip.start_file(name, opts).unwrap();
+                zip.write_all(body.as_bytes()).unwrap();
+            };
+            put("proxy.json", "null");
+            put("user-data/Default/Sessions/Tabs_NEW", "youtube tab");
+            put("user-data/Default/Session Storage/000010.ldb", "tab storage");
+            put("user-data/Default/Local Storage/leveldb/000007.ldb", "fresh table");
+            put("user-data/Default/Top Sites", "top");
+            zip.finish().unwrap();
+        }
+        apply_bundle(id, &buf.into_inner()).expect("apply");
+
+        let exists = |rel: &str| udd.join(rel).exists();
+        let ok = exists("Default/Sessions/Tabs_NEW")
+            && exists("Default/Session Storage/000010.ldb")
+            && exists("Default/Local Storage/leveldb/000007.ldb")
+            && exists("Default/Top Sites")
+            && !exists("Default/Sessions/Tabs_OLD")
+            && !exists("Default/Local Storage/leveldb/000003.ldb")
+            && exists("Default/Cache/keep-me");
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(ok, "bundle was blended into stale local files or dropped the open tabs");
+    }
+
+    /// The real server on a random port, driven through the client functions:
+    /// shared library, deletion tombstone, and the change-notification channel.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn server_library_tombstone_and_events() {
+        let _g = TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-srv-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        store::set_data_root(Some(tmp.clone()));
+        let token = "test-token-1234";
+        let port = crate::team_server::start(0, token.to_string()).await.expect("start");
+        let base = format!("http://127.0.0.1:{port}");
+
+        // Library: upload, list, download.
+        library_put(&base, token, "fingerprints", "fp1", b"zipbytes".to_vec()).await.unwrap();
+        library_put(&base, token, "fingerprints", "fp0", b"{}".to_vec()).await.unwrap();
+        let fp_ids = library_ids(&base, token, "fingerprints").await.unwrap();
+        let got = library_get(&base, token, "fingerprints", "fp1").await.unwrap();
+        // Extensions are not a server-side library any more: they ride with the profile.
+        let bad_kind = library_ids(&base, token, "extensions").await.is_err();
+        let bad_token = library_ids(&base, "wrong-token-000", "fingerprints").await.is_err();
+
+        // Events: baseline, then an upload wakes a waiting client.
+        let (pos, _) = wait_for_events(&base, token, None).await.unwrap();
+        let waiter = {
+            let (b, t) = (base.clone(), token.to_string());
+            tokio::spawn(async move { wait_for_events(&b, &t, Some(pos)).await })
+        };
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        library_put(&base, token, "fingerprints", "fp2", b"more".to_vec()).await.unwrap();
+        let (new_pos, ids) = tokio::time::timeout(Duration::from_secs(5), waiter).await
+            .expect("waiter woke up in time").unwrap().unwrap();
+
+        // Deletion leaves a tombstone the listing reports.
+        let c = client();
+        let del = c.post(format!("{base}/profiles/p-1/delete")).bearer_auth(token)
+            .json(&serde_json::json!({"holder": "machine-a"})).send().await.unwrap();
+        let list: serde_json::Value = c.get(format!("{base}/profiles")).bearer_auth(token)
+            .send().await.unwrap().json().await.unwrap();
+        let row = list["profiles"].as_array().unwrap().iter().find(|r| r["id"] == "p-1").cloned();
+
+        let _ = crate::team_server::stop();
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert!(fp_ids.contains("fp1") && fp_ids.contains("fp0"));
+        assert_eq!(got, b"zipbytes");
+        assert!(bad_kind && bad_token, "bad kind / bad token must be refused");
+        assert!(new_pos > pos && ids.iter().any(|i| i == "lib:fingerprints/fp2"), "{ids:?}");
+        assert!(del.status().is_success());
+        let row = row.expect("tombstone listed");
+        assert_eq!(row["deleted"], true);
+        assert_eq!(row["updatedBy"], "machine-a");
+    }
+
+    fn write_ext(dir: &std::path::Path, name: &str, version: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("manifest.json"), format!("{{\"name\":\"{name}\",\"version\":\"{version}\"}}")).unwrap();
+    }
+
+    fn ext_dirs() -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(store::extensions_dir().unwrap()).unwrap()
+            .flatten().filter(|e| e.path().is_dir())
+            .map(|e| e.file_name().to_string_lossy().to_string()).collect();
+        v.sort();
+        v
+    }
+
+    /// The same extension must exist once per machine: importing it twice,
+    /// old random-id copies, and a bundle from another machine all collapse to
+    /// one folder, and profiles point at that one id.
+    #[test]
+    fn an_extension_never_exists_twice() {
+        let _g = TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-dup-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        store::set_data_root(Some(tmp.clone()));
+
+        // 1. Importing the same extension twice (different source folders).
+        let (s1, s2, s3) = (tmp.join("src1"), tmp.join("src2"), tmp.join("src3"));
+        write_ext(&s1, "Cool Tool", "1.0");
+        write_ext(&s2, "Cool Tool", "1.2");
+        write_ext(&s3, "Other Tool", "3.0");
+        let e1 = crate::extensions::import(&s1).unwrap();
+        let e2 = crate::extensions::import(&s2).unwrap();
+        let e3 = crate::extensions::import(&s3).unwrap();
+        let after_imports = ext_dirs();
+        let version_kept = crate::extensions::version_of(&store::extensions_dir().unwrap().join(&e2.id));
+
+        // 2. Old-style duplicates (random ids) used by two profiles.
+        let legacy_a = store::extensions_dir().unwrap().join("aaaaaaaa11111111aaaaaaaa11111111");
+        let legacy_b = store::extensions_dir().unwrap().join("bbbbbbbb22222222bbbbbbbb22222222");
+        write_ext(&legacy_a, "Legacy Tool", "1.0");
+        write_ext(&legacy_b, "Legacy Tool", "2.0");
+        for (pid, exts) in [("p-a", vec!["aaaaaaaa11111111aaaaaaaa11111111"]), ("p-b", vec!["bbbbbbbb22222222bbbbbbbb22222222", "aaaaaaaa11111111aaaaaaaa11111111"])] {
+            let mut st = crate::profile::StoredProfile::default();
+            st.meta.id = pid.to_string();
+            st.meta.extensions = exts.into_iter().map(String::from).collect();
+            st.config.insert("name".into(), serde_json::json!(pid));
+            crate::profile::save_raw(&mut st).unwrap();
+        }
+        let merged = crate::extensions::canonicalize_all();
+        let dirs = ext_dirs();
+        let pa = crate::profile::load_raw("p-a").unwrap().meta.extensions;
+        let pb = crate::profile::load_raw("p-b").unwrap().meta.extensions;
+        let legacy_version = crate::extensions::version_of(&store::extensions_dir().unwrap().join(&pa[0]));
+
+        // 3. A bundle from another machine that already uses the canonical id of
+        //    "Legacy Tool" while this machine has another copy under a random id.
+        let canon = pa[0].clone();
+        let other = tmp.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        let mut bundle_stored = crate::profile::StoredProfile::default();
+        bundle_stored.meta.id = "p-remote".into();
+        bundle_stored.meta.extensions = vec![canon.clone()];
+        bundle_stored.config.insert("name".into(), serde_json::json!("R"));
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut buf);
+            let opts = zip::write::SimpleFileOptions::default();
+            zip.start_file("profile.json", opts).unwrap();
+            zip.write_all(serde_json::to_string(&bundle_stored).unwrap().as_bytes()).unwrap();
+            zip.start_file(format!("extensions/{canon}/manifest.json"), opts).unwrap();
+            zip.write_all(b"{\"name\":\"Legacy Tool\",\"version\":\"1.5\"}").unwrap(); // OLDER than the 2.0 here
+            zip.finish().unwrap();
+        }
+        apply_bundle("p-remote", &buf.into_inner()).unwrap();
+        let after_bundle = ext_dirs();
+        let downgrade_blocked = crate::extensions::version_of(&store::extensions_dir().unwrap().join(&canon)) == "2.0";
+        let remote_uses = crate::profile::load_raw("p-remote").unwrap().meta.extensions;
+
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert_eq!(e1.id, e2.id, "same extension imported twice got two ids");
+        assert_ne!(e1.id, e3.id);
+        assert_eq!(after_imports.len(), 2, "{after_imports:?}");
+        assert_eq!(version_kept, "1.2", "the newer import should win");
+        assert_eq!(merged, 2, "both legacy copies get renamed/merged");
+        assert_eq!(dirs.len(), 3, "two imports + one merged Legacy Tool: {dirs:?}");
+        assert_eq!(pa.len(), 1);
+        assert_eq!(pb, pa, "p-b listed the extension twice under old ids; now once, same id");
+        assert_eq!(legacy_version, "2.0", "the newer legacy copy wins");
+        assert_eq!(after_bundle.len(), 3, "the bundle must not add a copy: {after_bundle:?}");
+        assert!(downgrade_blocked, "an older bundled copy replaced a newer local one");
+        assert_eq!(remote_uses, vec![canon]);
     }
 }

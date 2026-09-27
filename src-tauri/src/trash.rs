@@ -102,6 +102,7 @@ pub fn move_to_trash(id: &str) -> Result<TrashEntry> {
     fs::write(&meta_path, serde_json::to_string_pretty(&entry)?)?;
 
     profile::delete(id)?;
+    crate::cloud_sync::on_trashed(id);
     Ok(entry)
 }
 
@@ -192,7 +193,7 @@ pub fn restore(id: &str) -> Result<profile::ProfileMeta> {
     let _ = fs::remove_file(&zip_path);
     let _ = fs::remove_file(&meta_path);
 
-    Ok(profile::ProfileMeta {
+    let meta = profile::ProfileMeta {
         id: stored.meta.id.clone(),
         name: stored
             .config
@@ -216,7 +217,9 @@ pub fn restore(id: &str) -> Result<profile::ProfileMeta> {
         extensions: stored.meta.extensions.clone(),
         mobile: crate::profile::claims_mobile(&stored.config),
         android_media: false,
-    })
+    };
+    crate::cloud_sync::on_restored(id);
+    Ok(meta)
 }
 
 /// Delete one archive for good.

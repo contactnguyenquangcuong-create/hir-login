@@ -182,7 +182,34 @@ pub fn import(json_text: &str, id_hint: Option<String>) -> Result<LibraryEntry> 
     let entry = wrap_payload(&id, &payload);
     let path = path_for(&id)?;
     fs::write(path, serde_json::to_string_pretty(&entry)?)?;
+    note_custom(&id);
+    crate::cloud_sync::kick();
     Ok(entry)
+}
+
+fn custom_marker() -> Option<PathBuf> {
+    store::config_root().ok().map(|d| d.join("custom-fingerprints.txt"))
+}
+
+/// Ids the operator added themselves (imports, or pulled from the team) — the
+/// set worth sharing, since the shipped fingerprints are already on every machine.
+pub fn custom_ids() -> Vec<String> {
+    custom_marker()
+        .and_then(|p| fs::read_to_string(p).ok())
+        .map(|t| t.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect())
+        .unwrap_or_default()
+}
+
+pub fn note_custom(id: &str) {
+    if custom_ids().iter().any(|x| x == id) {
+        return;
+    }
+    if let Some(p) = custom_marker() {
+        use std::io::Write;
+        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(p) {
+            let _ = writeln!(f, "{id}");
+        }
+    }
 }
 
 /// Import every `.json` file in `dir` as a library entry, e.g. to carry a

@@ -51,6 +51,120 @@ fn manifest_root(dir: &Path) -> PathBuf {
     dir.to_path_buf()
 }
 
+/// The id an extension has on every machine, derived from what the extension
+/// says about itself (name, update URL, key) instead of being drawn at random.
+/// Two imports of the same extension — or the same extension arriving in a
+/// synced profile — therefore land on the same folder instead of becoming two.
+/// None when the manifest gives nothing to go on.
+pub fn canonical_id(dir: &Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let root = manifest_root(dir);
+    let manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(root.join("manifest.json")).ok()?).ok()?;
+    let msgs = locale_messages(&root, &manifest);
+    let name = resolve_msg(manifest.get("name").and_then(|v| v.as_str()).unwrap_or(""), &msgs);
+    let name = name.trim().to_lowercase();
+    if name.is_empty() {
+        return None;
+    }
+    let field = |k: &str| manifest.get(k).and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let digest = Sha256::digest(format!("{name}|{}|{}", field("update_url"), field("key")).as_bytes());
+    Some(digest.iter().take(16).map(|b| format!("{b:02x}")).collect())
+}
+
+/// The manifest `version` of an unpacked extension folder, "" if unreadable.
+pub fn version_of(dir: &Path) -> String {
+    let root = manifest_root(dir);
+    fs::read_to_string(root.join("manifest.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|m| m.get("version").and_then(|v| v.as_str().map(String::from)))
+        .unwrap_or_default()
+}
+
+/// Dotted-numeric "a is older than b" ("1.10" is newer than "1.9").
+pub fn version_lt(a: &str, b: &str) -> bool {
+    let part = |s: &str| -> Vec<u64> {
+        s.split(['.', '-', '+']).map(|p| p.parse::<u64>().unwrap_or(0)).collect()
+    };
+    let (va, vb) = (part(a), part(b));
+    for i in 0..va.len().max(vb.len()) {
+        let (x, y) = (va.get(i).copied().unwrap_or(0), vb.get(i).copied().unwrap_or(0));
+        if x != y {
+            return x < y;
+        }
+    }
+    false
+}
+
+/// Moves an unpacked extension folder to its canonical id. If that id is
+/// already here, the copy with the newer version wins and the other goes.
+/// Returns the id the extension now lives under.
+fn settle_under_canonical_id(dir: &Path, id: &str) -> Result<String> {
+    let Some(cid) = canonical_id(dir) else { return Ok(id.to_string()) };
+    if cid == id {
+        return Ok(cid);
+    }
+    let target = dir_for(&cid)?;
+    if target.exists() {
+        if version_lt(&version_of(dir), &version_of(&target)) {
+            fs::remove_dir_all(dir)?;
+        } else {
+            fs::remove_dir_all(&target)?;
+            fs::rename(dir, &target)?;
+        }
+    } else {
+        fs::rename(dir, &target)?;
+    }
+    Ok(cid)
+}
+
+/// One-time tidy-up of extensions imported before ids were canonical: rename each
+/// to its canonical id, drop duplicates, and repoint every profile that used the
+/// old id. Cheap when there is nothing to do. Returns how many were changed.
+pub fn canonicalize_all() -> usize {
+    let Ok(root) = store::extensions_dir() else { return 0 };
+    let mut renamed: Vec<(String, String)> = Vec::new();
+    if let Ok(rd) = fs::read_dir(&root) {
+        let dirs: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+        for d in dirs {
+            let Some(id) = d.file_name().map(|n| n.to_string_lossy().to_string()) else { continue };
+            if id.starts_with('.') {
+                continue;
+            }
+            match settle_under_canonical_id(&d, &id) {
+                Ok(new_id) if new_id != id => renamed.push((id, new_id)),
+                _ => {}
+            }
+        }
+    }
+    if renamed.is_empty() {
+        return 0;
+    }
+    if let Ok(profiles) = crate::profile::list_all() {
+        for p in profiles {
+            let Ok(mut stored) = crate::profile::load_raw(&p.id) else { continue };
+            let mut changed = false;
+            let mut out: Vec<String> = Vec::new();
+            for e in &stored.meta.extensions {
+                let mapped = renamed.iter().find(|(o, _)| o == e).map(|(_, n)| n.clone());
+                if mapped.is_some() {
+                    changed = true;
+                }
+                let e = mapped.unwrap_or_else(|| e.clone());
+                if !out.contains(&e) {
+                    out.push(e);
+                }
+            }
+            if changed {
+                stored.meta.extensions = out;
+                let _ = crate::profile::save_raw(&mut stored);
+            }
+        }
+    }
+    renamed.len()
+}
+
 pub fn list() -> Result<Vec<ExtensionEntry>> {
     let root = store::extensions_dir()?;
     let mut out = Vec::new();
@@ -215,6 +329,9 @@ pub fn import(src: &Path) -> Result<ExtensionEntry> {
                 .unwrap_or(0)
         ),
     );
+    // The same extension imported again replaces (or is dropped for) the copy
+    // already here — never a second one.
+    let id = settle_under_canonical_id(&dst, &id)?;
     read_entry(&id)
 }
 
