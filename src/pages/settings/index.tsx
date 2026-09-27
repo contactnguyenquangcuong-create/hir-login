@@ -16,6 +16,7 @@ import type { LicenseInfo } from "../../entities/license";
 import { licenseInfo } from "../../entities/license";
 import { Section, Row, Block } from "./ui";
 import { TeamTab } from "./TeamTab";
+import { FingerprintPanel } from "./FingerprintPanel";
 
 type Tab = "general" | "team" | "advanced" | "license";
 
@@ -231,6 +232,8 @@ export function SettingsPage() {
                 </>
               )}
             </Section>
+
+            <FingerprintPanel />
 
             <Section title={t("settings.mcpTitle")} desc={<>{t("settings.mcpHelp1")}<strong>MCP</strong>{t("settings.mcpHelp2")}</>}>
               <Block>

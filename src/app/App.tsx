@@ -9,7 +9,6 @@ import { HelperWatcher } from "../widgets/HelperWatcher";
 import { WhatsNewGate } from "../widgets/WhatsNewGate";
 import { BrowsersPage } from "../pages/browsers";
 import { ProxyShardPage } from "../pages/proxyshard";
-import { FingerprintsPage } from "../pages/fingerprints";
 import { ExtensionsPage } from "../pages/extensions";
 import { BookmarksPage } from "../pages/bookmarks";
 import { FoldersPage } from "../pages/folders";
@@ -23,8 +22,13 @@ import { trackSection } from "../shared/lib/analytics";
 
 export function App() {
   const section = useNav((s) => s.section);
+  const setSection = useNav((s) => s.setSection);
 
   useEffect(() => { void trackSection(section); }, [section]);
+  // No Fingerprint nav item any more; bounce anyone still parked on it.
+  useEffect(() => {
+    if (section === "fingerprints") setSection("browsers");
+  }, [section, setSection]);
   useLauncherWarning();
 
   return (
@@ -44,7 +48,6 @@ export function App() {
                   unfinished "new profile" form is still there. */}
               <div className={section === "browsers" ? "" : "hidden"}><BrowsersPage /></div>
               {section === "proxyshard" && <ProxyShardPage />}
-              {section === "fingerprints" && <FingerprintsPage />}
               {section === "extensions" && <ExtensionsPage />}
               {section === "bookmarks" && <BookmarksPage />}
               {section === "folders" && <FoldersPage />}
