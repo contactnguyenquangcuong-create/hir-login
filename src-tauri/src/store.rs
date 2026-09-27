@@ -1,16 +1,39 @@
-// $CONFIG/shardx-launcher/: settings.json, proxies.json, bookmarks.json, and
-// under data_root() — profiles/, user-data/, extensions/, trash/.
+// $CONFIG/hir-login/: settings.json, proxies.json, bookmarks.json, and under
+// data_root() — profiles/, user-data/, extensions/, trash/.
 //
 // data_root() is movable to another disk from Settings; the config files stay
 // put, since that is where the new location is recorded.
 
 use anyhow::{Context, Result};
-use std::path::PathBuf;
-use std::sync::{OnceLock, RwLock};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock, RwLock};
+
+/// Move `<base>/<old_leaf>` to `<base>/<new_leaf>` the first time this runs, so an
+/// update from before the app's rename keeps every existing profile, setting and
+/// cookie exactly where it already was — nothing here is copied or recreated.
+/// Safe to call from more than one place (config dir and data dir can be the
+/// same folder on macOS/Windows): the rename is attempted once per `new` path
+/// per run, and if it can't complete (the two live on different volumes, or
+/// something is still holding the old folder open) that old folder is left
+/// untouched rather than risking data split across both.
+pub fn migrate_legacy_dir(base: &Path, old_leaf: &str, new_leaf: &str) -> PathBuf {
+    static ATTEMPTED: OnceLock<Mutex<std::collections::HashSet<PathBuf>>> = OnceLock::new();
+    let new = base.join(new_leaf);
+    let mut attempted = ATTEMPTED.get_or_init(|| Mutex::new(Default::default()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if attempted.insert(new.clone()) && !new.exists() {
+        let old = base.join(old_leaf);
+        if old.exists() {
+            let _ = std::fs::rename(&old, &new);
+        }
+    }
+    new
+}
 
 pub fn config_root() -> Result<PathBuf> {
     let base = dirs::config_dir().context("OS config dir unavailable")?;
-    let root = base.join("shardx-launcher");
+    let root = migrate_legacy_dir(&base, "shardx-launcher", "hir-login");
     std::fs::create_dir_all(&root)?;
     Ok(root)
 }
@@ -99,4 +122,47 @@ pub fn automation_path() -> Result<PathBuf> {
 /// clobber the saved key.
 pub fn psapi_path() -> Result<PathBuf> {
     Ok(config_root()?.join("psapi.json"))
+}
+
+#[cfg(test)]
+mod migrate_tests {
+    use super::*;
+
+    /// The old folder's whole tree — a settings file plus a subfolder like
+    /// `runtime/` — must land intact under the new name, and a second call must
+    /// be a no-op rather than trying (and failing) to move an already-empty
+    /// source again.
+    #[test]
+    fn legacy_folder_is_moved_once_with_everything_inside_it() {
+        let base = std::env::temp_dir().join(format!("hir-migrate-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(base.join("shardx-launcher").join("runtime")).unwrap();
+        std::fs::write(base.join("shardx-launcher").join("settings.json"), b"{\"x\":1}").unwrap();
+        std::fs::write(base.join("shardx-launcher").join("runtime").join("chrome"), b"bin").unwrap();
+
+        let root = migrate_legacy_dir(&base, "shardx-launcher", "hir-login");
+
+        assert_eq!(root, base.join("hir-login"));
+        assert!(!base.join("shardx-launcher").exists(), "old folder is gone, not copied alongside");
+        assert_eq!(std::fs::read(root.join("settings.json")).unwrap(), b"{\"x\":1}");
+        assert_eq!(std::fs::read(root.join("runtime").join("chrome")).unwrap(), b"bin");
+
+        // A later run — no old folder any more — must not touch the new one.
+        std::fs::write(root.join("settings.json"), b"{\"x\":2}").unwrap();
+        let root2 = migrate_legacy_dir(&base, "shardx-launcher", "hir-login");
+        assert_eq!(root2, root);
+        assert_eq!(std::fs::read(root.join("settings.json")).unwrap(), b"{\"x\":2}", "untouched by the second call");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A fresh machine with neither folder gets the new, empty one created by the caller
+    /// (`migrate_legacy_dir` itself only ever renames — it never creates a directory).
+    #[test]
+    fn no_legacy_folder_is_a_plain_no_op() {
+        let base = std::env::temp_dir().join(format!("hir-migrate-fresh-{}", uuid::Uuid::new_v4()));
+        let root = migrate_legacy_dir(&base, "shardx-launcher", "hir-login");
+        assert_eq!(root, base.join("hir-login"));
+        assert!(!root.exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

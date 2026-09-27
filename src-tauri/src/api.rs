@@ -121,7 +121,7 @@ async fn auth(req: Request, next: Next) -> Result<Response, StatusCode> {
 async fn health() -> Json<Value> {
     Json(json!({
         "ok": true,
-        "name": "shardx-launcher",
+        "name": "hir-login",
         "version": env!("CARGO_PKG_VERSION"),
     }))
 }

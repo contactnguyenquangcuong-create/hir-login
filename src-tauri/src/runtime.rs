@@ -56,10 +56,8 @@ pub fn host_spec() -> Option<PlatformSpec> {
 
 /// Runtime dir under the platform data dir; kept outside the launcher bundle.
 pub fn runtime_dir() -> Result<PathBuf> {
-    Ok(dirs::data_dir()
-        .context("platform data dir not available")?
-        .join("shardx-launcher")
-        .join("runtime"))
+    let base = dirs::data_dir().context("platform data dir not available")?;
+    Ok(crate::store::migrate_legacy_dir(&base, "shardx-launcher", "hir-login").join("runtime"))
 }
 
 /// Path to the chrome binary inside the extracted runtime.
