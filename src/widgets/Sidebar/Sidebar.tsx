@@ -4,7 +4,6 @@ import { cn } from "@proxyshard/shardx-ui-kit";
 import Badge from "../../shared/ui/Badge";
 import {
   NavBrowsersIcon,
-  RouteIcon,
   NavFingerprintsIcon,
   NavSettingsIcon,
   NavPatchLogIcon,
@@ -51,7 +50,6 @@ export function Sidebar() {
       items: [
         { id: "browsers", label: t("sidebar.navBrowsers"), svg: <NavBrowsersIcon className="size-[18px]" /> },
         { id: "folders", label: t("sidebar.navFolders"), svg: <FolderIcon className="size-[18px]" /> },
-        { id: "proxies", label: t("sidebar.navProxies"), svg: <RouteIcon className="size-[18px]" /> },
         { id: "automation", label: t("sidebar.navAutomation"), svg: <NavAutomationIcon className="size-[18px]" /> },
       ],
     },

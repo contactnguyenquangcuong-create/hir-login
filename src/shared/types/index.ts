@@ -1,7 +1,6 @@
 export type Theme = "dark" | "light";
 export type Section =
   | "browsers"
-  | "proxies"
   | "proxyshard"
   | "fingerprints"
   | "extensions"
