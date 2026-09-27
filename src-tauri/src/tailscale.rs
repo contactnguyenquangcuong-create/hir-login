@@ -139,21 +139,45 @@ fn http_client() -> anyhow::Result<reqwest::Client> {
     Ok(reqwest::Client::builder().timeout(std::time::Duration::from_secs(15)).build()?)
 }
 
+/// `error_for_status` alone throws away the response body — and Tailscale's API
+/// puts the actual reason for a 4xx there (e.g. which field it didn't like), not
+/// in the status line. This keeps that reason so the error shown in the app says
+/// something a person can act on instead of just "400 Bad Request".
+async fn ok_body(resp: reqwest::Response) -> anyhow::Result<reqwest::Response> {
+    let status = resp.status();
+    if status.is_success() {
+        return Ok(resp);
+    }
+    let text = resp.text().await.unwrap_or_default();
+    let reason = extract_message(&text).unwrap_or(text);
+    if reason.trim().is_empty() {
+        anyhow::bail!("Tailscale trả lỗi {status}");
+    }
+    anyhow::bail!("Tailscale trả lỗi {status}: {reason}");
+}
+
+/// Tailscale's error bodies are `{"message": "..."}`; pull just that out when
+/// present so the app doesn't dump raw JSON at the operator.
+fn extract_message(body: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()?
+        .get("message")?
+        .as_str()
+        .map(str::to_string)
+}
+
 async fn oauth_token(client: &reqwest::Client, client_id: &str, client_secret: &str) -> anyhow::Result<String> {
     if client_id.trim().is_empty() || client_secret.trim().is_empty() {
         anyhow::bail!("chưa cấu hình OAuth Client (Client ID/Secret)");
     }
-    let tok: TokenResp = client
+    let resp = client
         .post("https://api.tailscale.com/api/v2/oauth/token")
         .form(&[("grant_type", "client_credentials"), ("client_id", client_id), ("client_secret", client_secret)])
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("không gọi được Tailscale: {e}"))?
-        .error_for_status()
-        .map_err(|e| anyhow::anyhow!("Tailscale từ chối Client ID/Secret: {e}"))?
-        .json()
-        .await
-        .map_err(|e| anyhow::anyhow!("phản hồi lấy access token không đọc được: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("không gọi được Tailscale: {e}"))?;
+    let resp = ok_body(resp).await.map_err(|e| anyhow::anyhow!("Tailscale từ chối Client ID/Secret — {e}"))?;
+    let tok: TokenResp = resp.json().await.map_err(|e| anyhow::anyhow!("phản hồi lấy access token không đọc được: {e}"))?;
     Ok(tok.access_token)
 }
 
@@ -182,18 +206,15 @@ pub async fn create_auth_key(
         "expirySeconds": expiry_seconds,
         "description": description,
     });
-    let key: KeyResp = client
+    let resp = client
         .post("https://api.tailscale.com/api/v2/tailnet/-/keys")
         .bearer_auth(&access_token)
         .json(&body)
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("không tạo được key: {e}"))?
-        .error_for_status()
-        .map_err(|e| anyhow::anyhow!("Tailscale từ chối tạo key (kiểm tra thẻ {tag} đã gán cho OAuth client chưa): {e}"))?
-        .json()
-        .await
-        .map_err(|e| anyhow::anyhow!("phản hồi tạo key không đọc được: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("không tạo được key: {e}"))?;
+    let resp = ok_body(resp).await.map_err(|e| anyhow::anyhow!("{e} (kiểm tra thẻ {tag} đã gán cho OAuth client chưa)"))?;
+    let key: KeyResp = resp.json().await.map_err(|e| anyhow::anyhow!("phản hồi tạo key không đọc được: {e}"))?;
 
     Ok(key.key)
 }
@@ -210,17 +231,14 @@ pub async fn list_keys(client_id: &str, client_secret: &str) -> anyhow::Result<V
         #[serde(default)]
         keys: Vec<KeyMeta>,
     }
-    let resp: ListResp = client
+    let resp = client
         .get("https://api.tailscale.com/api/v2/tailnet/-/keys")
         .bearer_auth(&access_token)
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("không lấy được danh sách key: {e}"))?
-        .error_for_status()
-        .map_err(|e| anyhow::anyhow!("Tailscale từ chối yêu cầu: {e}"))?
-        .json()
-        .await
-        .map_err(|e| anyhow::anyhow!("phản hồi danh sách key không đọc được: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("không lấy được danh sách key: {e}"))?;
+    let resp = ok_body(resp).await?;
+    let resp: ListResp = resp.json().await.map_err(|e| anyhow::anyhow!("phản hồi danh sách key không đọc được: {e}"))?;
 
     let mut out = Vec::with_capacity(resp.keys.len());
     for k in resp.keys {
@@ -246,14 +264,13 @@ pub async fn list_keys(client_id: &str, client_secret: &str) -> anyhow::Result<V
 pub async fn revoke_key(client_id: &str, client_secret: &str, key_id: &str) -> anyhow::Result<()> {
     let client = http_client()?;
     let access_token = oauth_token(&client, client_id, client_secret).await?;
-    client
+    let resp = client
         .delete(format!("https://api.tailscale.com/api/v2/tailnet/-/keys/{key_id}"))
         .bearer_auth(&access_token)
         .send()
         .await
-        .map_err(|e| anyhow::anyhow!("không thu hồi được key: {e}"))?
-        .error_for_status()
-        .map_err(|e| anyhow::anyhow!("Tailscale từ chối thu hồi: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("không thu hồi được key: {e}"))?;
+    ok_body(resp).await?;
     Ok(())
 }
 
@@ -270,6 +287,14 @@ mod oauth_tests {
     }
 
     /// A tag typed with or without the "tag:" prefix, or left blank, is normalised.
+    #[test]
+    fn error_body_message_is_extracted_from_json() {
+        assert_eq!(extract_message(r#"{"message":"requested tags are invalid or not permitted"}"#).as_deref(), Some("requested tags are invalid or not permitted"));
+        assert_eq!(extract_message("not json at all"), None);
+        assert_eq!(extract_message(""), None);
+        assert_eq!(extract_message(r#"{"other":"field"}"#), None);
+    }
+
     #[test]
     fn tag_is_normalised() {
         let norm = |t: &str| {

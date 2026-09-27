@@ -29,7 +29,6 @@ export function TeamTab({
   const [serverIp, setServerIp] = useState<string | null>(null);
   const [serverBusy, setServerBusy] = useState(false);
   const [inviteCode, setInviteCode] = useState<string | null>(null);
-  const [authKey, setAuthKey] = useState("");
   const [joinCode, setJoinCode] = useState("");
   const [joinBusy, setJoinBusy] = useState(false);
   const [tsInstalled, setTsInstalled] = useState<boolean | null>(null);
@@ -46,9 +45,6 @@ export function TeamTab({
   const [oauthOpen, setOauthOpen] = useState(false);
   const [oauthSaving, setOauthSaving] = useState(false);
   const [mintingKey, setMintingKey] = useState(false);
-  // Named per device, or every admin-device key looks identical ("Hir-Login
-  // invite" x N) in Quản lý Auth Key with no way to tell which is which.
-  const [deviceLabel, setDeviceLabel] = useState("");
   useEffect(() => {
     tailscaleOauthGet().then((o) => {
       setOauth({ clientId: o.client_id, hasSecret: o.has_secret, tag: o.tag });
@@ -83,14 +79,26 @@ export function TeamTab({
       toast.ok("Đã xoá cấu hình OAuth Client.");
     } catch (e) { toast.err(String(e)); }
   };
-  const mintKey = async (): Promise<string | null> => {
+  // One button does the whole thing now: mint a fresh, uniquely-dated Tailscale
+  // key (when OAuth is set up) and bake it straight into the admin code — the
+  // separate "paste an Auth Key" / "name this device" fields this used to need
+  // were exactly the friction (and error surface) the per-member flow below
+  // never had, so this now matches it.
+  const refreshAdminCode = async () => {
+    const token = (sync?.token ?? "").trim();
+    if (!token) { toast.err("Chưa có token."); return; }
+    const url = `http://${serverIp ?? "127.0.0.1"}:${serverPort}`;
     setMintingKey(true);
     try {
-      const label = deviceLabel.trim();
-      const key = await tailscaleCreateKey(label ? `Hir-Login: ${label}` : "Hir-Login invite");
-      toast.ok("Đã tạo Auth Key mới (hạn 90 ngày).");
-      return key;
-    } catch (e) { toast.err(String(e)); return null; }
+      if (oauthReady) {
+        const key = await tailscaleCreateKey(`Hir-Login admin device (${new Date().toLocaleDateString("vi-VN")})`);
+        setInviteCode(await teamInviteGenerateWithAuth(url, token, key));
+        toast.ok("Đã làm mới mã, kèm Auth Key mới (hạn 90 ngày).");
+      } else {
+        setInviteCode(await teamInviteGenerate(url, token));
+        toast.ok("Đã làm mới mã.");
+      }
+    } catch (e) { toast.err(String(e)); }
     finally { setMintingKey(false); }
   };
 
@@ -136,16 +144,6 @@ export function TeamTab({
       }
     } catch (e) { toast.err(String(e)); }
     finally { setServerBusy(false); }
-  };
-
-  const genCode = async () => {
-    const token = (sync?.token ?? "").trim();
-    if (!token) { toast.err("Chưa có token."); return; }
-    const url = `http://${serverIp ?? "127.0.0.1"}:${serverPort}`;
-    try {
-      const ak = authKey.trim() || undefined;
-      setInviteCode(ak ? await teamInviteGenerateWithAuth(url, token, ak) : await teamInviteGenerate(url, token));
-    } catch (e) { toast.err(String(e)); }
   };
 
   const join = async () => {
@@ -280,30 +278,15 @@ export function TeamTab({
                     </span>
                   </div>
                   {inviteCode && <CopyField value={inviteCode} />}
-                  {oauthReady && (
-                    <Input
-                      inputSize="small"
-                      value={deviceLabel}
-                      onChange={(e) => setDeviceLabel(e.target.value)}
-                      label="Tên máy này (để phân biệt trong Quản lý Auth Key)"
-                      placeholder="VD: Laptop của tôi"
-                    />
-                  )}
-                  <div className="flex items-end gap-2">
-                    <div className="flex-1">
-                      <Input inputSize="small" value={authKey} onChange={(e) => setAuthKey(e.target.value)} label="Tailscale Auth Key (tuỳ chọn, gộp vào mã)" placeholder="tskey-..." />
-                    </div>
-                    {oauthReady && (
-                      <Button variant="neutral" mode="stroke" size="small" isLoading={mintingKey} onClick={async () => { const k = await mintKey(); if (k) setAuthKey(k); }}>
-                        Tạo Auth Key mới
-                      </Button>
-                    )}
-                    <Button variant="neutral" mode="stroke" size="small" onClick={genCode}>Cập nhật mã</Button>
+                  <div>
+                    <Button variant="neutral" mode="stroke" size="small" isLoading={mintingKey} onClick={refreshAdminCode}>
+                      Làm mới mã
+                    </Button>
                   </div>
                   {oauthReady ? (
                     <div className="flex flex-col gap-1.5">
                       <p className="m-0 text-paragraph-xs text-text-soft-400">
-                        "Tạo Auth Key mới" tự sinh một Auth Key thật (hạn 90 ngày, thẻ <code className="mono">{oauth.tag}</code>) và điền vào ô trên — không cần mở Tailscale. "Cập nhật mã" đóng gói Auth Key đang có vào mã quản trị.
+                        Mỗi lần bấm, mã được cấp lại kèm một Auth Key thật vừa sinh (hạn 90 ngày, thẻ <code className="mono">{oauth.tag}</code>) — không cần mở Tailscale.
                       </p>
                       <div className="flex gap-3">
                         <button type="button" className="self-start border-0 bg-transparent p-0 text-paragraph-xs text-text-soft-400 underline hover:text-text-sub-600" onClick={() => setOauthOpen((v) => !v)}>
@@ -316,23 +299,20 @@ export function TeamTab({
                     </div>
                   ) : (
                     <p className="m-0 text-paragraph-xs text-text-soft-400">
-                      Đang cần dán Auth Key thủ công, tạo tại{" "}
-                      <a href="#" className="text-primary-base hover:underline" onClick={(e) => { e.preventDefault(); openUrl("https://login.tailscale.com/admin/settings/keys").catch(() => {}); }}>
-                        login.tailscale.com/admin/settings/keys
-                      </a>. Muốn app tự tạo Auth Key (không cần mở Tailscale mỗi lần)?{" "}
+                      Mã này chưa tự vào mạng Tailscale được — máy nhận mã cần đã ở trong mạng từ trước.{" "}
                       <button type="button" className="border-0 bg-transparent p-0 text-primary-base underline" onClick={() => setOauthOpen((v) => !v)}>
                         Cấu hình 1 lần
-                      </button>
+                      </button>{" "}để mã tự kèm quyền mạng, không cần làm tay.
                     </p>
                   )}
                   {oauthOpen && (
                     <div className="flex flex-col gap-2 rounded-lg bg-bg-white-0 p-3 ring-1 ring-inset ring-stroke-soft-200">
                       <span className="text-paragraph-xs text-text-sub-600">
-                        Tạo 1 lần ở <a href="#" className="text-primary-base hover:underline" onClick={(e) => { e.preventDefault(); openUrl("https://login.tailscale.com/admin/settings/oauth").catch(() => {}); }}>console.tailscale.com → Access controls → OAuth clients</a>: thêm 1 thẻ (vd <code className="mono">tag:hirlogin</code>) rồi tạo OAuth Client với quyền <code className="mono">auth_keys</code>, gán thẻ đó. Dán Client ID/Secret vào đây.
+                        Tạo 1 lần ở <a href="#" className="text-primary-base hover:underline" onClick={(e) => { e.preventDefault(); openUrl("https://login.tailscale.com/admin/settings/oauth").catch(() => {}); }}>console.tailscale.com → Access controls → OAuth clients</a>: thêm 1 thẻ tên tuỳ ý (ví dụ <code className="mono">tag:hirlogin</code> hoặc <code className="mono">tag:halo</code> — đặt gì cũng được) rồi tạo OAuth Client với quyền <code className="mono">auth_keys</code>, gán đúng thẻ đó. Dán Client ID/Secret vào đây.
                       </span>
                       <Input inputSize="small" value={oauthEdit.clientId} onChange={(e) => setOauthEdit((s) => ({ ...s, clientId: e.target.value }))} label="Client ID" placeholder="k..." />
                       <Input inputSize="small" type="password" value={oauthEdit.clientSecret} onChange={(e) => setOauthEdit((s) => ({ ...s, clientSecret: e.target.value }))} label="Client Secret" placeholder={oauth.hasSecret ? "Đã lưu — dán lại nếu muốn đổi" : "tskey-client-..."} />
-                      <Input inputSize="small" value={oauthEdit.tag} onChange={(e) => setOauthEdit((s) => ({ ...s, tag: e.target.value }))} label="Thẻ (tag) đã gán cho OAuth Client" placeholder="tag:hirlogin" />
+                      <Input inputSize="small" value={oauthEdit.tag} onChange={(e) => setOauthEdit((s) => ({ ...s, tag: e.target.value }))} label="Thẻ (tag) đã gán cho OAuth Client — gõ đúng tên bạn đã đặt" placeholder="vd: tag:hirlogin" />
                       <div><Button variant="primary" mode="filled" size="small" onClick={saveOauth} isLoading={oauthSaving}>Lưu</Button></div>
                     </div>
                   )}
