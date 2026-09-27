@@ -23,16 +23,23 @@ function statusOf(k: TailscaleKey): { label: string; tone: "success" | "warning"
  *  revoke one without leaving the app. */
 export function TailscaleKeysPanel() {
   const [keys, setKeys] = useState<TailscaleKey[] | null>(null);
-  const [loading, setLoading] = useState(false);
+  // Starts true so the "couldn't load" fallback never flashes before the
+  // very first request has even had a chance to answer.
+  const [loading, setLoading] = useState(true);
   const [revoking, setRevoking] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
+  // Listing needs the OAuth client's "Auth Keys: Read" scope specifically —
+  // "Write" (all this panel otherwise needs) isn't enough. That's a config
+  // detail on Tailscale's side, not a real failure, so the automatic load
+  // right after saving Client ID/Secret stays quiet about it; a manual
+  // "Tải lại" click (the operator asked for it) still says so.
+  const load = useCallback(async (announce: boolean) => {
     setLoading(true);
     try { setKeys(await tailscaleListKeys()); }
-    catch (e) { toast.err(String(e)); setKeys(null); }
+    catch (e) { if (announce) toast.err(String(e)); setKeys(null); }
     finally { setLoading(false); }
   }, []);
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { load(false); }, [load]);
 
   const revoke = async (k: TailscaleKey) => {
     const ok = await confirmModal({
@@ -42,7 +49,7 @@ export function TailscaleKeysPanel() {
     });
     if (ok !== true) return;
     setRevoking(k.id);
-    try { await tailscaleRevokeKey(k.id); toast.ok("Đã thu hồi"); await load(); }
+    try { await tailscaleRevokeKey(k.id); toast.ok("Đã thu hồi"); await load(true); }
     catch (e) { toast.err(String(e)); }
     finally { setRevoking(null); }
   };
@@ -51,7 +58,7 @@ export function TailscaleKeysPanel() {
     <Section
       title="Quản lý Auth Key"
       desc="Mọi Auth Key trong mạng Tailscale của bạn, kể cả key Hir-Login tự tạo cho từng người. Thu hồi tại đây có hiệu lực ngay."
-      action={<Button variant="neutral" mode="stroke" size="xsmall" onClick={load} isLoading={loading}>Tải lại</Button>}
+      action={<Button variant="neutral" mode="stroke" size="xsmall" onClick={() => load(true)} isLoading={loading}>Tải lại</Button>}
     >
       {keys === null && !loading && (
         <div className="px-5 py-8 text-center text-paragraph-xs text-text-soft-400">Không tải được danh sách. Kiểm tra lại Client ID/Secret ở trên.</div>

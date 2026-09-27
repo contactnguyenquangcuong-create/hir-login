@@ -34,6 +34,7 @@ export const autostartSet = (enabled: boolean) => invoke<void>("autostart_set", 
 export const tailscaleOauthGet = () => invoke<{ client_id: string; has_secret: boolean; tag: string }>("tailscale_oauth_get");
 export const tailscaleOauthSet = (clientId: string, clientSecret: string, tag: string) =>
   invoke<void>("tailscale_oauth_set", { clientId, clientSecret, tag });
+export const tailscaleOauthClear = () => invoke<void>("tailscale_oauth_clear");
 export const tailscaleCreateKey = (description: string) => invoke<string>("tailscale_create_key", { description });
 
 export type TailscaleKey = { id: string; description: string; created: string; expires: string; revoked: string; invalid: boolean };

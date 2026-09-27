@@ -2464,6 +2464,16 @@ fn tailscale_oauth_set(client_id: String, client_secret: String, tag: String) ->
     settings::save(&s).map_err(|e| e.to_string())
 }
 
+/// Forget the saved OAuth Client entirely — e.g. before pasting a replacement one.
+/// This only clears what Hir-Login stored locally; it does not touch anything on
+/// Tailscale's side (the client itself, or any key already minted, keeps working).
+#[tauri::command]
+fn tailscale_oauth_clear() -> Result<(), String> {
+    let mut s = settings::load().map_err(|e| e.to_string())?;
+    s.server_host.tailscale_oauth = None;
+    settings::save(&s).map_err(|e| e.to_string())
+}
+
 /// Mint a fresh reusable Tailscale auth key via the saved OAuth client. Good for
 /// 90 days (Tailscale's own cap); called fresh each time an invite code is made.
 #[tauri::command]
@@ -3131,6 +3141,7 @@ pub fn run() {
             tailscale_status,
             tailscale_oauth_get,
             tailscale_oauth_set,
+            tailscale_oauth_clear,
             tailscale_create_key,
             tailscale_list_keys,
             tailscale_revoke_key,

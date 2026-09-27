@@ -4,7 +4,7 @@ import { CopyField } from "../../shared/ui/CopyField";
 import { toast } from "../../shared/model/toast";
 import { confirmModal } from "../../shared/model/confirm";
 import { teamCall, useTeam } from "../../shared/model/teamRole";
-import { teamInviteGenerate, teamInviteGenerateWithAuth, tailscaleOauthGet, tailscaleCreateKey } from "../../entities/settings";
+import { teamInviteGenerate, teamInviteGenerateWithAuth, tailscaleCreateKey } from "../../entities/settings";
 import { Section, Block, Pill, avatar } from "./ui";
 
 type Role = "manager" | "member";
@@ -21,21 +21,22 @@ const LEGEND = [
   ["Thành viên", "Chỉ dùng profile trong thư mục được chia sẻ."],
 ];
 
-/** Admin only: the team's people, each with a name and a key of their own. Folders are shared from the folders themselves. */
-export function MembersPanel({ serverUrl }: { serverUrl: string }) {
+/** Admin only: the team's people, each with a name and a key of their own. Folders are shared from
+ *  the folders themselves. `oauthReady` comes from the parent (TeamTab) rather than being checked
+ *  here too — the two used to drift out of sync: this panel could still say "no Tailscale key yet"
+ *  right after the admin had just configured one two sections up. */
+export function MembersPanel({ serverUrl, oauthReady, onOpenOauthSetup }: { serverUrl: string; oauthReady: boolean; onOpenOauthSetup: () => void }) {
   const role = useTeam((s) => s.role);
   const [members, setMembers] = useState<Member[]>([]);
   const [name, setName] = useState("");
   const [newRole, setNewRole] = useState<Role>("member");
   const [issued, setIssued] = useState<{ name: string; code: string } | null>(null);
-  const [oauthReady, setOauthReady] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
     try { setMembers((await teamCall<{ members: Member[] }>("GET", "/admin/members")).members); } catch { /* not the admin */ }
   }, []);
   useEffect(() => { if (role === "admin") load(); }, [role, load]);
-  useEffect(() => { tailscaleOauthGet().then((o) => setOauthReady(o.has_secret && !!o.client_id)).catch(() => {}); }, []);
   if (role !== "admin") return null;
 
   const run = async (fn: () => Promise<void>) => {
@@ -87,9 +88,17 @@ export function MembersPanel({ serverUrl }: { serverUrl: string }) {
     <Section
       title="Nhân sự"
       desc={
-        oauthReady
-          ? 'Mỗi người một mã riêng, kèm sẵn quyền vào mạng Tailscale — dùng được ngay trên máy mới. Chia sẻ thư mục cho họ ở trang Trình duyệt: mở thư mục, bấm "Chia sẻ quyền".'
-          : 'Mỗi người một mã riêng, gọi theo tên. Mã này chưa kèm quyền vào Tailscale — máy nhận mã cần đã ở trong mạng từ trước. Chia sẻ thư mục cho họ ở trang Trình duyệt: mở thư mục, bấm "Chia sẻ quyền".'
+        oauthReady ? (
+          'Mỗi người một mã riêng, kèm sẵn quyền vào mạng Tailscale — dùng được ngay trên máy mới. Chia sẻ thư mục cho họ ở trang Trình duyệt: mở thư mục, bấm "Chia sẻ quyền".'
+        ) : (
+          <>
+            Mỗi người một mã riêng, gọi theo tên. Mã này <b>chưa kèm quyền vào Tailscale</b> — máy nhận mã cần đã ở trong mạng từ trước.{" "}
+            <button type="button" className="border-0 bg-transparent p-0 text-primary-base underline" onClick={onOpenOauthSetup}>
+              Bật để mã tự kèm quyền mạng
+            </button>
+            . Chia sẻ thư mục cho họ ở trang Trình duyệt: mở thư mục, bấm "Chia sẻ quyền".
+          </>
+        )
       }
     >
       <Block>
