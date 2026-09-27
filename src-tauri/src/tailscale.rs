@@ -186,6 +186,27 @@ fn normalize_tag(tag: &str) -> String {
     format!("tag:{t}")
 }
 
+/// Tailscale's key `description` rejects punctuation like `:` and `/` (and
+/// presumably anything outside ASCII) — hit in practice via a Vietnamese-dated
+/// label ("27/9/2026") and a "Name: person" label. Kept conservative (letters,
+/// digits, space, hyphen, underscore) rather than guessing the exact allowed
+/// set, so a name with accents or any other odd character never breaks this again.
+fn sanitize_description(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut last_was_space = false;
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+            out.push(c);
+            last_was_space = false;
+        } else if !last_was_space {
+            out.push(' ');
+            last_was_space = true;
+        }
+    }
+    let trimmed = out.trim().to_string();
+    if trimmed.is_empty() { "Hir-Login".to_string() } else { trimmed }
+}
+
 /// Mint a fresh reusable, pre-authorized auth key tagged `tag`, valid for
 /// `expiry_seconds` (Tailscale caps this at 90 days regardless of what is asked).
 pub async fn create_auth_key(
@@ -198,6 +219,7 @@ pub async fn create_auth_key(
     let client = http_client()?;
     let access_token = oauth_token(&client, client_id, client_secret).await?;
     let tag = normalize_tag(tag);
+    let description = sanitize_description(description);
 
     let body = serde_json::json!({
         "capabilities": { "devices": { "create": {
@@ -293,6 +315,16 @@ mod oauth_tests {
         assert_eq!(extract_message("not json at all"), None);
         assert_eq!(extract_message(""), None);
         assert_eq!(extract_message(r#"{"other":"field"}"#), None);
+    }
+
+    #[test]
+    fn description_strips_characters_tailscale_rejects() {
+        // Hit in practice: a Vietnamese-locale date ("27/9/2026") and a "Name: person" label.
+        assert_eq!(sanitize_description("Hir-Login admin device 27/9/2026"), "Hir-Login admin device 27 9 2026");
+        assert_eq!(sanitize_description("Hir-Login: Huyền"), "Hir-Login Huy n");
+        assert_eq!(sanitize_description("plain-name_ok-123"), "plain-name_ok-123");
+        assert_eq!(sanitize_description("   "), "Hir-Login");
+        assert_eq!(sanitize_description(""), "Hir-Login");
     }
 
     #[test]

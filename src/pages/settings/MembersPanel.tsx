@@ -52,7 +52,7 @@ export function MembersPanel({ serverUrl, oauthReady, onOpenOauthSetup }: { serv
   const show = async (who: string, token: string) => {
     let code: string;
     if (oauthReady) {
-      const key = await tailscaleCreateKey(`Hir-Login: ${who}`);
+      const key = await tailscaleCreateKey(`Hir-Login - ${who}`);
       code = await teamInviteGenerateWithAuth(serverUrl, token, key);
     } else {
       code = await teamInviteGenerate(serverUrl, token);

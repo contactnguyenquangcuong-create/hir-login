@@ -91,7 +91,7 @@ export function TeamTab({
     setMintingKey(true);
     try {
       if (oauthReady) {
-        const key = await tailscaleCreateKey(`Hir-Login admin device (${new Date().toLocaleDateString("vi-VN")})`);
+        const key = await tailscaleCreateKey(`Hir-Login admin device ${new Date().toISOString().slice(0, 10)}`);
         setInviteCode(await teamInviteGenerateWithAuth(url, token, key));
         toast.ok("Đã làm mới mã, kèm Auth Key mới (hạn 90 ngày).");
       } else {
