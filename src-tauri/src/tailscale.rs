@@ -98,3 +98,102 @@ pub fn join_with_auth_key(auth_key: &str) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+// ---- OAuth client: mint a fresh reusable auth key on demand ----
+//
+// Confirmed against Tailscale's own Go client (tailscale/tailscale-client-go)
+// and https://tailscale.com/kb/1215/oauth-clients:
+//   1. POST /api/v2/oauth/token (client_credentials grant) -> access_token
+//   2. POST /api/v2/tailnet/-/keys with that bearer token -> {"key": "tskey-auth-..."}
+// "-" is Tailscale's documented shorthand for "my own tailnet" — no need to
+// know or store the tailnet's real name.
+
+#[derive(serde::Deserialize)]
+struct TokenResp {
+    access_token: String,
+}
+
+#[derive(serde::Deserialize)]
+struct KeyResp {
+    key: String,
+}
+
+/// Mint a fresh reusable, pre-authorized auth key tagged `tag`, valid for
+/// `expiry_seconds` (Tailscale caps this at 90 days regardless of what is asked).
+pub async fn create_auth_key(
+    client_id: &str,
+    client_secret: &str,
+    tag: &str,
+    description: &str,
+    expiry_seconds: i64,
+) -> anyhow::Result<String> {
+    if client_id.trim().is_empty() || client_secret.trim().is_empty() {
+        anyhow::bail!("chưa cấu hình OAuth Client (Client ID/Secret)");
+    }
+    let tag = if tag.trim().is_empty() { "tag:hirlogin".to_string() } else { tag.trim().trim_start_matches("tag:").to_string() };
+    let tag = format!("tag:{tag}");
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()?;
+
+    let tok: TokenResp = client
+        .post("https://api.tailscale.com/api/v2/oauth/token")
+        .form(&[("grant_type", "client_credentials"), ("client_id", client_id), ("client_secret", client_secret)])
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("không gọi được Tailscale: {e}"))?
+        .error_for_status()
+        .map_err(|e| anyhow::anyhow!("Tailscale từ chối Client ID/Secret: {e}"))?
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("phản hồi lấy access token không đọc được: {e}"))?;
+
+    let body = serde_json::json!({
+        "capabilities": { "devices": { "create": {
+            "reusable": true, "ephemeral": false, "preauthorized": true, "tags": [tag],
+        } } },
+        "expirySeconds": expiry_seconds,
+        "description": description,
+    });
+    let key: KeyResp = client
+        .post("https://api.tailscale.com/api/v2/tailnet/-/keys")
+        .bearer_auth(&tok.access_token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("không tạo được key: {e}"))?
+        .error_for_status()
+        .map_err(|e| anyhow::anyhow!("Tailscale từ chối tạo key (kiểm tra thẻ {tag} đã gán cho OAuth client chưa): {e}"))?
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("phản hồi tạo key không đọc được: {e}"))?;
+
+    Ok(key.key)
+}
+
+#[cfg(test)]
+mod oauth_tests {
+    use super::*;
+
+    /// Missing credentials are refused before any network call, with a message
+    /// pointing at what to fill in rather than a raw network error.
+    #[tokio::test]
+    async fn empty_credentials_are_refused_up_front() {
+        let err = create_auth_key("", "", "tag:hirlogin", "d", 3600).await.unwrap_err();
+        assert!(err.to_string().contains("OAuth Client"), "{err}");
+    }
+
+    /// A tag typed with or without the "tag:" prefix, or left blank, is normalised.
+    #[test]
+    fn tag_is_normalised() {
+        let norm = |t: &str| {
+            let t = if t.trim().is_empty() { "hirlogin".to_string() } else { t.trim().trim_start_matches("tag:").to_string() };
+            format!("tag:{t}")
+        };
+        assert_eq!(norm("tag:hirlogin"), "tag:hirlogin");
+        assert_eq!(norm("hirlogin"), "tag:hirlogin");
+        assert_eq!(norm(""), "tag:hirlogin");
+        assert_eq!(norm("  server  "), "tag:server");
+    }
+}

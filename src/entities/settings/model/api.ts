@@ -28,3 +28,10 @@ export const teamSyncPull = () => invoke<number>("team_sync_pull");
 export const tailscaleStatus = () => invoke<{ installed: boolean; connected: boolean; ip: string | null }>("tailscale_status");
 export const autostartGet = () => invoke<boolean>("autostart_get");
 export const autostartSet = (enabled: boolean) => invoke<void>("autostart_set", { enabled });
+
+/** Tailscale OAuth client (scope `auth_keys`) saved once so the app can mint its own
+ *  auth keys. `has_secret` says whether one is stored without ever sending it back. */
+export const tailscaleOauthGet = () => invoke<{ client_id: string; has_secret: boolean; tag: string }>("tailscale_oauth_get");
+export const tailscaleOauthSet = (clientId: string, clientSecret: string, tag: string) =>
+  invoke<void>("tailscale_oauth_set", { clientId, clientSecret, tag });
+export const tailscaleCreateKey = (description: string) => invoke<string>("tailscale_create_key", { description });

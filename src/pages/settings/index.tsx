@@ -16,6 +16,7 @@ import type { LicenseInfo } from "../../entities/license";
 import { licenseInfo } from "../../entities/license";
 import { Section, Row, Block } from "./ui";
 import { TeamTab } from "./TeamTab";
+import { useTeam } from "../../shared/model/teamRole";
 import { FingerprintPanel } from "./FingerprintPanel";
 
 type Tab = "general" | "team" | "advanced" | "license";
@@ -69,6 +70,20 @@ export function SettingsPage() {
   const save = async () => {
     try { await settingsSave(s); setSaved(JSON.stringify(s)); toast.ok(t("settings.saved")); refreshApi(); }
     catch (e) { toast.err(String(e)); }
+  };
+
+  // Disconnecting is security-sensitive (it's how you invalidate a leaked admin
+  // code) — it must not sit as an "unsaved change" waiting for a Lưu cài đặt
+  // click. Persist it at once and drop the cached role right away, or the
+  // Nhân sự list (built from the old, still-saved token) keeps showing.
+  const disconnect = async () => {
+    const next = { ...s, sync: { ...s.sync!, enabled: false, server_url: null, token: null } };
+    setS(next);
+    try { await settingsSave(next); setSaved(JSON.stringify(next)); }
+    catch (e) { toast.err(String(e)); return; }
+    useTeam.setState({ role: null, name: "", id: "", folderNames: null });
+    try { localStorage.removeItem("hir.teamRole"); } catch { /* ignore */ }
+    toast.ok("Đã ngắt kết nối");
   };
 
   const TABS: { id: Tab; label: string }[] = [
@@ -184,7 +199,7 @@ export function SettingsPage() {
           <TeamTab
             sync={s.sync}
             onSyncChange={(patch) => setS({ ...s, sync: { ...s.sync!, ...patch } as typeof s.sync })}
-            onDisconnect={() => setS({ ...s, sync: { ...s.sync!, enabled: false, server_url: null, token: null } })}
+            onDisconnect={disconnect}
           />
         )}
 

@@ -2443,6 +2443,33 @@ fn tailscale_status() -> Value {
 }
 
 #[tauri::command]
+fn tailscale_oauth_get() -> Value {
+    let s = settings::load().unwrap_or_default();
+    match s.server_host.tailscale_oauth {
+        Some(o) => serde_json::json!({"client_id": o.client_id, "has_secret": !o.client_secret.is_empty(), "tag": o.tag}),
+        None => serde_json::json!({"client_id": "", "has_secret": false, "tag": ""}),
+    }
+}
+
+#[tauri::command]
+fn tailscale_oauth_set(client_id: String, client_secret: String, tag: String) -> Result<(), String> {
+    let mut s = settings::load().map_err(|e| e.to_string())?;
+    s.server_host.tailscale_oauth = Some(settings::TailscaleOauth { client_id, client_secret, tag });
+    settings::save(&s).map_err(|e| e.to_string())
+}
+
+/// Mint a fresh reusable Tailscale auth key via the saved OAuth client. Good for
+/// 90 days (Tailscale's own cap); called fresh each time an invite code is made.
+#[tauri::command]
+async fn tailscale_create_key(description: String) -> Result<String, String> {
+    let s = settings::load().map_err(|e| e.to_string())?;
+    let o = s.server_host.tailscale_oauth.ok_or_else(|| "chưa cấu hình OAuth Client".to_string())?;
+    tailscale::create_auth_key(&o.client_id, &o.client_secret, &o.tag, &description, 90 * 24 * 3600)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn team_invite_join(code: String) -> Result<Value, String> {
     let (url, token, auth_key) = team_invite::parse_invite_code(&code).map_err(|e| e.to_string())?;
     // Auto-join Tailscale if auth key is embedded and not yet connected.
@@ -2451,13 +2478,24 @@ async fn team_invite_join(code: String) -> Result<Value, String> {
     // is really unreachable, so the join is best-effort.
     let mut join_err: Option<String> = None;
     if let Some(ak) = auth_key.as_deref().filter(|s| !s.is_empty()) {
-        if !tailscale::is_connected() {
-            if tailscale::is_installed() {
-                if let Err(e) = tailscale::join_with_auth_key(ak) {
-                    join_err = Some(e.to_string());
-                    eprintln!("[launcher] tailscale join failed (will still try /health): {join_err:?}");
-                } else {
-                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        // `tailscale up` blocks on a network round-trip to the coordination server
+        // (can be several seconds); run it off the async runtime so a slow join
+        // never stalls other commands or the background sync loop.
+        let installed = tokio::task::spawn_blocking(tailscale::is_installed).await.unwrap_or(false);
+        let connected = tokio::task::spawn_blocking(tailscale::is_connected).await.unwrap_or(false);
+        if !connected {
+            if installed {
+                let ak_owned = ak.to_string();
+                let joined = tokio::task::spawn_blocking(move || tailscale::join_with_auth_key(&ak_owned)).await;
+                match joined {
+                    Ok(Ok(())) => { tokio::time::sleep(std::time::Duration::from_secs(2)).await; }
+                    Ok(Err(e)) => {
+                        join_err = Some(e.to_string());
+                        eprintln!("[launcher] tailscale join failed (will still try /health): {join_err:?}");
+                    }
+                    Err(e) => {
+                        join_err = Some(format!("tailscale join panicked: {e}"));
+                    }
                 }
             } else {
                 join_err = Some("chưa cài Tailscale".into());
@@ -3070,6 +3108,9 @@ pub fn run() {
             team_invite_parse,
             team_invite_join,
             tailscale_status,
+            tailscale_oauth_get,
+            tailscale_oauth_set,
+            tailscale_create_key,
             sync_activity,
             team_admin,
             sync_kick,

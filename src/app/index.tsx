@@ -10,6 +10,7 @@ import { HelperPanel } from "../widgets/HelperPanel";
 import { FleetMonitor } from "../widgets/FleetMonitor";
 import { initAnalytics } from "../shared/lib/analytics";
 import { useLang } from "../shared/i18n";
+import { ErrorBoundary } from "../shared/ui/ErrorBoundary";
 
 // The always-on-top panels are second Tauri windows on this same bundle,
 // addressed by hash — a 60px strip needs no vite entry of its own.
@@ -31,10 +32,12 @@ function Root() {
   const lang = useLang((s) => s.lang);
   return (
     <ThemeProvider>
-      {panelGroup ? <SyncPanel key={lang} group={panelGroup} />
-       : helperProfile ? <HelperPanel key={lang} profile={helperProfile} />
-       : fleet ? <FleetMonitor key={lang} />
-       : <App key={lang} />}
+      <ErrorBoundary>
+        {panelGroup ? <SyncPanel key={lang} group={panelGroup} />
+         : helperProfile ? <HelperPanel key={lang} profile={helperProfile} />
+         : fleet ? <FleetMonitor key={lang} />
+         : <App key={lang} />}
+      </ErrorBoundary>
     </ThemeProvider>
   );
 }

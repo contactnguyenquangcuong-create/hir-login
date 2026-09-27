@@ -78,6 +78,19 @@ pub struct ServerHostConfig {
     /// settings are edited or cleared.
     #[serde(default)]
     pub token: Option<String>,
+    /// Tailscale OAuth client (scope `auth_keys`), set up once by the admin so
+    /// Hir-Login can mint a fresh reusable Tailscale auth key for each invite
+    /// code on its own — no trip to the Tailscale website per person.
+    #[serde(default)]
+    pub tailscale_oauth: Option<TailscaleOauth>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct TailscaleOauth {
+    pub client_id: String,
+    pub client_secret: String,
+    /// The tag the OAuth client (and every key it mints) is scoped to, e.g. "tag:hirlogin".
+    pub tag: String,
 }
 
 fn default_server_port() -> u16 { 8787 }
