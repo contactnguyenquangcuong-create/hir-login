@@ -359,11 +359,14 @@ export const useProfile = create<ProfileStore>((set, get) => ({
     const stored = await profileGet(id);
     set({ draft: fromStored(stored), expanded: id });
   },
-  newProfile: () => set({ draft: defaultForm(), expanded: "__new__" }),
+  newProfile: () => {
+    const { folder } = get();
+    set({ draft: { ...defaultForm(), folder: folder && folder !== "all" ? folder : "" }, expanded: "__new__" });
+  },
   cancelEdit: () => set({ expanded: null, draft: null }),
 
   saveDraft: async () => {
-    const { draft, folder } = get();
+    const { draft } = get();
     if (!draft) return;
     try {
       // `fingerprints` (the bulk list) carries no payload — fetch the one
@@ -375,9 +378,13 @@ export const useProfile = create<ProfileStore>((set, get) => ({
       // A profile created while a folder tab is active should land in that
       // folder (otherwise it pops into "All" and the user has to drag it back).
       // `!draft.id` scopes this to creations only — edits keep their folder.
-      if (!draft.id && folder && folder !== "all") {
-        try { await profileSetFolder(saved.id, folder); }
-        catch (e) { console.warn("auto-assign folder failed:", e); }
+      // The folder is chosen in the editor now; the active tab only pre-fills it.
+      const before = get().profiles.find((p) => p.id === saved.id)?.folder ?? "";
+      if ((draft.folder ?? "") !== before) {
+        try {
+          await profileSetFolder(saved.id, draft.folder ?? "");
+          if (draft.folder) get().rememberFolder(draft.folder);
+        } catch (e) { toast.err(String(e)); }
       }
       // Cookies picked in the editor: the profile has to exist first, so the
       // import happens here rather than on the form.

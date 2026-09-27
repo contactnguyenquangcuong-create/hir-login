@@ -714,7 +714,7 @@ async fn admin_members(
     let who = match staff_only(&headers, &state) { Ok(w) => w, Err(r) => return r };
     let acl = load_acl();
     let members: Vec<Value> = acl.members.iter()
-        .filter(|m| who.is_privileged() || m.role == "member")
+        .filter(|m| who.is_privileged() || m.role == "member" || m.id == who.id)
         .map(|m| json!({"id": m.id, "name": m.name, "role": m.role, "disabled": m.disabled, "createdAt": m.created_at}))
         .collect();
     Json(json!({"ok": true, "members": members})).into_response()

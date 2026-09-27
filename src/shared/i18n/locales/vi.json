@@ -1567,5 +1567,12 @@
   "err.noDelete": "Bạn không có quyền xoá profile này.",
   "err.noAdmin": "Chỉ admin mới quản lý được nhân sự.",
   "err.noPerm": "Bạn không có quyền làm thao tác này.",
-  "sidebar.navFolders": "Thư mục"
+  "sidebar.navFolders": "Thư mục",
+  "inlineEditor.cardInfo": "Thông tin",
+  "inlineEditor.cardDevice": "Thiết bị",
+  "inlineEditor.cardNetwork": "Mạng & vị trí",
+  "inlineEditor.folderLabel": "Thư mục",
+  "inlineEditor.folderNone": "Không có thư mục",
+  "inlineEditor.cardHardware": "Phần cứng & màn hình",
+  "inlineEditor.cardPorts": "Chặn cổng mạng"
 }

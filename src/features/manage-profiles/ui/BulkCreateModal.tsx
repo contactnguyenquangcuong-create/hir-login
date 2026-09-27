@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import { Button, DialogModal } from "@proxyshard/shardx-ui-kit";
 import { toast } from "../../../shared/lib/toast";
 import { useProfile } from "../../../entities/profile";
@@ -8,16 +8,13 @@ import { useProfile } from "../../../entities/profile";
 type ParseRow = { row: number; name: string; folder: string; notes: string; proxy: string; color: string; error: string | null };
 type CreateItem = { index: number; ok: boolean; id: string | null; error: string | null };
 
-function downloadTemplate() {
-  const header = "name,folder,notes,proxy,color\n";
-  const ex1 = 'FB 01,Ads,via US,socks5://user:pass@1.2.3.4:1080,#8b5cf6\n';
-  const ex2 = 'FB 02,,ghi chú,http://5.6.7.8:8080,#22c55e\n';
-  const csv = header + ex1 + ex2;
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url; a.download = "hir-bulk-template.csv"; a.click();
-  URL.revokeObjectURL(url);
+async function downloadTemplate() {
+  try {
+    const dest = await save({ defaultPath: "hir-login-mau-tao-profile.xlsx", filters: [{ name: "Excel", extensions: ["xlsx"] }] });
+    if (!dest) return;
+    await invoke("bulk_template_save", { path: dest });
+    toast.ok("Đã lưu file mẫu");
+  } catch (e) { toast.err(String(e)); }
 }
 
 export function BulkCreateButton() {
@@ -32,6 +29,7 @@ export function BulkCreateButton() {
 
 function BulkCreateModal({ onClose }: { onClose: () => void }) {
   const reload = useProfile((s) => s.reload);
+  const rememberFolder = useProfile((s) => s.rememberFolder);
   const [rows, setRows] = useState<ParseRow[] | null>(null);
   const [path, setPath] = useState("");
   const [creating, setCreating] = useState(false);
@@ -65,7 +63,7 @@ function BulkCreateModal({ onClose }: { onClose: () => void }) {
       setResults(res);
       const ok = res.filter((x) => x.ok).length;
       const fail = res.filter((x) => !x.ok).length;
-      if (ok > 0) { reload(); toast.ok(`Đã tạo ${ok} profile${fail ? `, ${fail} lỗi` : ""}`); }
+      if (ok > 0) { for (const f of new Set(payload.map((r) => r.folder).filter(Boolean))) rememberFolder(f); reload(); toast.ok(`Đã tạo ${ok} profile${fail ? `, ${fail} lỗi` : ""}`); }
       if (fail > 0 && ok === 0) toast.err(`${fail} dòng lỗi`);
     } catch (e) { toast.err(String(e)); }
     finally { setCreating(false); }
@@ -85,13 +83,21 @@ function BulkCreateModal({ onClose }: { onClose: () => void }) {
       isLoading={creating}
     >
       <div className="flex flex-col gap-3 py-3">
-        <p className="m-0 text-paragraph-xs text-text-soft-400">
-          Cột: <b>name</b> (bắt buộc), <b>folder</b>, <b>notes</b>, <b>proxy</b> (vd socks5://user:pass@host:port), <b>color</b> (#rrggbb). Fingerprint random.
-          <button className="ml-2 underline text-primary-base" onClick={downloadTemplate}>Tải file mẫu .csv</button>
-        </p>
-        <div className="flex gap-2 items-center">
-          <Button variant="neutral" mode="stroke" size="small" onClick={pickFile}>Chọn file .xlsx / .csv</Button>
-          {path && <span className="truncate text-paragraph-xs text-text-soft-400 ml-2">{path}</span>}
+        <div className="flex flex-col gap-3 rounded-xl bg-bg-weak-50 p-4 ring-1 ring-inset ring-stroke-soft-200">
+          <div className="flex flex-col gap-1">
+            <span className="text-label-sm text-text-strong-950">Bước 1: tải file mẫu và điền</span>
+            <span className="text-paragraph-xs text-text-soft-400">
+              Các cột: <b>Tên</b> (bắt buộc), <b>Thư mục</b>, <b>Ghi chú</b>, <b>Proxy</b>, <b>Màu</b> (#rrggbb). Thư mục chưa có sẽ được tạo. Fingerprint được chọn ngẫu nhiên.
+            </span>
+          </div>
+          <div><Button variant="neutral" mode="stroke" size="small" onClick={downloadTemplate}>Tải file Excel mẫu (.xlsx)</Button></div>
+        </div>
+        <div className="flex flex-col gap-2 rounded-xl bg-bg-weak-50 p-4 ring-1 ring-inset ring-stroke-soft-200">
+          <span className="text-label-sm text-text-strong-950">Bước 2: chọn file đã điền (.xlsx hoặc .csv)</span>
+          <div className="flex items-center gap-2">
+            <Button variant="primary" mode="stroke" size="small" onClick={pickFile}>Chọn file</Button>
+            {path && <span className="truncate text-paragraph-xs text-text-soft-400" title={path}>{path}</span>}
+          </div>
         </div>
 
         {rows && (
@@ -105,7 +111,7 @@ function BulkCreateModal({ onClose }: { onClose: () => void }) {
               <table className="w-full text-left text-paragraph-xs">
                 <thead className="sticky top-0 bg-bg-weak-50">
                   <tr>
-                    <th className="px-2 py-1">#</th><th className="px-2 py-1">name</th><th className="px-2 py-1">folder</th><th className="px-2 py-1">proxy</th><th className="px-2 py-1">color</th><th className="px-2 py-1">lỗi</th>
+                    <th className="px-2 py-1">#</th><th className="px-2 py-1">Tên</th><th className="px-2 py-1">Thư mục</th><th className="px-2 py-1">Proxy</th><th className="px-2 py-1">Màu</th><th className="px-2 py-1">Kết quả</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -127,7 +133,6 @@ function BulkCreateModal({ onClose }: { onClose: () => void }) {
             </div>
           </div>
         )}
-        {!rows && <p className="m-0 text-paragraph-xs text-text-soft-400">Chưa chọn file. Dùng file mẫu để xem định dạng.</p>}
       </div>
     </DialogModal>
   );

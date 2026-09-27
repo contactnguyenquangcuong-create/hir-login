@@ -1396,6 +1396,49 @@ fn bulk_rows_from_table(rows: Vec<Vec<String>>) -> Vec<BulkParseRow> {
     out
 }
 
+/// A ready-to-fill Excel sheet: header row (with the folder column), two example rows.
+fn build_bulk_template_xlsx() -> Result<Vec<u8>, String> {
+    use std::io::Write;
+    let rows: [[&str; 5]; 3] = [
+        ["Tên", "Thư mục", "Ghi chú", "Proxy", "Màu"],
+        ["FB 01", "Shop A", "Nick chạy quảng cáo", "socks5://user:pass@1.2.3.4:1080", "#8b5cf6"],
+        ["FB 02", "Shop B", "", "1.2.3.4:8080:user:pass", "#22c55e"],
+    ];
+    let esc = |t: &str| t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let mut sheet = String::from(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols><col min="1" max="1" width="18" customWidth="1"/><col min="2" max="2" width="18" customWidth="1"/><col min="3" max="3" width="28" customWidth="1"/><col min="4" max="4" width="38" customWidth="1"/><col min="5" max="5" width="12" customWidth="1"/></cols><sheetData>"#);
+    for (r, row) in rows.iter().enumerate() {
+        sheet.push_str(&format!(r#"<row r="{}">"#, r + 1));
+        for (c, v) in row.iter().enumerate() {
+            if v.is_empty() { continue; }
+            let col = (b'A' + c as u8) as char;
+            sheet.push_str(&format!(r#"<c r="{col}{}" t="inlineStr"><is><t xml:space="preserve">{}</t></is></c>"#, r + 1, esc(v)));
+        }
+        sheet.push_str("</row>");
+    }
+    sheet.push_str("</sheetData></worksheet>");
+    let mut buf = std::io::Cursor::new(Vec::new());
+    {
+        let mut z = zip::ZipWriter::new(&mut buf);
+        let o = zip::write::SimpleFileOptions::default();
+        let mut add = |name: &str, body: &str| -> Result<(), String> {
+            z.start_file(name, o).map_err(|e| e.to_string())?;
+            z.write_all(body.as_bytes()).map_err(|e| e.to_string())
+        };
+        add("[Content_Types].xml", r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#)?;
+        add("_rels/.rels", r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#)?;
+        add("xl/workbook.xml", r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Profiles" sheetId="1" r:id="rId1"/></sheets></workbook>"#)?;
+        add("xl/_rels/workbook.xml.rels", r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#)?;
+        add("xl/worksheets/sheet1.xml", &sheet)?;
+        z.finish().map_err(|e| e.to_string())?;
+    }
+    Ok(buf.into_inner())
+}
+
+#[tauri::command]
+fn bulk_template_save(path: String) -> Result<(), String> {
+    std::fs::write(&path, build_bulk_template_xlsx()?).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn bulk_parse_file(path: String) -> Result<Vec<BulkParseRow>, String> {
     let p = std::path::Path::new(&path);
@@ -2978,6 +3021,7 @@ pub fn run() {
             profile_clone,
             profile_import,
             bulk_parse_file,
+            bulk_template_save,
             profile_bulk_create,
             profile_export_folder,
             profile_import_folder,
@@ -3290,6 +3334,20 @@ mod bulk_file_tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].folder, "Ads");
         assert_eq!(rows[0].error, None);
+    }
+
+    /// The Excel template offered for download must read back through the importer.
+    #[test]
+    fn the_downloadable_template_parses() {
+        let path = std::env::temp_dir().join(format!("hir-template-{}.xlsx", uuid::Uuid::new_v4()));
+        std::fs::write(&path, build_bulk_template_xlsx().unwrap()).unwrap();
+        let rows = parse_xlsx_rows(&path).expect("template parses");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(rows.len(), 2);
+        assert_eq!((rows[0].name.as_str(), rows[0].folder.as_str(), rows[0].color.as_str()), ("FB 01", "Shop A", "#8b5cf6"));
+        assert_eq!(rows[1].notes, "");
+        assert_eq!(rows[1].proxy, "1.2.3.4:8080:user:pass");
+        assert!(rows.iter().all(|r| r.error.is_none()), "{:?}", rows.iter().map(|r| &r.error).collect::<Vec<_>>());
     }
 
     /// Runs against real Excel-style files when HIR_TEST_XLSX names one.

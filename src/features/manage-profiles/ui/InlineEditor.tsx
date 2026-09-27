@@ -26,6 +26,7 @@ import { enrichPicksForPreset, claimsMobile } from "../../../entities/profile";
 import { useGpuCompat } from "../../../shared/model/gpuCompat";
 import { IncompatibleWarningModal } from "../../gpu-compat";
 import { useT } from "../../../shared/i18n";
+import { useFolderChoices } from "../../../entities/profile/lib/useFolderChoices";
 
 // The monitor this launcher is on, in CSS pixels. Null while it is being asked
 // and on a machine with none, and the editor then offers every resolution.
@@ -39,13 +40,19 @@ function useHostScreen(): [number, number] | null {
   return size;
 }
 
-function SectionHeading({ children }: { children: React.ReactNode }) {
+/** One group of related fields; every group in the editor looks the same. */
+function Card({ title, children }: { title: string; children: React.ReactNode }) {
   return (
-    <div className="mb-0.5 flex items-center gap-1.5 text-subheading-2xs text-primary-base">
+    <section className="flex flex-col gap-3 rounded-xl bg-bg-white-0 p-4 shadow-[var(--shadow-xs)] ring-1 ring-inset ring-stroke-soft-200">
+      <h4 className="m-0 text-label-sm text-text-strong-950">{title}</h4>
       {children}
-    </div>
+    </section>
   );
 }
+
+const Hint = ({ children }: { children: React.ReactNode }) => (
+  <p className="m-0 -mt-1.5 text-paragraph-xs text-text-soft-400">{children}</p>
+);
 
 export function InlineEditor({
   draft, setDraft, proxies, fingerprints, onSave, onCancel,
@@ -59,6 +66,7 @@ export function InlineEditor({
 }) {
   const t = useT();
   const f = draft;
+  const folderChoices = useFolderChoices(f.folder);
   const u = <K extends keyof ProfileForm>(k: K, v: ProfileForm[K]) => setDraft({ ...f, [k]: v });
 
   // OS filter init from bound fingerprint's platform; new profile uses host OS.
@@ -163,26 +171,39 @@ export function InlineEditor({
   };
 
   return (
-    <div className="inline-editor relative border-t border-stroke-soft-200 bg-bg-weak-50 px-[18px] py-3.5 pl-[22px]">
+    <div className="inline-editor relative border-t border-stroke-soft-200 bg-bg-weak-50 px-[18px] py-4 pl-[22px]">
       <div className="absolute left-0 top-0 h-full w-[3px] bg-primary-base" />
-      <div className="grid grid-cols-3 gap-4">
-        {/* ----- col 1: identity + hardware ----- */}
-        <div className="flex flex-col gap-4">
-          <SectionHeading>{t("inlineEditor.identityHeading")}</SectionHeading>
-          <Field label={t("inlineEditor.nameLabel")} value={f.name} onChange={(v) => u("name", v)} placeholder={t("inlineEditor.namePlaceholder")} />
-
-          <label className="flex flex-col gap-1">
-            <span className="text-label-base font-medium text-text-strong-900">{t("inlineEditor.osLabel")}</span>
-            <SegmentControl
-              size="small"
-              className="w-full *:flex-1"
-              value={osFilter}
-              items={OS_OPTIONS.map((o) => ({ value: o.id, label: o.label }))}
-              onChange={pickOs}
+      <div className="grid grid-cols-1 items-stretch gap-4 lg:grid-cols-2 xl:grid-cols-3">
+        <div className="flex flex-col gap-4 [&>section:last-child]:flex-1">
+          <Card title={t("inlineEditor.cardInfo")}>
+            <Field label={t("inlineEditor.nameLabel")} value={f.name} onChange={(v) => u("name", v)} placeholder={t("inlineEditor.namePlaceholder")} />
+            <CSSelect
+              title={t("inlineEditor.folderLabel")}
+              value={f.folder}
+              onChange={(v) => u("folder", v)}
+              options={[{ value: "", label: t("inlineEditor.folderNone") }, ...folderChoices.map((x) => ({ value: x, label: x }))]}
             />
-          </label>
+            <ColorSwatches label={t("inlineEditor.colorLabel")} value={f.color} onChange={(v) => u("color", v)} />
+            <Textarea
+              label={t("inlineEditor.notesLabel")}
+              rows={2}
+              value={f.notes}
+              onChange={(e) => u("notes", e.target.value)}
+              placeholder={t("inlineEditor.notesPlaceholder")}
+            />
+          </Card>
 
-          <label className="flex flex-col gap-1">
+          <Card title={t("inlineEditor.cardDevice")}>
+            <label className="flex flex-col gap-1">
+              <span className="text-label-base font-medium text-text-strong-900">{t("inlineEditor.osLabel")}</span>
+              <SegmentControl
+                size="small"
+                className="w-full *:flex-1"
+                value={osFilter}
+                items={OS_OPTIONS.map((o) => ({ value: o.id, label: o.label }))}
+                onChange={pickOs}
+              />
+            </label>
             <CSSelect
               value={f.gpu_preset_id}
               onChange={(v) => chooseGpu(v)}
@@ -190,81 +211,20 @@ export function InlineEditor({
               placeholder={t("inlineEditor.gpuEmpty", { os: osFilter })}
               options={gpusForOs.map((g) => ({ value: g.id, label: g.label }))}
             />
-          </label>
+            <Field label={t("inlineEditor.userAgentLabel")} value={f.user_agent} onChange={(v) => u("user_agent", v)} mono />
+          </Card>
 
-          <Field label={t("inlineEditor.userAgentLabel")} value={f.user_agent} onChange={(v) => u("user_agent", v)} mono />
-
-          <div className="grid grid-cols-2 gap-3">
-            <SelectField
-              label={t("inlineEditor.cpuLabel")}
-              value={f.hardware_concurrency}
-              onChange={(v) => u("hardware_concurrency", v)}
-              options={CPU_OPTIONS}
-            />
-            <SelectField
-              label={t("inlineEditor.memoryLabel")}
-              value={f.device_memory}
-              onChange={(v) => u("device_memory", v)}
-              options={MEMORY_OPTIONS}
-            />
-          </div>
-
-          <SelectField
-            label={t("inlineEditor.refreshRateLabel")}
-            value={f.refresh_rate}
-            onChange={(v) => u("refresh_rate", v)}
-            options={REFRESH_RATE_OPTIONS}
-            format={(v) => `${v} Hz`}
-          />
-          <p className="m-0 -mt-2 text-paragraph-xs text-text-soft-400">
-            {t("inlineEditor.refreshRateHelp")}
-          </p>
-
-          {/* Windows and Linux only: on macOS the profile's own screen is kept
-              as it is, so there is nothing here for an operator to choose. */}
-          {(osFilter === "Windows" || osFilter === "Linux") && (
-            <>
-              <SelectField
-                label={t("inlineEditor.resolutionLabel")}
-                value={f.screen_w > 0 ? `${f.screen_w}x${f.screen_h}` : ""}
-                onChange={(v) => {
-                  const [w, h] = v ? v.split("x").map(Number) : [0, 0];
-                  u("screen_w", w);
-                  u("screen_h", h);
-                }}
-                options={resolutionOptions}
-                format={(v) => (v ? String(v).replace("x", " × ") : t("inlineEditor.resolutionTemplate"))}
-              />
-              <p className="m-0 -mt-2 text-paragraph-xs text-text-soft-400">
-                {hostScreen
-                  ? t("inlineEditor.resolutionHelp", { w: hostScreen[0], h: hostScreen[1] })
-                  : t("inlineEditor.resolutionHelpNoHost")}
-              </p>
-            </>
-          )}
-
-          <label className="flex flex-col gap-1">
-            <span className="text-label-base font-medium text-text-strong-900">{t("inlineEditor.proxyLabel")}</span>
-            <ProxySelect
-              value={f.proxy_id}
-              proxies={proxies}
-              onChange={(id) => u("proxy_id", id)}
-            />
-          </label>
-
-          <ColorSwatches
-            label={t("inlineEditor.colorLabel")}
-            value={f.color}
-            onChange={(v) => u("color", v)}
-          />
+          <Card title={t("inlineEditor.extensionsHeading")}>
+            <ExtensionPicker value={f.extensions} onChange={(v) => u("extensions", v)} />
+          </Card>
         </div>
-
-        {/* ----- col 2: locale + noise ----- */}
-        <div className="flex flex-col gap-4">
-          <SectionHeading>{t("inlineEditor.localeHeading")}</SectionHeading>
-          <div className="grid grid-cols-2 gap-3">
+        <div className="flex flex-col gap-4 [&>section:last-child]:flex-1">
+          <Card title={t("inlineEditor.cardNetwork")}>
             <label className="flex flex-col gap-1">
-             
+              <span className="text-label-base font-medium text-text-strong-900">{t("inlineEditor.proxyLabel")}</span>
+              <ProxySelect value={f.proxy_id} proxies={proxies} onChange={(id) => u("proxy_id", id)} />
+            </label>
+            <div className="grid grid-cols-2 gap-3">
               <CSSelect
                 value={f.timezone}
                 title={t("inlineEditor.timezoneLabel")}
@@ -274,9 +234,6 @@ export function InlineEditor({
                   label: tz === AUTO_TZ ? t("inlineEditor.timezoneAuto") : `(${tzOffsetLabel(tz)}) ${tz}`,
                 }))}
               />
-            </label>
-            <label className="flex flex-col gap-1">
-             
               <CSSelect
                 title={t("inlineEditor.languageLabel")}
                 value={f.language}
@@ -287,33 +244,28 @@ export function InlineEditor({
                   label: l.code === AUTO_LANG ? t("inlineEditor.languageAuto") : l.label,
                 }))}
               />
-            </label>
-          </div>
-
-          <div className="mt-1.5">
-            <SectionHeading>{t("inlineEditor.noiseHeading")}</SectionHeading>
-          </div>
-          <div className="grid grid-cols-2 gap-2 gap-x-3">
-            <Pair label={t("inlineEditor.noiseCanvas")}        value={f.noise_canvas}        on={(v) => u("noise_canvas", v)} />
-            <Pair label={t("inlineEditor.noiseWebgl")}         value={f.noise_webgl}         on={(v) => u("noise_webgl", v)} />
-            <Pair label={t("inlineEditor.noiseAudio")}         value={f.noise_audio}         on={(v) => u("noise_audio", v)} />
-            <Pair label={t("inlineEditor.noiseClientRects")}   value={f.noise_client_rects}  on={(v) => u("noise_client_rects", v)} />
-            <Pair label={t("inlineEditor.noiseSensors")}       value={f.noise_sensors}       on={(v) => u("noise_sensors", v)} />
-            <Pair label={t("inlineEditor.noiseFonts")}         value={f.noise_fonts}         on={(v) => u("noise_fonts", v)} onText={t("inlineEditor.noiseFontsOnText")} />
-          </div>
-
-          <PortList
-            label={t("inlineEditor.blockedPortsLabel")}
-            value={f.blocked_ports}
-            onChange={(v) => u("blocked_ports", v)}
-          />
-        </div>
-
-        {/* ----- col 3: privacy + media + notes ----- */}
-        <div className="flex flex-col gap-4">
-          <SectionHeading>{t("inlineEditor.privacyHeading")}</SectionHeading>
-          <div className="grid grid-cols-2 gap-3">
+            </div>
             <label className="flex flex-col gap-1">
+              <span className="text-label-base font-medium text-text-strong-900">{t("inlineEditor.geoLabel")}</span>
+              <SegmentControl
+                size="small"
+                className="w-full *:flex-1"
+                value={f.geo_mode}
+                items={(["auto", "manual"] as GeoMode[]).map((m) => ({
+                  value: m,
+                  label: m === "auto" ? t("inlineEditor.geoAuto") : t("inlineEditor.geoManual"),
+                }))}
+                onChange={(v) => u("geo_mode", v as GeoMode)}
+              />
+            </label>
+            {f.geo_mode === "manual" && (
+              <div className="grid grid-cols-3 gap-3">
+                <NumField label={t("inlineEditor.latitudeLabel")} value={f.geo_lat} onChange={(v) => u("geo_lat", v)} step={0.0001} />
+                <NumField label={t("inlineEditor.longitudeLabel")} value={f.geo_lng} onChange={(v) => u("geo_lng", v)} step={0.0001} />
+                <NumField label={t("inlineEditor.accuracyLabel")} value={f.geo_accuracy} onChange={(v) => u("geo_accuracy", v)} />
+              </div>
+            )}
+            <div className="grid grid-cols-2 gap-3">
               <CSSelect
                 title={t("inlineEditor.webrtcLabel")}
                 value={f.webrtc}
@@ -324,8 +276,6 @@ export function InlineEditor({
                   { value: "block", label: t("inlineEditor.webrtcBlock") },
                 ]}
               />
-            </label>
-            <label className="flex flex-col gap-1">
               <CSSelect
                 title={t("inlineEditor.dntLabel")}
                 value={f.do_not_track ? "1" : "0"}
@@ -335,107 +285,105 @@ export function InlineEditor({
                   { value: "1", label: t("inlineEditor.dntOn") },
                 ]}
               />
-            </label>
-          </div>
-
-          <label className="flex flex-col gap-1">
-            <span className="text-label-base font-medium text-text-strong-900">{t("inlineEditor.geoLabel")}</span>
-            <SegmentControl
-              size="small"
-              className="w-full *:flex-1"
-              value={f.geo_mode}
-              items={(["auto", "manual"] as GeoMode[]).map((m) => ({
-                value: m,
-                label: m === "auto" ? t("inlineEditor.geoAuto") : t("inlineEditor.geoManual"),
-              }))}
-              onChange={(v) => u("geo_mode", v as GeoMode)}
-            />
-          </label>
-          {f.geo_mode === "manual" && (
-            <div className="grid grid-cols-3 gap-3">
-              <NumField label={t("inlineEditor.latitudeLabel")} value={f.geo_lat} onChange={(v) => u("geo_lat", v)} step={0.0001} />
-              <NumField label={t("inlineEditor.longitudeLabel")} value={f.geo_lng} onChange={(v) => u("geo_lng", v)} step={0.0001} />
-              <NumField label={t("inlineEditor.accuracyLabel")} value={f.geo_accuracy} onChange={(v) => u("geo_accuracy", v)} />
             </div>
-          )}
+          </Card>
 
-          <div className="mt-2.5">
-            <SectionHeading>{t("inlineEditor.mediaDevicesHeading")}</SectionHeading>
-          </div>
-          <div className="grid grid-cols-3 gap-3">
-            <SelectField label={t("inlineEditor.micLabel")} value={f.media_audio_in} onChange={(v) => u("media_audio_in", v)} options={MEDIA_COUNT_OPTIONS} />
-            <SelectField label={t("inlineEditor.speakersLabel")} value={f.media_audio_out} onChange={(v) => u("media_audio_out", v)} options={MEDIA_COUNT_OPTIONS} />
-            <SelectField label={t("inlineEditor.webcamLabel")} value={f.media_video_in} onChange={(v) => u("media_video_in", v)} options={MEDIA_COUNT_OPTIONS} />
-          </div>
-
-          {claimsMobile(f) && (
-            <>
-              <div className="mt-2.5">
-                <SectionHeading>{t("inlineEditor.mediaHeading")}</SectionHeading>
-              </div>
-              <Switch
-                label={t("inlineEditor.androidMediaLabel")}
-                checked={f.android_media}
-                onChange={(checked) => u("android_media", checked)}
-              />
-              <p className="m-0 -mt-1 text-paragraph-xs text-text-soft-400">
-                {t("inlineEditor.androidMediaHelp")}
-              </p>
-            </>
-          )}
-
-          <div className="mt-2.5">
-            <SectionHeading>{t("inlineEditor.extensionsHeading")}</SectionHeading>
-          </div>
-          <ExtensionPicker
-            value={f.extensions}
-            onChange={(v) => u("extensions", v)}
-          />
-
-          <div className="mt-2.5">
-            <SectionHeading>{t("inlineEditor.cookiesHeading")}</SectionHeading>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button
-              variant="neutral"
-              mode="stroke"
-              size="2xsmall"
-              onClick={async () => {
-                const path = await open({
-                  multiple: false, directory: false, title: t("inlineEditor.cookiesDialogTitle"),
-                  filters: [{ name: "JSON", extensions: ["json"] }],
-                });
-                if (typeof path === "string") u("cookies_file", path);
-              }}
-            >
-              {f.cookies_file ? t("inlineEditor.cookiesChange") : t("inlineEditor.cookiesLoad")}
-            </Button>
-            {f.cookies_file && (
+          <Card title={t("inlineEditor.noiseHeading")}>
+            <div className="grid grid-cols-2 gap-2 gap-x-3">
+              <Pair label={t("inlineEditor.noiseCanvas")}        value={f.noise_canvas}        on={(v) => u("noise_canvas", v)} />
+              <Pair label={t("inlineEditor.noiseWebgl")}         value={f.noise_webgl}         on={(v) => u("noise_webgl", v)} />
+              <Pair label={t("inlineEditor.noiseAudio")}         value={f.noise_audio}         on={(v) => u("noise_audio", v)} />
+              <Pair label={t("inlineEditor.noiseClientRects")}   value={f.noise_client_rects}  on={(v) => u("noise_client_rects", v)} />
+              <Pair label={t("inlineEditor.noiseSensors")}       value={f.noise_sensors}       on={(v) => u("noise_sensors", v)} />
+              <Pair label={t("inlineEditor.noiseFonts")}         value={f.noise_fonts}         on={(v) => u("noise_fonts", v)} onText={t("inlineEditor.noiseFontsOnText")} />
+            </div>
+          </Card>
+        </div>
+        <div className="flex flex-col gap-4 [&>section:last-child]:flex-1">
+          <Card title={t("inlineEditor.cardHardware")}>
+            <div className="grid grid-cols-2 gap-3">
+              <SelectField label={t("inlineEditor.cpuLabel")} value={f.hardware_concurrency} onChange={(v) => u("hardware_concurrency", v)} options={CPU_OPTIONS} />
+              <SelectField label={t("inlineEditor.memoryLabel")} value={f.device_memory} onChange={(v) => u("device_memory", v)} options={MEMORY_OPTIONS} />
+            </div>
+            <SelectField
+              label={t("inlineEditor.refreshRateLabel")}
+              value={f.refresh_rate}
+              onChange={(v) => u("refresh_rate", v)}
+              options={REFRESH_RATE_OPTIONS}
+              format={(v) => `${v} Hz`}
+            />
+            <Hint>{t("inlineEditor.refreshRateHelp")}</Hint>
+            {/* Windows and Linux only: on macOS the profile's own screen is kept
+                as it is, so there is nothing here for an operator to choose. */}
+            {(osFilter === "Windows" || osFilter === "Linux") && (
               <>
-                <span className="truncate text-paragraph-xs text-text-sub-600" title={f.cookies_file}>
-                  {f.cookies_file.split(/[/\\]/).pop()}
-                </span>
-                <button
-                  type="button"
-                  className="text-paragraph-xs text-text-soft-400 hover:text-error-base"
-                  onClick={() => u("cookies_file", "")}
-                >
-                  {t("inlineEditor.cookiesRemove")}
-                </button>
+                <SelectField
+                  label={t("inlineEditor.resolutionLabel")}
+                  value={f.screen_w > 0 ? `${f.screen_w}x${f.screen_h}` : ""}
+                  onChange={(v) => {
+                    const [w, h] = v ? v.split("x").map(Number) : [0, 0];
+                    u("screen_w", w);
+                    u("screen_h", h);
+                  }}
+                  options={resolutionOptions}
+                  format={(v) => (v ? String(v).replace("x", " × ") : t("inlineEditor.resolutionTemplate"))}
+                />
+                <Hint>
+                  {hostScreen
+                    ? t("inlineEditor.resolutionHelp", { w: hostScreen[0], h: hostScreen[1] })
+                    : t("inlineEditor.resolutionHelpNoHost")}
+                </Hint>
               </>
             )}
-          </div>
-          <p className="m-0 text-paragraph-xs text-text-soft-400">
-            {t("inlineEditor.cookiesHelp")}
-          </p>
+          </Card>
 
-          <Textarea
-            label={t("inlineEditor.notesLabel")}
-            rows={2}
-            value={f.notes}
-            onChange={(e) => u("notes", e.target.value)}
-            placeholder={t("inlineEditor.notesPlaceholder")}
-          />
+          <Card title={t("inlineEditor.cardPorts")}>
+            <PortList label={t("inlineEditor.blockedPortsLabel")} value={f.blocked_ports} onChange={(v) => u("blocked_ports", v)} />
+          </Card>
+
+          <Card title={t("inlineEditor.mediaDevicesHeading")}>
+            <div className="grid grid-cols-3 gap-3">
+              <SelectField label={t("inlineEditor.micLabel")} value={f.media_audio_in} onChange={(v) => u("media_audio_in", v)} options={MEDIA_COUNT_OPTIONS} />
+              <SelectField label={t("inlineEditor.speakersLabel")} value={f.media_audio_out} onChange={(v) => u("media_audio_out", v)} options={MEDIA_COUNT_OPTIONS} />
+              <SelectField label={t("inlineEditor.webcamLabel")} value={f.media_video_in} onChange={(v) => u("media_video_in", v)} options={MEDIA_COUNT_OPTIONS} />
+            </div>
+            {claimsMobile(f) && (
+              <>
+                <Switch label={t("inlineEditor.androidMediaLabel")} checked={f.android_media} onChange={(checked) => u("android_media", checked)} />
+                <Hint>{t("inlineEditor.androidMediaHelp")}</Hint>
+              </>
+            )}
+          </Card>
+
+          <Card title={t("inlineEditor.cookiesHeading")}>
+            <div className="flex items-center gap-2">
+              <Button
+                variant="neutral"
+                mode="stroke"
+                size="2xsmall"
+                onClick={async () => {
+                  const path = await open({
+                    multiple: false, directory: false, title: t("inlineEditor.cookiesDialogTitle"),
+                    filters: [{ name: "JSON", extensions: ["json"] }],
+                  });
+                  if (typeof path === "string") u("cookies_file", path);
+                }}
+              >
+                {f.cookies_file ? t("inlineEditor.cookiesChange") : t("inlineEditor.cookiesLoad")}
+              </Button>
+              {f.cookies_file && (
+                <>
+                  <span className="truncate text-paragraph-xs text-text-sub-600" title={f.cookies_file}>
+                    {f.cookies_file.split(/[/\\]/).pop()}
+                  </span>
+                  <button type="button" className="text-paragraph-xs text-text-soft-400 hover:text-error-base" onClick={() => u("cookies_file", "")}>
+                    {t("inlineEditor.cookiesRemove")}
+                  </button>
+                </>
+              )}
+            </div>
+            <Hint>{t("inlineEditor.cookiesHelp")}</Hint>
+          </Card>
         </div>
       </div>
       <div className="mt-4 flex justify-end gap-2.5 border-t border-stroke-soft-200 pt-3.5">

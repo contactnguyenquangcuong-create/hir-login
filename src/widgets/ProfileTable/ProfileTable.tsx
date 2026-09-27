@@ -66,6 +66,7 @@ export function ProfileTable() {
   return (
     <>
       <div className="overflow-hidden rounded-lg bg-bg-white-0 shadow-[var(--shadow-xs)] ring-1 ring-inset ring-stroke-soft-200">
+        {expanded !== "__new__" && (
         <div className="t-cols border-b border-stroke-soft-200 bg-bg-weak-50 text-subheading-2xs text-text-soft-400">
           <div></div>
           <div>
@@ -85,6 +86,7 @@ export function ProfileTable() {
           <div>{t("profileTable.colLastRun")}</div>
           <div></div>
         </div>
+        )}
         {expanded === "__new__" && (
           <div className="row-expanded row-new relative border-t border-stroke-soft-200 first:border-t-0">
             <ProfileInlineEditor />

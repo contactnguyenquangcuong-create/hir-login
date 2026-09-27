@@ -737,6 +737,12 @@ fn sync_trashing() -> &'static Mutex<std::collections::HashSet<String>> {
     S.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
 }
 
+/// Ids whose deletion this run already told the server about (so a refusal is not repeated every round).
+fn deletion_reported() -> &'static Mutex<std::collections::HashSet<String>> {
+    static S: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
 async fn report_deleted(id: String) {
     let Ok(Some((cfg, base, token))) = active_config() else { return };
     let holder = device_name(&cfg);
@@ -988,6 +994,12 @@ pub async fn sync_round() -> Result<usize> {
             // (it was restored elsewhere).
             if let Some(k) = known {
                 if r.updated_at.as_deref().map_or(true, |u| u == k.remote) {
+                    // The report of that deletion may never have reached the server (it was
+                    // unreachable, or this machine was offline): say it again, once per run.
+                    let first = deletion_reported().lock().map(|mut set| set.insert(id.to_string())).unwrap_or(false);
+                    if first {
+                        report_deleted(id.to_string()).await;
+                    }
                     continue;
                 }
             }

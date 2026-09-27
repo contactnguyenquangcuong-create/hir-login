@@ -1567,5 +1567,12 @@
   "err.noDelete": "You don't have permission to delete this profile.",
   "err.noAdmin": "Only the admin can manage members.",
   "err.noPerm": "You don't have permission to do this.",
-  "sidebar.navFolders": "Folders"
+  "sidebar.navFolders": "Folders",
+  "inlineEditor.cardInfo": "Details",
+  "inlineEditor.cardDevice": "Device",
+  "inlineEditor.cardNetwork": "Network & location",
+  "inlineEditor.folderLabel": "Folder",
+  "inlineEditor.folderNone": "No folder",
+  "inlineEditor.cardHardware": "Hardware & screen",
+  "inlineEditor.cardPorts": "Blocked ports"
 }

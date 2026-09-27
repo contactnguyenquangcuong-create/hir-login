@@ -1567,5 +1567,12 @@
   "err.noDelete": "你没有删除此配置文件的权限。",
   "err.noAdmin": "只有管理员可以管理成员。",
   "err.noPerm": "你没有权限执行此操作。",
-  "sidebar.navFolders": "文件夹"
+  "sidebar.navFolders": "文件夹",
+  "inlineEditor.cardInfo": "基本信息",
+  "inlineEditor.cardDevice": "设备",
+  "inlineEditor.cardNetwork": "网络与位置",
+  "inlineEditor.folderLabel": "文件夹",
+  "inlineEditor.folderNone": "无文件夹",
+  "inlineEditor.cardHardware": "硬件与屏幕",
+  "inlineEditor.cardPorts": "端口拦截"
 }

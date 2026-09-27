@@ -30,7 +30,6 @@ export function FolderTabs() {
   const setFolder = useProfile((s) => s.setFolder);
   const setDropTarget = useProfile((s) => s.setDropTarget);
   const setProfileFolder = useProfile((s) => s.setProfileFolder);
-  const setFolderModal = useProfile((s) => s.setFolderModal);
   const deleteFolder = useProfile((s) => s.deleteFolder);
   const folders = useFolders();
   const ctx = useContextMenu();
@@ -120,15 +119,6 @@ export function FolderTabs() {
           </span>
         </button>
       ))}
-      {canEdit(role) && (
-        <button
-          className="flex-none cursor-pointer whitespace-nowrap border-0 bg-transparent px-3 py-2 text-base font-normal leading-none text-text-soft-400 hover:text-primary-base"
-          title={t("folderTabs.newFolder")}
-          onClick={() => setFolderModal({ profileId: null })}
-        >
-          +
-        </button>
-      )}
       {canShare(role) && folder !== "all" && (
         <button
           className="ml-auto flex-none cursor-pointer whitespace-nowrap border-0 bg-transparent px-3 py-2 text-label-xs text-text-sub-600 hover:text-primary-base"

@@ -17,6 +17,7 @@ export function FoldersPage() {
   const role = useTeam((s) => s.role);
   const setSection = useNav((s) => s.setSection);
   const profiles = useProfile((s) => s.profiles);
+  const rememberFolder = useProfile((s) => s.rememberFolder);
   const localFolders = useFolders();
   const [server, setServer] = useState<ServerFolder[] | null>(null);
   const [members, setMembers] = useState<Member[]>([]);
@@ -40,7 +41,12 @@ export function FoldersPage() {
     return m;
   }, [profiles]);
 
-  const nameOf = (id: string) => members.find((m) => m.id === id)?.name ?? "?";
+  const meId = useTeam((s) => s.id);
+  const nameOf = (id: string) => {
+    const m = members.find((x) => x.id === id);
+    if (id === meId) return `${m?.name ?? "Bạn"} (bạn)`;
+    return m?.name ?? "Quản lý khác";
+  };
 
   // Folders on the server, then any that exist only on this machine so far.
   const rows = useMemo(() => {
@@ -52,7 +58,7 @@ export function FoldersPage() {
   const create = async () => {
     const n = name.trim();
     if (!n) return;
-    try { await teamCall("PUT", "/admin/folders", { name: n }); setName(""); toast.ok(`Đã tạo thư mục "${n}"`); await load(); }
+    try { await teamCall("PUT", "/admin/folders", { name: n }); rememberFolder(n); setName(""); toast.ok(`Đã tạo thư mục "${n}"`); await load(); }
     catch (e) { toast.err(/409|exists/i.test(String(e)) ? "Thư mục này đã tồn tại." : String(e)); }
   };
   const remove = async (f: string) => {

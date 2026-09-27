@@ -19,21 +19,23 @@ type State = {
   /** null = not on a team (or server unreachable and never seen): everything is local and unrestricted. */
   role: TeamRole | null;
   name: string;
+  id: string;
   refresh: () => Promise<void>;
 };
 
 export const useTeam = create<State>((set) => ({
   role: cached(),
   name: "",
+  id: "",
   refresh: async () => {
     try {
-      const me = await teamCall<{ role: TeamRole; name: string }>("GET", "/me");
-      set({ role: me.role, name: me.name });
+      const me = await teamCall<{ role: TeamRole; name: string; id: string }>("GET", "/me");
+      set({ role: me.role, name: me.name, id: me.id });
       try { localStorage.setItem(CACHE, me.role); } catch { /* ignore */ }
     } catch (e) {
       // Only forget the role when sync is off; a dropped connection keeps the last known one.
       if (/sync is not enabled/i.test(String(e))) {
-        set({ role: null, name: "" });
+        set({ role: null, name: "", id: "" });
         try { localStorage.removeItem(CACHE); } catch { /* ignore */ }
       }
     }

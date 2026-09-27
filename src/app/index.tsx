@@ -39,7 +39,11 @@ function Root() {
   );
 }
 
-ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
+// One root per page. In dev, hot reload runs this module again, and a second
+// createRoot on the same element would paint the whole app twice.
+const container = document.getElementById("root") as HTMLElement & { __hirRoot?: ReactDOM.Root };
+const root = (container.__hirRoot ??= ReactDOM.createRoot(container));
+root.render(
   <React.StrictMode>
     <Root />
   </React.StrictMode>,

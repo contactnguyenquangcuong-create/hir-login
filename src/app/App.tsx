@@ -41,7 +41,9 @@ export function App() {
           >
             <Sidebar />
             <main className="overflow-y-auto px-7 py-6">
-              {section === "browsers" && <BrowsersPage />}
+              {/* Kept mounted while another page is open: coming back is instant and an
+                  unfinished "new profile" form is still there. */}
+              <div className={section === "browsers" ? "" : "hidden"}><BrowsersPage /></div>
               {section === "proxies" && <ProxiesPage />}
               {section === "proxyshard" && <ProxyShardPage />}
               {section === "fingerprints" && <FingerprintsPage />}
