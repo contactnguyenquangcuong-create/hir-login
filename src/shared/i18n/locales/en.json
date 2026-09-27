@@ -1566,5 +1566,6 @@
   "err.noMove": "You can't move this profile to another folder.",
   "err.noDelete": "You don't have permission to delete this profile.",
   "err.noAdmin": "Only the admin can manage members.",
-  "err.noPerm": "You don't have permission to do this."
+  "err.noPerm": "You don't have permission to do this.",
+  "sidebar.navFolders": "Folders"
 }

@@ -1566,5 +1566,6 @@
   "err.noMove": "Bạn không được chuyển profile sang thư mục khác.",
   "err.noDelete": "Bạn không có quyền xoá profile này.",
   "err.noAdmin": "Chỉ admin mới quản lý được nhân sự.",
-  "err.noPerm": "Bạn không có quyền làm thao tác này."
+  "err.noPerm": "Bạn không có quyền làm thao tác này.",
+  "sidebar.navFolders": "Thư mục"
 }

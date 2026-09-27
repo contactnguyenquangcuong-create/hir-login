@@ -3,6 +3,9 @@ import { cn } from "@proxyshard/shardx-ui-kit";
 import { useContextMenu } from "../../shared/hooks/useContextMenu";
 import { useT } from "../../shared/i18n";
 import { useProfile, useFolders } from "../../entities/profile";
+import { useState } from "react";
+import { useTeam, canEdit, canShare, startTeamRole } from "../../shared/model/teamRole";
+import { ShareFolderModal } from "../../features/manage-profiles/ui/ShareFolderModal";
 
 /* UI-kit "line" tab look, hand-rolled because tabs are drop targets too. */
 const tabBase =
@@ -31,6 +34,9 @@ export function FolderTabs() {
   const deleteFolder = useProfile((s) => s.deleteFolder);
   const folders = useFolders();
   const ctx = useContextMenu();
+  const role = useTeam((s) => s.role);
+  const [sharing, setSharing] = useState<string | null>(null);
+  useEffect(() => { startTeamRole(); }, []);
 
   // Native non-passive wheel handler turns vertical scroll into horizontal tab scroll.
   const folderTabsRef = useRef<HTMLDivElement>(null);
@@ -89,7 +95,8 @@ export function FolderTabs() {
           title={t("folderTabs.folderTabHint")}
           onContextMenu={(e) =>
             ctx.open(e, [
-              { label: t("folderTabs.deleteFolder"), onClick: () => deleteFolder(f), danger: true },
+              ...(canShare(role) ? [{ label: "Chia sẻ quyền…", onClick: () => setSharing(f) }] : []),
+              ...(canEdit(role) ? [{ label: t("folderTabs.deleteFolder"), onClick: () => deleteFolder(f), danger: true }] : []),
             ])
           }
           onDragOver={(e) => {
@@ -113,13 +120,25 @@ export function FolderTabs() {
           </span>
         </button>
       ))}
-      <button
-        className="flex-none cursor-pointer whitespace-nowrap border-0 bg-transparent px-3 py-2 text-base font-normal leading-none text-text-soft-400 hover:text-primary-base"
-        title={t("folderTabs.newFolder")}
-        onClick={() => setFolderModal({ profileId: null })}
-      >
-        +
-      </button>
+      {canEdit(role) && (
+        <button
+          className="flex-none cursor-pointer whitespace-nowrap border-0 bg-transparent px-3 py-2 text-base font-normal leading-none text-text-soft-400 hover:text-primary-base"
+          title={t("folderTabs.newFolder")}
+          onClick={() => setFolderModal({ profileId: null })}
+        >
+          +
+        </button>
+      )}
+      {canShare(role) && folder !== "all" && (
+        <button
+          className="ml-auto flex-none cursor-pointer whitespace-nowrap border-0 bg-transparent px-3 py-2 text-label-xs text-text-sub-600 hover:text-primary-base"
+          title="Chọn ai được dùng thư mục này"
+          onClick={() => setSharing(folder)}
+        >
+          Chia sẻ quyền
+        </button>
+      )}
+      {sharing && <ShareFolderModal folder={sharing} onClose={() => setSharing(null)} />}
       {ctx.node}
     </div>
   );

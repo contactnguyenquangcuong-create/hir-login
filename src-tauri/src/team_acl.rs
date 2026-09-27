@@ -2,10 +2,12 @@
 //! beyond one JSON file, so the whole permission model can be tested without a
 //! network.
 //!
-//! Roles: the *admin* is whoever started the server (the original shared token);
-//! a *manager* can add, edit and delete anywhere; a *member* only reaches the
-//! folders they were granted, at one level per folder — use, edit or delete.
-//! A folder a member was not granted does not exist for them.
+//! Roles: the *admin* is whoever started the server (the original shared token)
+//! and can do everything. A *group manager* has full rights (add, edit, delete,
+//! move) but only inside folders the admin gave them or that they created
+//! themselves. A *member* may only use the profiles of the folders they were
+//! granted — never add, change or delete. A folder nobody granted you does not
+//! exist for you.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -19,11 +21,9 @@ pub enum Level {
     None = 0,
     /// Open and close the profile; change nothing about it.
     Use = 1,
-    /// Use + change its configuration.
     Edit = 2,
-    /// Edit + delete it.
-    Delete = 3,
-    /// Admin / manager: also add, move between folders.
+    /// Add, change, delete, move: the admin anywhere, a group manager in
+    /// the folders they manage.
     Full = 4,
 }
 
@@ -31,8 +31,9 @@ impl Level {
     pub fn parse(s: &str) -> Level {
         match s {
             "use" => Level::Use,
-            "edit" => Level::Edit,
-            "delete" => Level::Delete,
+            // Older grants of edit / delete fall back to plain use: only a
+            // group manager changes things now.
+            "manage" | "full" => Level::Full,
             _ => Level::None,
         }
     }
@@ -41,8 +42,7 @@ impl Level {
             Level::None => "none",
             Level::Use => "use",
             Level::Edit => "edit",
-            Level::Delete => "delete",
-            Level::Full => "full",
+            Level::Full => "manage",
         }
     }
 }
@@ -75,9 +75,9 @@ impl Identity {
     pub fn admin() -> Self {
         Identity { id: "admin".into(), name: "Admin".into(), role: Role::Admin }
     }
-    /// May add things (profiles, folders, fingerprints) and see everything.
+    /// The admin: sees everything, changes anything.
     pub fn is_privileged(&self) -> bool {
-        matches!(self.role, Role::Admin | Role::Manager)
+        self.role == Role::Admin
     }
 }
 
@@ -99,9 +99,12 @@ pub struct Member {
 pub struct AclStore {
     #[serde(default)]
     pub members: Vec<Member>,
-    /// folder name -> member id -> "use" | "edit" | "delete"
+    /// folder name -> member id -> "use" | "manage"
     #[serde(default)]
     pub folders: BTreeMap<String, BTreeMap<String, String>>,
+    /// Every folder that was created on purpose -> who created it ("admin" or a member id).
+    #[serde(default)]
+    pub owners: BTreeMap<String, String>,
 }
 
 pub fn hash_token(token: &str) -> String {
@@ -138,7 +141,7 @@ impl AclStore {
     }
 
     /// What `who` may do with anything in `folder`. A profile that is in no
-    /// folder belongs to admins and managers only.
+    /// folder belongs to the admin only.
     pub fn level(&self, who: &Identity, folder: &str) -> Level {
         if who.is_privileged() {
             return Level::Full;
@@ -150,6 +153,7 @@ impl AclStore {
             .get(folder)
             .and_then(|m| m.get(&who.id))
             .map(|s| Level::parse(s))
+            .map(|l| if who.role == Role::Member { l.min(Level::Use) } else { l })
             .unwrap_or(Level::None)
     }
 
@@ -165,12 +169,24 @@ impl AclStore {
         }
     }
 
+    /// Register a folder; a group manager who creates one manages it.
+    pub fn claim_folder(&mut self, folder: &str, who: &Identity) {
+        if folder.is_empty() || self.owners.contains_key(folder) {
+            return;
+        }
+        self.owners.insert(folder.to_string(), who.id.clone());
+        if who.role == Role::Manager {
+            self.set_access(folder, &who.id, Level::Full);
+        }
+    }
+
     pub fn remove_member(&mut self, member_id: &str) {
         self.members.retain(|m| m.id != member_id);
         for f in self.folders.values_mut() {
             f.remove(member_id);
         }
         self.folders.retain(|_, v| !v.is_empty());
+        self.owners.retain(|_, o| o != member_id);
     }
 }
 
@@ -255,17 +271,24 @@ mod tests {
         let (mut s, an, binh) = store();
         assert_eq!(s.level(&an, "Ads"), Level::None, "no grant, no access");
         s.set_access("Ads", "m1", Level::Use);
-        s.set_access("Shop", "m1", Level::Delete);
+        s.set_access("Shop", "m1", Level::Full);
         assert_eq!(s.level(&an, "Ads"), Level::Use);
-        assert_eq!(s.level(&an, "Shop"), Level::Delete);
+        assert_eq!(s.level(&an, "Shop"), Level::Use, "a member never gets more than use");
+        s.set_access("Shop", "m2", Level::Full);
+        assert_eq!(s.level(&binh, "Shop"), Level::Full);
         assert_eq!(s.level(&an, "Other"), Level::None, "folders are independent");
         assert_eq!(s.level(&an, ""), Level::None, "unfiled belongs to admins");
-        assert_eq!(s.level(&binh, "Anything"), Level::Full);
-        assert_eq!(s.level(&binh, ""), Level::Full);
+        assert_eq!(s.level(&binh, "Anything"), Level::None, "a manager only reaches their own folders");
+        assert_eq!(s.level(&binh, ""), Level::None);
         assert_eq!(s.level(&Identity::admin(), "x"), Level::Full);
         s.set_access("Ads", "m1", Level::None);
         assert_eq!(s.level(&an, "Ads"), Level::None);
-        assert!(Level::Use < Level::Edit && Level::Edit < Level::Delete && Level::Delete < Level::Full);
+        assert!(Level::Use < Level::Full);
+        // A folder a manager creates is theirs from the start.
+        s.claim_folder("Mine", &binh);
+        assert_eq!(s.level(&binh, "Mine"), Level::Full);
+        assert_eq!(s.level(&an, "Mine"), Level::None);
+        assert_eq!(s.owners["Mine"], "m2");
     }
 
     #[test]
@@ -283,7 +306,7 @@ mod tests {
     #[test]
     fn removing_a_member_removes_their_grants() {
         let (mut s, _, _) = store();
-        s.set_access("Ads", "m1", Level::Edit);
+        s.set_access("Ads", "m1", Level::Full);
         s.set_access("Ads", "m2", Level::Use);
         s.remove_member("m1");
         assert_eq!(s.folders["Ads"].len(), 1);

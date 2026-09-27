@@ -13,6 +13,7 @@ import { ProxyShardPage } from "../pages/proxyshard";
 import { FingerprintsPage } from "../pages/fingerprints";
 import { ExtensionsPage } from "../pages/extensions";
 import { BookmarksPage } from "../pages/bookmarks";
+import { FoldersPage } from "../pages/folders";
 import { AutomationPage } from "../pages/automation";
 import { TrashPage } from "../pages/trash";
 import { SettingsPage } from "../pages/settings";
@@ -46,6 +47,7 @@ export function App() {
               {section === "fingerprints" && <FingerprintsPage />}
               {section === "extensions" && <ExtensionsPage />}
               {section === "bookmarks" && <BookmarksPage />}
+              {section === "folders" && <FoldersPage />}
               {section === "automation" && <AutomationPage />}
               {section === "trash" && <TrashPage />}
               {section === "patchlog" && <PatchLogPage />}

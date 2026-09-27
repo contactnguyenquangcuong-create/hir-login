@@ -345,7 +345,10 @@ async fn lock_profile(
     if !safe_id(&id) {
         return (StatusCode::BAD_REQUEST, Json(json!({"ok":false,"error":"bad id"}))).into_response();
     }
-    if profile_level(&who, &load_acl(), &meta_map(), &id) < Level::Use {
+    // A profile the server has never seen is locked before its first upload; whether the
+    // person may add it is decided by the upload (a group manager may, a member may not).
+    let brand_new = !meta_map().contains_key(&id) && who.role == team_acl::Role::Manager;
+    if !brand_new && profile_level(&who, &load_acl(), &meta_map(), &id) < Level::Use {
         audit(&who, "lock", &id, false, "no access");
         return not_found();
     }
@@ -381,7 +384,8 @@ async fn unlock_profile(
     if !safe_id(&id) {
         return (StatusCode::BAD_REQUEST, Json(json!({"ok":false,"error":"bad id"}))).into_response();
     }
-    if profile_level(&who, &load_acl(), &meta_map(), &id) < Level::Use {
+    let brand_new = !meta_map().contains_key(&id) && who.role == team_acl::Role::Manager;
+    if !brand_new && profile_level(&who, &load_acl(), &meta_map(), &id) < Level::Use {
         return not_found();
     }
     let v: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
@@ -450,10 +454,22 @@ async fn put_bundle(
         let acl = load_acl();
         let old = meta_map().get(&id).cloned();
         let live = old.as_ref().filter(|m| !m.get("deleted").and_then(|d| d.as_bool()).unwrap_or(false));
+        // Live profiles already in a folder: it is not free to claim.
+        let taken = |folder: &str| meta_map().iter().any(|(k, m)| {
+            k != &id && m.get("folder").and_then(|f| f.as_str()) == Some(folder)
+                && !m.get("deleted").and_then(|d| d.as_bool()).unwrap_or(false)
+        });
+        // Where may this person put a profile? Admin: anywhere. Group manager: a folder
+        // they manage, or a brand-new one (which then becomes theirs). Member: nowhere.
+        let may_place = |folder: &str| -> bool {
+            who.is_privileged()
+                || (who.role == team_acl::Role::Manager && !folder.is_empty()
+                    && (acl.level(&who, folder) == Level::Full
+                        || (!acl.owners.contains_key(folder) && !acl.folders.contains_key(folder) && !taken(folder))))
+        };
         match live {
             None => {
-                // A profile the server has never held (or one that was deleted): adding is for admins and managers.
-                if !who.is_privileged() {
+                if !may_place(&new_folder) {
                     audit(&who, "add", &id, false, "not allowed to add");
                     return forbidden("add");
                 }
@@ -464,7 +480,7 @@ async fn put_bundle(
                 if lvl < Level::Use {
                     return not_found();
                 }
-                if old_folder != new_folder && lvl < Level::Full {
+                if old_folder != new_folder && (lvl < Level::Full || !may_place(&new_folder)) {
                     audit(&who, "move", &id, false, "folder change");
                     return forbidden("move");
                 }
@@ -475,6 +491,12 @@ async fn put_bundle(
                 }
             }
         }
+    }
+    if !new_folder.is_empty() {
+        let _g = acl_lock();
+        let mut acl = load_acl();
+        acl.claim_folder(&new_folder, &who);
+        let _ = save_acl(&acl);
     }
     let locks_path = match locks_path() { Ok(p) => p, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok":false,"error":e.to_string()}))).into_response() };
     let mut locks = load_json(&locks_path, json!({}));
@@ -530,7 +552,7 @@ async fn delete_profile(
     if lvl < Level::Use && known {
         return not_found();
     }
-    if lvl < Level::Delete {
+    if lvl < Level::Full {
         audit(&who, "delete", &id, false, "no delete access");
         return forbidden("delete");
     }
@@ -647,7 +669,7 @@ async fn library_put(
     Json(json!({"ok": true})).into_response()
 }
 
-// ---- members & folder access (admin token only, except /me) ----
+// ---- members & folder sharing ----
 
 async fn me(
     headers: HeaderMap,
@@ -658,7 +680,7 @@ async fn me(
     let folders: Value = if who.is_privileged() {
         Value::Null
     } else {
-        json!(acl.folders.iter().filter_map(|(f, m)| m.get(&who.id).map(|l| (f.clone(), l.clone()))).collect::<std::collections::BTreeMap<_, _>>())
+        json!(acl.folders.iter().filter_map(|(f, m)| m.get(&who.id).map(|_| (f.clone(), acl.level(&who, f).as_str().to_string()))).collect::<std::collections::BTreeMap<_, _>>())
     };
     Json(json!({"ok": true, "id": who.id, "name": who.name, "role": who.role.as_str(), "privileged": who.is_privileged(), "folders": folders})).into_response()
 }
@@ -671,16 +693,30 @@ fn admin_only(headers: &HeaderMap, state: &ServerState) -> Result<Identity, Resp
     }
 }
 
+/// Admin or group manager: those who can share folders.
+fn staff_only(headers: &HeaderMap, state: &ServerState) -> Result<Identity, Response> {
+    match authenticate(headers, &state.token) {
+        None => Err(unauthorized()),
+        Some(w) if w.role != team_acl::Role::Member => Ok(w),
+        Some(_) => Err(forbidden("manage")),
+    }
+}
+
+fn err500(e: impl ToString) -> Response {
+    (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok":false,"error":e.to_string()}))).into_response()
+}
+
+/// Everyone (admin sees all; a manager sees the members they can share with).
 async fn admin_members(
     headers: HeaderMap,
     axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
 ) -> Response {
-    if let Err(r) = admin_only(&headers, &state) { return r; }
+    let who = match staff_only(&headers, &state) { Ok(w) => w, Err(r) => return r };
     let acl = load_acl();
-    let members: Vec<Value> = acl.members.iter().map(|m| json!({
-        "id": m.id, "name": m.name, "role": m.role, "disabled": m.disabled, "createdAt": m.created_at,
-        "folders": acl.folders.iter().filter_map(|(f, x)| x.get(&m.id).map(|l| (f.clone(), l.clone()))).collect::<std::collections::BTreeMap<_, _>>(),
-    })).collect();
+    let members: Vec<Value> = acl.members.iter()
+        .filter(|m| who.is_privileged() || m.role == "member")
+        .map(|m| json!({"id": m.id, "name": m.name, "role": m.role, "disabled": m.disabled, "createdAt": m.created_at}))
+        .collect();
     Json(json!({"ok": true, "members": members})).into_response()
 }
 
@@ -722,9 +758,15 @@ async fn admin_member_put(
         token = json!(t);
         id
     };
-    if let Err(e) = save_acl(&acl) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok":false,"error":e.to_string()}))).into_response();
+    // A person made a plain member can no longer manage anything.
+    if let Some(m) = acl.members.iter().find(|m| m.id == id).cloned() {
+        if m.role == "member" {
+            for g in acl.folders.values_mut() {
+                if g.get(&id).map(|l| l == "manage").unwrap_or(false) { g.insert(id.clone(), "use".into()); }
+            }
+        }
     }
+    if let Err(e) = save_acl(&acl) { return err500(e); }
     audit(&who, "member", &id, true, "");
     Json(json!({"ok": true, "id": id, "token": token})).into_response()
 }
@@ -738,21 +780,21 @@ async fn admin_member_delete(
     let _g = acl_lock();
     let mut acl = load_acl();
     acl.remove_member(&id);
-    if let Err(e) = save_acl(&acl) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok":false,"error":e.to_string()}))).into_response();
-    }
+    if let Err(e) = save_acl(&acl) { return err500(e); }
     audit(&who, "member-remove", &id, true, "");
     Json(json!({"ok": true})).into_response()
 }
 
-/// Every folder the server knows of (from uploaded profiles) with who may do what in it.
+/// The folders `who` may share: all of them for the admin, the ones they manage for a group manager.
+/// Each carries who currently has access and at what level.
 async fn admin_folders(
     headers: HeaderMap,
     axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
 ) -> Response {
-    if let Err(r) = admin_only(&headers, &state) { return r; }
+    let who = match staff_only(&headers, &state) { Ok(w) => w, Err(r) => return r };
     let acl = load_acl();
     let mut names: std::collections::BTreeSet<String> = acl.folders.keys().cloned().collect();
+    names.extend(acl.owners.keys().cloned());
     let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
     for m in meta_map().values() {
         if m.get("deleted").and_then(|d| d.as_bool()).unwrap_or(false) { continue; }
@@ -761,37 +803,90 @@ async fn admin_folders(
             *counts.entry(f.to_string()).or_default() += 1;
         }
     }
-    let folders: Vec<Value> = names.into_iter().map(|f| json!({
+    let folders: Vec<Value> = names.into_iter().filter(|f| acl.level(&who, f) == Level::Full).map(|f| json!({
         "name": f, "profiles": counts.get(&f).copied().unwrap_or(0), "access": acl.folders.get(&f).cloned().unwrap_or_default(),
     })).collect();
     Json(json!({"ok": true, "folders": folders})).into_response()
 }
 
-/// `{ "memberId": "...", "level": "none" | "use" | "edit" | "delete" }`
+/// Make an empty folder (`{ "name": "..." }`); a group manager who does so manages it.
+async fn admin_folder_create(
+    headers: HeaderMap,
+    axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
+    body: axum::body::Bytes,
+) -> Response {
+    let who = match staff_only(&headers, &state) { Ok(w) => w, Err(r) => return r };
+    let v: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+    let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    if name.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"ok":false,"error":"name required"}))).into_response();
+    }
+    let _g = acl_lock();
+    let mut acl = load_acl();
+    let in_use = acl.owners.contains_key(&name) || acl.folders.contains_key(&name)
+        || meta_map().values().any(|m| m.get("folder").and_then(|f| f.as_str()) == Some(name.as_str()));
+    if in_use {
+        return (StatusCode::CONFLICT, Json(json!({"ok":false,"error":"folder exists"}))).into_response();
+    }
+    acl.claim_folder(&name, &who);
+    if let Err(e) = save_acl(&acl) { return err500(e); }
+    audit(&who, "folder-create", &name, true, "");
+    Json(json!({"ok": true})).into_response()
+}
+
+/// `{ "memberId": "...", "level": "none" | "use" | "manage" }`. The admin shares any folder
+/// with anyone (only managers can manage); a group manager shares the folders they
+/// manage with members, for use.
 async fn admin_folder_access(
     headers: HeaderMap,
     axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
     AxumPath(folder): AxumPath<String>,
     body: axum::body::Bytes,
 ) -> Response {
-    let who = match admin_only(&headers, &state) { Ok(w) => w, Err(r) => return r };
+    let who = match staff_only(&headers, &state) { Ok(w) => w, Err(r) => return r };
     let v: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
     let member = v.get("memberId").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    let level = Level::parse(v.get("level").and_then(|x| x.as_str()).unwrap_or("none"));
+    let mut level = Level::parse(v.get("level").and_then(|x| x.as_str()).unwrap_or("none"));
     let _g = acl_lock();
     let mut acl = load_acl();
-    if !acl.members.iter().any(|m| m.id == member) {
+    if acl.level(&who, &folder) != Level::Full {
         return not_found();
     }
-    acl.set_access(&folder, &member, if level == Level::Full { Level::Delete } else { level });
-    if let Err(e) = save_acl(&acl) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok":false,"error":e.to_string()}))).into_response();
+    let Some(target) = acl.members.iter().find(|m| m.id == member).cloned() else { return not_found() };
+    if target.role != "manager" && level == Level::Full { level = Level::Use; }
+    if !who.is_privileged() && (target.role != "member" || level == Level::Full) {
+        audit(&who, "share", &format!("{folder}:{}", target.name), false, "manager may only share for use with members");
+        return forbidden("manage");
     }
-    audit(&who, "access", &format!("{folder}:{member}"), true, level.as_str());
+    acl.set_access(&folder, &member, level);
+    if let Err(e) = save_acl(&acl) { return err500(e); }
+    audit(&who, "share", &format!("{folder} -> {}", target.name), true, level.as_str());
     // Whoever gained or lost the folder should see it at once.
     for (id, m) in meta_map() {
         if m.get("folder").and_then(|f| f.as_str()) == Some(folder.as_str()) { publish_event(&id); }
     }
+    Json(json!({"ok": true})).into_response()
+}
+
+/// Remove an empty folder and every share of it.
+async fn admin_folder_delete(
+    headers: HeaderMap,
+    axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
+    AxumPath(folder): AxumPath<String>,
+) -> Response {
+    let who = match staff_only(&headers, &state) { Ok(w) => w, Err(r) => return r };
+    let _g = acl_lock();
+    let mut acl = load_acl();
+    if acl.level(&who, &folder) != Level::Full { return not_found(); }
+    let has_profiles = meta_map().values().any(|m| m.get("folder").and_then(|f| f.as_str()) == Some(folder.as_str())
+        && !m.get("deleted").and_then(|d| d.as_bool()).unwrap_or(false));
+    if has_profiles {
+        return (StatusCode::CONFLICT, Json(json!({"ok":false,"error":"folder not empty"}))).into_response();
+    }
+    acl.folders.remove(&folder);
+    acl.owners.remove(&folder);
+    if let Err(e) = save_acl(&acl) { return err500(e); }
+    audit(&who, "folder-delete", &folder, true, "");
     Json(json!({"ok": true})).into_response()
 }
 
@@ -869,7 +964,8 @@ pub async fn start(port: u16, token: String) -> Result<u16> {
         .route("/me", get(me))
         .route("/admin/members", get(admin_members).put(admin_member_put))
         .route("/admin/members/:id/delete", post(admin_member_delete))
-        .route("/admin/folders", get(admin_folders))
+        .route("/admin/folders", get(admin_folders).put(admin_folder_create))
+        .route("/admin/folders/:folder/delete", post(admin_folder_delete))
         .route("/admin/folders/:folder/access", axum::routing::put(admin_folder_access))
         .route("/admin/audit", get(admin_audit))
         .route("/library/:kind", get(library_list))
@@ -1012,6 +1108,11 @@ mod permission_tests {
         r.send().await.unwrap().status().as_u16()
     }
 
+    async fn put_json(c: &reqwest::Client, tok: &str, url: String, body: Value) -> (u16, Value) {
+        let r = c.put(url).bearer_auth(tok).json(&body).send().await.unwrap();
+        (r.status().as_u16(), r.json().await.unwrap_or(Value::Null))
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn folder_permissions_are_enforced_by_the_server() {
         let _g = crate::cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -1023,59 +1124,82 @@ mod permission_tests {
         let base = format!("http://127.0.0.1:{port}");
         let c = reqwest::Client::new();
 
-        // Admin uploads one profile into folder A and one into B.
-        for (id, f) in [("pa", "A"), ("pb", "B")] {
-            assert_eq!(status(&c, admin, "POST", format!("{base}/profiles/{id}/lock"), None, "adm").await, 200);
-            assert_eq!(status(&c, admin, "PUT", format!("{base}/profiles/{id}/bundle"), Some(bundle(f, "ua1")), "adm").await, 200);
-            assert_eq!(status(&c, admin, "POST", format!("{base}/profiles/{id}/unlock"), None, "adm").await, 200);
-        }
-
-        // Members: u uses A, e edits A, d deletes A; nobody is granted B.
+        // People: a group manager (g), a member (u), another manager (h).
         let mut tok = std::collections::HashMap::new();
         let mut ids = std::collections::HashMap::new();
-        for n in ["u", "e", "d"] {
-            let r: Value = c.put(format!("{base}/admin/members")).bearer_auth(admin).json(&json!({"name": n})).send().await.unwrap().json().await.unwrap();
+        for (n, role) in [("g", "manager"), ("h", "manager"), ("u", "member")] {
+            let (_, r) = put_json(&c, admin, format!("{base}/admin/members"), json!({"name": n, "role": role})).await;
             tok.insert(n, r["token"].as_str().unwrap().to_string());
             ids.insert(n, r["id"].as_str().unwrap().to_string());
         }
-        for (n, lvl) in [("u", "use"), ("e", "edit"), ("d", "delete")] {
-            let r = c.put(format!("{base}/admin/folders/A/access")).bearer_auth(admin)
-                .json(&json!({"memberId": ids[n], "level": lvl})).send().await.unwrap();
-            assert_eq!(r.status(), 200);
-        }
-        // Members cannot administer.
-        assert_eq!(status(&c, &tok["d"], "GET", format!("{base}/admin/members"), None, "").await, 403);
+        let up = |who: &str, id: &str, folder: &str, ua: &str| {
+            let (c, base, t) = (c.clone(), base.clone(), who.to_string());
+            let (id, b) = (id.to_string(), bundle(folder, ua));
+            async move {
+                let l = status(&c, &t, "POST", format!("{base}/profiles/{id}/lock"), None, "m").await;
+                if l != 200 { return l; }
+                let r = status(&c, &t, "PUT", format!("{base}/profiles/{id}/bundle"), Some(b), "m").await;
+                status(&c, &t, "POST", format!("{base}/profiles/{id}/unlock"), None, "m").await;
+                r
+            }
+        };
 
-        // Visibility: only folder A is listed, B is simply not there.
+        // Admin creates folder A and gives g the management of it.
+        assert_eq!(put_json(&c, admin, format!("{base}/admin/folders"), json!({"name": "A"})).await.0, 200);
+        assert_eq!(put_json(&c, admin, format!("{base}/admin/folders/A/access"), json!({"memberId": ids["g"], "level": "manage"})).await.0, 200);
+        assert_eq!(up(admin, "pa", "A", "ua1").await, 200);
+        assert_eq!(up(admin, "pb", "B", "ua1").await, 200);
+
+        // g manages A: adds, edits, and creates a folder of their own; B is invisible.
+        assert_eq!(up(&tok["g"], "pa2", "A", "x").await, 200, "manager adds into a folder they manage");
+        assert_eq!(up(&tok["g"], "pa2", "A", "y").await, 200, "and edits it");
+        assert_eq!(up(&tok["g"], "pg", "G", "x").await, 200, "a new folder becomes theirs");
+        assert_eq!(up(&tok["g"], "pb2", "B", "x").await, 403, "not into somebody else's folder");
+        assert_eq!(status(&c, &tok["g"], "GET", format!("{base}/profiles/pb/bundle"), None, "").await, 404);
+        assert_eq!(up(&tok["g"], "pa", "G", "ua1").await, 200, "moving between their own folders");
+        assert_eq!(up(&tok["g"], "pa", "B", "ua1").await, 403, "but not into one they do not manage");
+        // Another manager sees neither of g's folders.
+        let list: Value = c.get(format!("{base}/profiles")).bearer_auth(&tok["h"]).send().await.unwrap().json().await.unwrap();
+        assert!(list["profiles"].as_array().unwrap().is_empty());
+        assert_eq!(up(&tok["h"], "ph", "G", "x").await, 403, "G already has an owner");
+        // The admin sees everything.
+        let list: Value = c.get(format!("{base}/profiles")).bearer_auth(admin).send().await.unwrap().json().await.unwrap();
+        assert_eq!(list["profiles"].as_array().unwrap().len(), 4);
+
+        // g shares A with u (use only); managers cannot hand out management.
+        let (code, _) = put_json(&c, &tok["g"], format!("{base}/admin/folders/A/access"), json!({"memberId": ids["u"], "level": "use"})).await;
+        assert_eq!(code, 200);
+        assert_eq!(put_json(&c, &tok["g"], format!("{base}/admin/folders/A/access"), json!({"memberId": ids["h"], "level": "use"})).await.0, 403);
+        assert_eq!(put_json(&c, &tok["g"], format!("{base}/admin/folders/B/access"), json!({"memberId": ids["u"], "level": "use"})).await.0, 404);
+        let f: Value = c.get(format!("{base}/admin/folders")).bearer_auth(&tok["g"]).send().await.unwrap().json().await.unwrap();
+        let names: Vec<&str> = f["folders"].as_array().unwrap().iter().map(|x| x["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["A", "G"]);
+
+        // u: sees only A's profiles, may open them, cannot change/delete/add.
         let list: Value = c.get(format!("{base}/profiles")).bearer_auth(&tok["u"]).send().await.unwrap().json().await.unwrap();
         let seen: Vec<&str> = list["profiles"].as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap()).collect();
-        assert_eq!(seen, vec!["pa"]);
-        assert_eq!(status(&c, &tok["u"], "GET", format!("{base}/profiles/pb/bundle"), None, "").await, 404);
-        assert_eq!(status(&c, &tok["u"], "POST", format!("{base}/profiles/pb/lock"), None, "u").await, 404);
-        assert_eq!(status(&c, &tok["d"], "POST", format!("{base}/profiles/pb/delete"), None, "d").await, 404);
+        assert_eq!(seen, vec!["pa2"]);
+        assert_eq!(status(&c, &tok["u"], "POST", format!("{base}/profiles/pa2/lock"), None, "u").await, 200);
+        assert_eq!(status(&c, &tok["u"], "PUT", format!("{base}/profiles/pa2/bundle"), Some(bundle("A", "y")), "u").await, 200, "saving the session");
+        assert_eq!(status(&c, &tok["u"], "PUT", format!("{base}/profiles/pa2/bundle"), Some(bundle("A", "hacked")), "u").await, 403);
+        assert_eq!(status(&c, &tok["u"], "POST", format!("{base}/profiles/pa2/unlock"), None, "u").await, 200);
+        assert_eq!(status(&c, &tok["u"], "POST", format!("{base}/profiles/pa2/delete"), None, "u").await, 403);
+        assert_eq!(up(&tok["u"], "new", "A", "x").await, 404, "members cannot add");
+        assert_eq!(status(&c, &tok["u"], "GET", format!("{base}/admin/folders"), None, "").await, 403);
+        assert_eq!(status(&c, &tok["u"], "PUT", format!("{base}/library/fingerprints/x"), Some(b"x".to_vec()), "u").await, 403);
+        // A member can never hold "manage" even if asked.
+        put_json(&c, admin, format!("{base}/admin/folders/A/access"), json!({"memberId": ids["u"], "level": "manage"})).await;
+        assert_eq!(status(&c, &tok["u"], "POST", format!("{base}/profiles/pa2/delete"), None, "u").await, 403);
 
-        // "Use" saves the session (same config) but cannot change configuration.
-        assert_eq!(status(&c, &tok["u"], "POST", format!("{base}/profiles/pa/lock"), None, "u").await, 200);
-        assert_eq!(status(&c, &tok["u"], "PUT", format!("{base}/profiles/pa/bundle"), Some(bundle("A", "ua1")), "u").await, 200);
-        assert_eq!(status(&c, &tok["u"], "PUT", format!("{base}/profiles/pa/bundle"), Some(bundle("A", "hacked")), "u").await, 403);
-        assert_eq!(status(&c, &tok["u"], "POST", format!("{base}/profiles/pa/unlock"), None, "u").await, 200);
-        // "Edit" may change config, but not move it to another folder.
-        assert_eq!(status(&c, &tok["e"], "POST", format!("{base}/profiles/pa/lock"), None, "e").await, 200);
-        assert_eq!(status(&c, &tok["e"], "PUT", format!("{base}/profiles/pa/bundle"), Some(bundle("A", "ua2")), "e").await, 200);
-        assert_eq!(status(&c, &tok["e"], "PUT", format!("{base}/profiles/pa/bundle"), Some(bundle("B", "ua2")), "e").await, 403);
-        assert_eq!(status(&c, &tok["e"], "POST", format!("{base}/profiles/pa/unlock"), None, "e").await, 200);
-        // Deleting needs "delete"; adding a profile needs admin/manager.
-        assert_eq!(status(&c, &tok["e"], "POST", format!("{base}/profiles/pa/delete"), None, "e").await, 403);
-        assert_eq!(status(&c, &tok["d"], "POST", format!("{base}/profiles/new/lock"), None, "d").await, 404);
-        assert_eq!(status(&c, &tok["d"], "PUT", format!("{base}/library/fingerprints/x"), Some(b"x".to_vec()), "d").await, 403);
-        assert_eq!(status(&c, &tok["d"], "POST", format!("{base}/profiles/pa/delete"), None, "d").await, 200);
+        // g deletes inside their folder; only the admin manages people.
+        assert_eq!(status(&c, &tok["g"], "POST", format!("{base}/profiles/pa2/delete"), None, "g").await, 200);
+        assert_eq!(status(&c, &tok["g"], "PUT", format!("{base}/admin/members"), Some(b"{}".to_vec()), "").await, 403);
 
-        // A disabled member is locked out at once; revoking access hides the folder.
-        c.put(format!("{base}/admin/members")).bearer_auth(admin).json(&json!({"id": ids["u"], "disabled": true})).send().await.unwrap();
+        // Disabling locks someone out at once; the audit trail names who did what.
+        put_json(&c, admin, format!("{base}/admin/members"), json!({"id": ids["u"], "disabled": true})).await;
         assert_eq!(status(&c, &tok["u"], "GET", format!("{base}/profiles"), None, "").await, 401);
-        // Audit trail recorded the refusals.
         let a: Value = c.get(format!("{base}/admin/audit")).bearer_auth(admin).send().await.unwrap().json().await.unwrap();
-        assert!(a["entries"].as_array().unwrap().iter().any(|e| e["action"] == "edit" && e["ok"] == false));
+        assert!(a["entries"].as_array().unwrap().iter().any(|e| e["action"] == "edit" && e["who"] == "u" && e["ok"] == false));
 
         let _ = stop();
         crate::store::set_data_root(None);

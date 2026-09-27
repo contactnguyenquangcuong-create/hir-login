@@ -10,6 +10,7 @@ import {
   NavPatchLogIcon,
   NavExtensionsIcon,
   NavBookmarksIcon,
+  FolderIcon,
   NavTrashIcon,
   NavAutomationIcon,
   CopyIcon,
@@ -49,6 +50,7 @@ export function Sidebar() {
       label: t("sidebar.groupWorkspace"),
       items: [
         { id: "browsers", label: t("sidebar.navBrowsers"), svg: <NavBrowsersIcon className="size-[18px]" /> },
+        { id: "folders", label: t("sidebar.navFolders"), svg: <FolderIcon className="size-[18px]" /> },
         { id: "proxies", label: t("sidebar.navProxies"), svg: <RouteIcon className="size-[18px]" /> },
         { id: "automation", label: t("sidebar.navAutomation"), svg: <NavAutomationIcon className="size-[18px]" /> },
       ],

@@ -1566,5 +1566,6 @@
   "err.noMove": "你不能把此配置文件移到其他文件夹。",
   "err.noDelete": "你没有删除此配置文件的权限。",
   "err.noAdmin": "只有管理员可以管理成员。",
-  "err.noPerm": "你没有权限执行此操作。"
+  "err.noPerm": "你没有权限执行此操作。",
+  "sidebar.navFolders": "文件夹"
 }
