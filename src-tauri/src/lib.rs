@@ -1077,6 +1077,10 @@ struct BulkRow {
     proxy: String,
     #[serde(default)]
     color: String,
+    /// "http" | "https" | "socks5" (default) — only matters when `proxy` has no
+    /// scheme prefix of its own.
+    #[serde(default)]
+    kind: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1095,6 +1099,7 @@ struct BulkParseRow {
     notes: String,
     proxy: String,
     color: String,
+    kind: String,
     error: Option<String>,
 }
 
@@ -1369,6 +1374,7 @@ fn bulk_rows_from_table(rows: Vec<Vec<String>>) -> Vec<BulkParseRow> {
     let notes_i = ci(&["notes", "note", "ghi chú", "ghi chu"]);
     let proxy_i = ci(&["proxy"]);
     let color_i = ci(&["color", "màu", "mau"]);
+    let kind_i = ci(&["kind", "loại proxy", "loai proxy", "proxy type", "protocol", "loại", "loai"]);
     let has_header = name_i.is_some() || proxy_i.is_some() || notes_i.is_some();
     let start = if has_header { 1 } else { 0 };
     let mut out = Vec::new();
@@ -1378,20 +1384,20 @@ fn bulk_rows_from_table(rows: Vec<Vec<String>>) -> Vec<BulkParseRow> {
         }
         let at = |i: usize| cols.get(i).map(|s| s.trim().to_string()).unwrap_or_default();
         let g = |opt: Option<usize>| opt.map(&at).unwrap_or_default();
-        let (name, folder, notes, proxy, color) = if has_header {
-            (g(name_i), g(folder_i), g(notes_i), g(proxy_i), g(color_i))
+        let (name, folder, notes, proxy, color, kind) = if has_header {
+            (g(name_i), g(folder_i), g(notes_i), g(proxy_i), g(color_i), g(kind_i))
         } else {
-            (at(0), at(1), at(2), at(3), at(4))
+            (at(0), at(1), at(2), at(3), at(4), at(5))
         };
         let mut err: Option<String> = None;
         if name.is_empty() {
             err = Some("thiếu name".into());
         } else if !color.is_empty() && !is_valid_hex_color(&color) && !is_valid_hex_color(&format!("#{color}")) {
             err = Some("color phải dạng #rrggbb".into());
-        } else if !proxy.is_empty() && proxy::parse_single(&proxy).is_none() {
+        } else if !proxy.is_empty() && proxy::parse_single_with_kind(&proxy, proxy::ProxyKind::parse(&kind)).is_none() {
             err = Some("proxy không hợp lệ".into());
         }
-        out.push(BulkParseRow { row: idx + 1, name, folder, notes, proxy, color, error: err });
+        out.push(BulkParseRow { row: idx + 1, name, folder, notes, proxy, color, kind, error: err });
     }
     out
 }
@@ -1399,13 +1405,13 @@ fn bulk_rows_from_table(rows: Vec<Vec<String>>) -> Vec<BulkParseRow> {
 /// A ready-to-fill Excel sheet: header row (with the folder column), two example rows.
 fn build_bulk_template_xlsx() -> Result<Vec<u8>, String> {
     use std::io::Write;
-    let rows: [[&str; 5]; 3] = [
-        ["Tên", "Thư mục", "Ghi chú", "Proxy", "Màu"],
-        ["FB 01", "Shop A", "Nick chạy quảng cáo", "socks5://user:pass@1.2.3.4:1080", "#8b5cf6"],
-        ["FB 02", "Shop B", "", "1.2.3.4:8080:user:pass", "#22c55e"],
+    let rows: [[&str; 6]; 3] = [
+        ["Tên", "Thư mục", "Ghi chú", "Proxy", "Loại proxy", "Màu"],
+        ["FB 01", "Shop A", "Nick chạy quảng cáo", "socks5://user:pass@1.2.3.4:1080", "socks5", "#8b5cf6"],
+        ["FB 02", "Shop B", "", "1.2.3.4:8080:user:pass", "http", "#22c55e"],
     ];
     let esc = |t: &str| t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
-    let mut sheet = String::from(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols><col min="1" max="1" width="18" customWidth="1"/><col min="2" max="2" width="18" customWidth="1"/><col min="3" max="3" width="28" customWidth="1"/><col min="4" max="4" width="38" customWidth="1"/><col min="5" max="5" width="12" customWidth="1"/></cols><sheetData>"#);
+    let mut sheet = String::from(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols><col min="1" max="1" width="18" customWidth="1"/><col min="2" max="2" width="18" customWidth="1"/><col min="3" max="3" width="28" customWidth="1"/><col min="4" max="4" width="38" customWidth="1"/><col min="5" max="5" width="14" customWidth="1"/><col min="6" max="6" width="12" customWidth="1"/></cols><sheetData>"#);
     for (r, row) in rows.iter().enumerate() {
         sheet.push_str(&format!(r#"<row r="{}">"#, r + 1));
         for (c, v) in row.iter().enumerate() {
@@ -1469,7 +1475,7 @@ fn profile_bulk_create(rows: Vec<BulkRow>) -> Result<Vec<BulkCreateItem>, String
         let proxy_id: Option<String> = if r.proxy.trim().is_empty() {
             None
         } else {
-            match proxy::parse_single(r.proxy.trim()) {
+            match proxy::parse_single_with_kind(r.proxy.trim(), proxy::ProxyKind::parse(&r.kind)) {
                 Some(entry) => match proxy::upsert_dedup(entry) {
                     Ok(e) => Some(e.id),
                     Err(e) => {
@@ -3403,8 +3409,10 @@ mod bulk_file_tests {
         let _ = std::fs::remove_file(&path);
         assert_eq!(rows.len(), 2);
         assert_eq!((rows[0].name.as_str(), rows[0].folder.as_str(), rows[0].color.as_str()), ("FB 01", "Shop A", "#8b5cf6"));
+        assert_eq!(rows[0].kind, "socks5");
         assert_eq!(rows[1].notes, "");
         assert_eq!(rows[1].proxy, "1.2.3.4:8080:user:pass");
+        assert_eq!(rows[1].kind, "http");
         assert!(rows.iter().all(|r| r.error.is_none()), "{:?}", rows.iter().map(|r| &r.error).collect::<Vec<_>>());
     }
 
@@ -3425,10 +3433,10 @@ mod bulk_file_tests {
         std::fs::create_dir_all(&tmp).unwrap();
         store::set_data_root(Some(tmp.clone()));
         let rows = vec![
-            BulkRow { name: "Bulk A".into(), folder: "Ads".into(), notes: "n1".into(), proxy: String::new(), color: "#8b5cf6".into() },
-            BulkRow { name: "Bulk B".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: "22c55e".into() },
-            BulkRow { name: "Bulk C".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: "zzz".into() },
-            BulkRow { name: "  ".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new() },
+            BulkRow { name: "Bulk A".into(), folder: "Ads".into(), notes: "n1".into(), proxy: String::new(), color: "#8b5cf6".into(), kind: String::new() },
+            BulkRow { name: "Bulk B".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: "22c55e".into(), kind: String::new() },
+            BulkRow { name: "Bulk C".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: "zzz".into(), kind: String::new() },
+            BulkRow { name: "  ".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new() },
         ];
         let res = profile_bulk_create(rows).expect("create");
         let summary: Vec<String> = res.iter().map(|r| format!("{}:{}:{:?}", r.index, r.ok, r.error)).collect();

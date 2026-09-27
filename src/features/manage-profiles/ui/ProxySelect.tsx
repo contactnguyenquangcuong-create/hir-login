@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Button, Input, cn } from "@proxyshard/shardx-ui-kit";
+import { Button, Input, SegmentControl, cn } from "@proxyshard/shardx-ui-kit";
 import { AddIcon, ChevronDownIcon } from "../../../shared/icons";
 import { toast } from "../../../shared/model/toast";
 import { proxyBulkParse, proxySave, proxyFullTest, type ProxyEntry } from "../../../entities/proxy";
@@ -209,6 +209,9 @@ function CreatePanel({ onCancel, onCreated }: {
 }) {
   const t = useT();
   const [line, setLine] = useState("");
+  // Only matters for a line with no scheme prefix (e.g. "1.2.3.4:1080:user:pass") —
+  // one with an explicit "http://"/"socks5://" always wins regardless of this.
+  const [kind, setKind] = useState<"socks5" | "http" | "https">("socks5");
   const [parsed, setParsed] = useState<ProxyEntry | null>(null);
   const [busy, setBusy] = useState(false);
   const reloadProfiles = useProfile((s) => s.reload);
@@ -220,12 +223,12 @@ function CreatePanel({ onCancel, onCreated }: {
     if (!text) { setParsed(null); return; }
     let alive = true;
     const t = setTimeout(() => {
-      proxyBulkParse(text, "socks5")
+      proxyBulkParse(text, kind)
         .then((rows) => { if (alive) setParsed(rows[0] ?? null); })
         .catch(() => { if (alive) setParsed(null); });
     }, 180);
     return () => { alive = false; clearTimeout(t); };
-  }, [line]);
+  }, [line, kind]);
 
   const save = async () => {
     if (!parsed) return;
@@ -250,6 +253,17 @@ function CreatePanel({ onCancel, onCreated }: {
 
   return (
     <div className="flex flex-col gap-2 p-2">
+      <SegmentControl
+        size="small"
+        className="w-full *:flex-1"
+        value={kind}
+        items={[
+          { value: "socks5", label: "SOCKS5" },
+          { value: "http", label: "HTTP" },
+          { value: "https", label: "HTTPS" },
+        ]}
+        onChange={(v) => setKind(v as "socks5" | "http" | "https")}
+      />
       <Input
         autoFocus
         inputSize="small"

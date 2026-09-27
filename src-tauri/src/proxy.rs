@@ -14,6 +14,19 @@ pub enum ProxyKind {
     Https,
 }
 
+impl ProxyKind {
+    /// Reads "http"/"https"/"socks5" case-insensitively (also "sock5", "socks"),
+    /// with "" or anything unrecognised falling back to Socks5 — the shape most
+    /// exported proxy lists already come in.
+    pub fn parse(s: &str) -> ProxyKind {
+        match s.trim().to_lowercase().as_str() {
+            "http" => ProxyKind::Http,
+            "https" => ProxyKind::Https,
+            _ => ProxyKind::Socks5,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProxyEntry {
     #[serde(default)]
@@ -256,6 +269,13 @@ async fn probe_inner(entry: &ProxyEntry) -> Result<u128> {
 /// Parse a single proxy line for inline (unsaved) use by the API.
 pub fn parse_single(line: &str) -> Option<ProxyEntry> {
     parse_one(line.trim(), &ProxyKind::Socks5)
+}
+
+/// Same as `parse_single`, but a line without a scheme (`http://`/`socks5://`/…)
+/// prefix is assumed to be `default_kind` instead of always Socks5 — for callers
+/// that let the operator say what kind their pasted/imported list is.
+pub fn parse_single_with_kind(line: &str, default_kind: ProxyKind) -> Option<ProxyEntry> {
+    parse_one(line.trim(), &default_kind)
 }
 
 pub fn parse_bulk(text: &str, default_kind: ProxyKind) -> Vec<ProxyEntry> {

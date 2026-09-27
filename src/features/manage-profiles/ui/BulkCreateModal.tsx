@@ -5,7 +5,7 @@ import { Button, DialogModal } from "@proxyshard/shardx-ui-kit";
 import { toast } from "../../../shared/lib/toast";
 import { useProfile } from "../../../entities/profile";
 
-type ParseRow = { row: number; name: string; folder: string; notes: string; proxy: string; color: string; error: string | null };
+type ParseRow = { row: number; name: string; folder: string; notes: string; proxy: string; color: string; kind: string; error: string | null };
 type CreateItem = { index: number; ok: boolean; id: string | null; error: string | null };
 
 async function downloadTemplate() {
@@ -56,7 +56,7 @@ function BulkCreateModal({ onClose }: { onClose: () => void }) {
 
   const create = async () => {
     if (!rows || validCount === 0) return;
-    const payload = rows.filter((r) => !r.error).map((r) => ({ name: r.name, folder: r.folder, notes: r.notes, proxy: r.proxy, color: r.color }));
+    const payload = rows.filter((r) => !r.error).map((r) => ({ name: r.name, folder: r.folder, notes: r.notes, proxy: r.proxy, color: r.color, kind: r.kind }));
     setCreating(true);
     try {
       const res = await invoke<CreateItem[]>("profile_bulk_create", { rows: payload });
@@ -87,7 +87,7 @@ function BulkCreateModal({ onClose }: { onClose: () => void }) {
           <div className="flex flex-col gap-1">
             <span className="text-label-sm text-text-strong-950">Bước 1: tải file mẫu và điền</span>
             <span className="text-paragraph-xs text-text-soft-400">
-              Các cột: <b>Tên</b> (bắt buộc), <b>Thư mục</b>, <b>Ghi chú</b>, <b>Proxy</b>, <b>Màu</b> (#rrggbb). Thư mục chưa có sẽ được tạo. Fingerprint được chọn ngẫu nhiên.
+              Các cột: <b>Tên</b> (bắt buộc), <b>Thư mục</b>, <b>Ghi chú</b>, <b>Proxy</b>, <b>Loại proxy</b> (http/https/socks5 — chỉ cần khi ô Proxy không có tiền tố như <code>http://</code>), <b>Màu</b> (#rrggbb). Thư mục chưa có sẽ được tạo. Fingerprint được chọn ngẫu nhiên.
             </span>
           </div>
           <div><Button variant="neutral" mode="stroke" size="small" onClick={downloadTemplate}>Tải file Excel mẫu (.xlsx)</Button></div>
@@ -111,7 +111,7 @@ function BulkCreateModal({ onClose }: { onClose: () => void }) {
               <table className="w-full text-left text-paragraph-xs">
                 <thead className="sticky top-0 bg-bg-weak-50">
                   <tr>
-                    <th className="px-2 py-1">#</th><th className="px-2 py-1">Tên</th><th className="px-2 py-1">Thư mục</th><th className="px-2 py-1">Proxy</th><th className="px-2 py-1">Màu</th><th className="px-2 py-1">Kết quả</th>
+                    <th className="px-2 py-1">#</th><th className="px-2 py-1">Tên</th><th className="px-2 py-1">Thư mục</th><th className="px-2 py-1">Proxy</th><th className="px-2 py-1">Loại</th><th className="px-2 py-1">Màu</th><th className="px-2 py-1">Kết quả</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -123,6 +123,7 @@ function BulkCreateModal({ onClose }: { onClose: () => void }) {
                         <td className="px-2 py-1">{r.name}</td>
                         <td className="px-2 py-1">{r.folder}</td>
                         <td className="px-2 py-1 truncate max-w-[180px]">{r.proxy}</td>
+                        <td className="px-2 py-1">{r.proxy ? (r.kind || "socks5") : ""}</td>
                         <td className="px-2 py-1">{r.color}</td>
                         <td className="px-2 py-1 text-red-600">{r.error ?? res?.error ?? (res?.ok ? "OK" : "")}</td>
                       </tr>
