@@ -146,7 +146,7 @@ export function TeamTab({
   return (
     <div className="flex flex-col gap-4">
       {/* Where this machine stands */}
-      <Section title="Kết nối" desc={t("settings.syncHelp1")}>
+      <Section title="Kết nối">
         <Row
           label={serverRunning ? "Máy này đang làm máy chủ" : isConnected ? "Đã kết nối tới team" : "Chưa kết nối"}
           hint={

@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
+import { settingsGet } from "../../entities/settings";
 
 export type TeamRole = "admin" | "manager" | "member";
 
@@ -16,7 +17,15 @@ const cached = (): TeamRole | null => {
 };
 
 type State = {
-  /** null = not on a team (or server unreachable and never seen): everything is local and unrestricted. */
+  /** Whether this machine has team sync switched on at all — read straight from
+   *  local settings, no network round trip, so it is never flaky. Null only for
+   *  the instant before the very first read completes. Everything below this
+   *  reflects the last successful call to the team server, which — unlike this
+   *  field — can lag behind or fail for a moment without meaning "not on a team".
+   */
+  configured: boolean | null;
+  /** null = role not yet confirmed for this session (could still be any role —
+   *  never treat this the same as "no team", see `canEdit`/`canShare`). */
   role: TeamRole | null;
   name: string;
   id: string;
@@ -28,13 +37,26 @@ type State = {
   refresh: () => Promise<void>;
 };
 
-export const useTeam = create<State>((set) => ({
+export const useTeam = create<State>((set, get) => ({
+  configured: null,
   role: cached(),
   name: "",
   id: "",
   isServerAdmin: false,
   folderNames: null,
   refresh: async () => {
+    // Ground truth for "is a team even set up here" — local, instant, never flaky.
+    try {
+      const s = await settingsGet();
+      set({ configured: !!(s.sync?.enabled && s.sync?.server_url && s.sync?.token) });
+    } catch { /* keep whatever we knew */ }
+
+    if (get().configured === false) {
+      set({ role: null, name: "", id: "", isServerAdmin: false, folderNames: null });
+      try { localStorage.removeItem(CACHE); } catch { /* ignore */ }
+      return;
+    }
+
     try {
       const me = await teamCall<{ role: TeamRole; name: string; id: string; isServerAdmin: boolean; folders: Record<string, string> | null }>("GET", "/me");
       set({ role: me.role, name: me.name, id: me.id, isServerAdmin: me.isServerAdmin });
@@ -47,7 +69,10 @@ export const useTeam = create<State>((set) => ({
       } catch { /* keep what we knew */ }
       try { localStorage.setItem(CACHE, me.role); } catch { /* ignore */ }
     } catch (e) {
-      // Only forget the role when sync is off; a dropped connection keeps the last known one.
+      // Configured (we just confirmed it above) but this one call to the server
+      // failed — offline for a moment, still routing over Tailscale, the server
+      // mid-restart. Never erase what we knew over a blip; the explicit "sync is
+      // not enabled" case (the setting itself is off) is the only real reset.
       if (/sync is not enabled/i.test(String(e))) {
         set({ role: null, name: "", id: "", isServerAdmin: false, folderNames: null });
         try { localStorage.removeItem(CACHE); } catch { /* ignore */ }
@@ -57,14 +82,26 @@ export const useTeam = create<State>((set) => ({
 }));
 
 let started = false;
-/** Start refreshing the role in the background (once). */
+/** Start refreshing the role in the background (once). Retries quickly (every
+ *  3s) while a team is configured but no role has been confirmed yet — the
+ *  state a fresh join, a just-toggled server, or a network blip leaves this
+ *  in — and settles into a slow 60s cadence once a role is known. */
 export function startTeamRole() {
   if (started) return;
   started = true;
-  useTeam.getState().refresh();
-  setInterval(() => useTeam.getState().refresh(), 60_000);
+  const tick = async () => {
+    await useTeam.getState().refresh();
+    const { configured, role } = useTeam.getState();
+    const delay = configured && role === null ? 3_000 : 60_000;
+    setTimeout(tick, delay);
+  };
+  void tick();
 }
 
-/** Members cannot add, change or delete anything. */
-export const canEdit = (role: TeamRole | null) => role !== "member";
-export const canShare = (role: TeamRole | null) => role === "admin" || role === "manager";
+/** Members cannot add, change or delete anything. Fails closed: once a team is
+ *  confirmed configured, an unconfirmed role (`null`) is never treated as
+ *  unrestricted — only a genuinely local, no-team install defaults to open. */
+export const canEdit = (role: TeamRole | null, configured: boolean | null) =>
+  configured ? role !== "member" && role !== null : true;
+export const canShare = (role: TeamRole | null, configured: boolean | null) =>
+  configured ? role === "admin" || role === "manager" : true;

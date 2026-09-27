@@ -365,13 +365,11 @@ pub async fn launch_profile_synced(
     }
 
     cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    // 0x08000000 = CREATE_NO_WINDOW — suppress the brief console flash when a Tauri
+    // GUI app spawns the engine binary. tokio's Command has this inherently, no
+    // CommandExt import needed (unlike plain std::process::Command elsewhere).
     #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        // 0x08000000 = CREATE_NO_WINDOW — suppress the brief console flash
-        // when a Tauri GUI app spawns the engine binary.
-        cmd.creation_flags(0x08000000);
-    }
+    cmd.creation_flags(0x08000000);
     let child = cmd.spawn().context("spawn Hir-Login")?;
     let pid = Tracker::shared().track(profile_id.to_string(), child, stored.meta.temporary);
 

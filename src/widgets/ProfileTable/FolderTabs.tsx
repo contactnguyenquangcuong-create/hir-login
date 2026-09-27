@@ -34,6 +34,7 @@ export function FolderTabs() {
   const folders = useFolders();
   const ctx = useContextMenu();
   const role = useTeam((s) => s.role);
+  const configured = useTeam((s) => s.configured);
   const [sharing, setSharing] = useState<string | null>(null);
   const folderNames = useTeam((s) => s.folderNames);
   const registry = useProfile((s) => s.folderRegistry);
@@ -105,8 +106,8 @@ export function FolderTabs() {
           title={t("folderTabs.folderTabHint")}
           onContextMenu={(e) =>
             ctx.open(e, [
-              ...(canShare(role) ? [{ label: "Chia sẻ quyền…", onClick: () => setSharing(f) }] : []),
-              ...(canEdit(role) ? [{ label: t("folderTabs.deleteFolder"), onClick: () => deleteFolder(f), danger: true }] : []),
+              ...(canShare(role, configured) ? [{ label: "Chia sẻ quyền…", onClick: () => setSharing(f) }] : []),
+              ...(canEdit(role, configured) ? [{ label: t("folderTabs.deleteFolder"), onClick: () => deleteFolder(f), danger: true }] : []),
             ])
           }
           onDragOver={(e) => {
@@ -130,7 +131,7 @@ export function FolderTabs() {
           </span>
         </button>
       ))}
-      {canShare(role) && folder !== "all" && (
+      {canShare(role, configured) && folder !== "all" && (
         <button
           className="ml-auto flex-none cursor-pointer whitespace-nowrap border-0 bg-transparent px-3 py-2 text-label-xs text-text-sub-600 hover:text-primary-base"
           title="Chọn ai được dùng thư mục này"

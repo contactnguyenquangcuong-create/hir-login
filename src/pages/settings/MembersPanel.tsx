@@ -100,14 +100,13 @@ export function MembersPanel({ serverUrl, oauthReady, onOpenOauthSetup }: { serv
       title="Nhân sự"
       desc={
         oauthReady ? (
-          'Mỗi người một mã riêng, kèm sẵn quyền vào mạng Tailscale — dùng được ngay trên máy mới. Chia sẻ thư mục cho họ ở trang Trình duyệt: mở thư mục, bấm "Chia sẻ quyền".'
+          "Mỗi người một mã riêng, dùng được ngay trên máy mới."
         ) : (
           <>
-            Mỗi người một mã riêng, gọi theo tên. Mã này <b>chưa kèm quyền vào Tailscale</b> — máy nhận mã cần đã ở trong mạng từ trước.{" "}
+            Mã chưa kèm quyền vào Tailscale.{" "}
             <button type="button" className="border-0 bg-transparent p-0 text-primary-base underline" onClick={onOpenOauthSetup}>
-              Bật để mã tự kèm quyền mạng
+              Bật để tự kèm
             </button>
-            . Chia sẻ thư mục cho họ ở trang Trình duyệt: mở thư mục, bấm "Chia sẻ quyền".
           </>
         )
       }
@@ -163,7 +162,7 @@ export function MembersPanel({ serverUrl, oauthReady, onOpenOauthSetup }: { serv
                 ) : (
                   <span className={`truncate text-label-sm ${m.disabled ? "text-text-soft-400 line-through" : "text-text-strong-950"}`}>{m.name}</span>
                 )}
-                <Pill tone={ROLE_PILL[m.role].tone}>{ROLE_PILL[m.role].label}</Pill>
+                <Pill tone={(ROLE_PILL[m.role] ?? ROLE_PILL.member).tone}>{(ROLE_PILL[m.role] ?? ROLE_PILL.member).label}</Pill>
                 {m.disabled && <Pill tone="warning">Đã khoá</Pill>}
                 {rankLocked && <span className="text-paragraph-xs text-text-soft-400" title="Chỉ người giữ server mới đổi được cấp bậc của một quản trị viên khác">Chỉ chủ server đổi được</span>}
               </div>

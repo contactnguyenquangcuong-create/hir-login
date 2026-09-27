@@ -11,7 +11,8 @@ import {
 
 export function ProfileToolbar() {
   const role = useTeam((s) => s.role);
-  const edit = canEdit(role);
+  const configured = useTeam((s) => s.configured);
+  const edit = canEdit(role, configured);
   return (
     <div className="flex items-center flex-none gap-2">
       <BulkActionsBar />

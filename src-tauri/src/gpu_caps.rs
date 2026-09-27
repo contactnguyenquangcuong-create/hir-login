@@ -241,10 +241,7 @@ pub async fn probe(force: bool) -> Result<HostGlCaps> {
         .arg("--window-size=200,200")
         .arg(format!("file://{}", probe_page.display()));
     #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-    }
+    cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW — tokio's Command has this inherently, no CommandExt import needed
     let mut child = cmd.spawn().context("start the engine for a GPU probe")?;
 
     let raw = evaluate_in_core(port).await;

@@ -14,10 +14,12 @@ import { DataRootCard } from "../../features/manage-profiles/ui/DataRootCard";
 import { useT, useLang, LANG_OPTIONS, type Lang } from "../../shared/i18n";
 import type { LicenseInfo } from "../../entities/license";
 import { licenseInfo } from "../../entities/license";
-import { Section, Row, Block } from "./ui";
+import { Section, Row, Block, Pill } from "./ui";
 import { TeamTab } from "./TeamTab";
 import { useTeam } from "../../shared/model/teamRole";
 import { FingerprintPanel } from "./FingerprintPanel";
+import { useAppUpdate } from "../../shared/model/appUpdate";
+import { getVersion } from "@tauri-apps/api/app";
 
 type Tab = "general" | "team" | "advanced" | "license";
 
@@ -50,6 +52,13 @@ export function SettingsPage() {
 
   const [license, setLicense] = useState<LicenseInfo | null>(null);
   useEffect(() => { licenseInfo().then(setLicense).catch(() => {}); }, []);
+  const [appVersion, setAppVersion] = useState("");
+  useEffect(() => { getVersion().then(setAppVersion).catch(() => {}); }, []);
+  const updateStatus = useAppUpdate((s) => s.status);
+  const updateVersion = useAppUpdate((s) => s.version);
+  const updateProgress = useAppUpdate((s) => s.progress);
+  const checkForUpdate = useAppUpdate((s) => s.check);
+  const installUpdate = useAppUpdate((s) => s.install);
   const regenToken = async () => {
     try { setApi(await apiRegenerateToken()); toast.ok(t("settings.tokenRegenerated")); }
     catch (e) { toast.err(String(e)); }
@@ -124,6 +133,28 @@ export function SettingsPage() {
       <div className="flex max-w-[980px] flex-col gap-4 pb-6">
         {tab === "general" && (
           <>
+            <Section title="Cập nhật">
+              <Row
+                label={`Phiên bản hiện tại: ${appVersion || "…"}`}
+                hint={
+                  updateStatus === "available" ? `Đã có bản mới v${updateVersion}` :
+                  updateStatus === "downloading" ? `Đang tải bản cập nhật… ${Math.round(updateProgress * 100)}%` :
+                  updateStatus === "ready" ? "Đã tải xong, đang khởi động lại…" :
+                  updateStatus === "error" ? "Kiểm tra thất bại, thử lại sau." :
+                  "Bạn đang dùng bản mới nhất."
+                }
+              >
+                <div className="flex items-center gap-2 sm:justify-end">
+                  {updateStatus === "available" && <Pill tone="primary">Có bản mới</Pill>}
+                  {updateStatus === "available" ? (
+                    <Button variant="primary" mode="filled" size="small" onClick={installUpdate}>Cập nhật ngay</Button>
+                  ) : (
+                    <Button variant="neutral" mode="stroke" size="small" onClick={checkForUpdate} isLoading={updateStatus === "checking"}>Kiểm tra cập nhật</Button>
+                  )}
+                </div>
+              </Row>
+            </Section>
+
             <Section title="Giao diện & hiển thị">
               <Row label={t("settings.languageTitle")} hint={t("settings.languageHelp")}>
                 <Select size="small" value={lang} onChange={(v) => setLang(v as Lang)} options={LANG_OPTIONS.map((o) => ({ value: o.value, label: o.label }))} />

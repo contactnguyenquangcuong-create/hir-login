@@ -208,8 +208,17 @@ fn device_name(cfg: &SyncConfig) -> String {
     if let Some(n) = cfg.device_name.as_deref().filter(|s| !s.trim().is_empty()) {
         return n.to_string();
     }
-    std::process::Command::new("hostname")
-        .output()
+    let mut cmd = std::process::Command::new("hostname");
+    // This runs on every checkout/checkin — i.e. every profile open/close, for
+    // anyone on the team, not just an admin doing something occasional. Missing
+    // this flag here specifically is what a member kept seeing as a console
+    // flashing "thỉnh thoảng" (on ordinary use, not admin actions).
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    cmd.output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())

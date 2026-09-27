@@ -2422,7 +2422,7 @@ fn sync_kick() {
 
 #[tauri::command]
 async fn team_admin(method: String, path: String, body: Option<Value>) -> Result<Value, String> {
-    if !(path == "/me" || path.starts_with("/admin/")) {
+    if !(path == "/me" || path == "/me/rotate" || path.starts_with("/admin/")) {
         return Err("bad path".into());
     }
     cloud_sync::admin_call(&method, &path, body).await.map_err(|e| format!("{e:#}"))

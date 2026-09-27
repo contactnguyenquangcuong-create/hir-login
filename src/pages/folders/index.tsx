@@ -17,6 +17,7 @@ type TrashedFolder = { name: string; deletedBy: string; daysLeft: number };
 /** Every folder in one place: how many profiles it holds, who may use or manage it, and the sharing dialog. */
 export function FoldersPage() {
   const role = useTeam((s) => s.role);
+  const configured = useTeam((s) => s.configured);
   const setSection = useNav((s) => s.setSection);
   const profiles = useProfile((s) => s.profiles);
   const rememberFolder = useProfile((s) => s.rememberFolder);
@@ -31,13 +32,13 @@ export function FoldersPage() {
   useEffect(() => { startTeamRole(); }, []);
 
   const load = useCallback(async () => {
-    if (!canShare(role)) return;
+    if (!canShare(role, configured)) return;
     try {
       setServer((await teamCall<{ folders: ServerFolder[] }>("GET", "/admin/folders")).folders);
       setMembers((await teamCall<{ members: Member[] }>("GET", "/admin/members")).members);
       setTrash((await teamCall<{ items: TrashedFolder[] }>("GET", "/admin/folders/trash").catch(() => ({ items: [] as TrashedFolder[] }))).items);
     } catch (e) { toast.err(String(e)); }
-  }, [role]);
+  }, [role, configured]);
   useEffect(() => { load(); }, [load, sharing]);
 
   const localCount = useMemo(() => {
@@ -108,9 +109,15 @@ export function FoldersPage() {
       <p className="m-0 mb-4 text-paragraph-sm text-text-soft-400">Chia thư mục cho từng nhóm. Ai không được chia sẻ sẽ không thấy thư mục đó.</p>
 
       <div className="flex max-w-[980px] flex-col gap-4">
-        {role === null && (
+        {configured === false && (
           <Section title="Chưa kết nối team" desc="Kết nối tới máy chủ của team để chia sẻ thư mục cho nhân sự.">
             <div className="px-5 py-4"><Button variant="primary" size="small" onClick={() => setSection("settings")}>Mở cài đặt đồng bộ nhóm</Button></div>
+          </Section>
+        )}
+
+        {configured && role === null && (
+          <Section title="Đang tải quyền của bạn…" desc="Máy đã kết nối team, đang xác nhận quyền — chỉ mất vài giây.">
+            <div className="px-5 py-6 text-center text-paragraph-xs text-text-soft-400">Nếu treo lâu hơn 1 phút, kiểm tra lại kết nối mạng ở mục Cài đặt.</div>
           </Section>
         )}
 
@@ -129,7 +136,7 @@ export function FoldersPage() {
           </Section>
         )}
 
-        {canShare(role) && (
+        {canShare(role, configured) && (
           <Section
             title="Tất cả thư mục"
             desc={role === "admin" ? "Bạn thấy mọi thư mục của team." : "Bạn thấy các thư mục được giao cho bạn hoặc do bạn tạo."}
@@ -169,7 +176,7 @@ export function FoldersPage() {
           </Section>
         )}
 
-        {canShare(role) && trash.length > 0 && (
+        {canShare(role, configured) && trash.length > 0 && (
           <Section title="Thùng rác thư mục" desc="Thư mục đã xoá được giữ 30 ngày rồi tự xoá vĩnh viễn. Khôi phục sẽ trả lại cả phần chia sẻ.">
             {trash.map((f) => (
               <div key={f.name} className="flex flex-wrap items-center gap-3 px-5 py-3">
