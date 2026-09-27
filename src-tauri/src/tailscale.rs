@@ -118,25 +118,31 @@ struct KeyResp {
     key: String,
 }
 
-/// Mint a fresh reusable, pre-authorized auth key tagged `tag`, valid for
-/// `expiry_seconds` (Tailscale caps this at 90 days regardless of what is asked).
-pub async fn create_auth_key(
-    client_id: &str,
-    client_secret: &str,
-    tag: &str,
-    description: &str,
-    expiry_seconds: i64,
-) -> anyhow::Result<String> {
+/// One key as Tailscale's API reports it — never the secret value itself,
+/// only returned once at creation and not stored anywhere after.
+#[derive(serde::Deserialize, serde::Serialize, Clone, Default)]
+pub struct KeyMeta {
+    pub id: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub created: String,
+    #[serde(default)]
+    pub expires: String,
+    #[serde(default)]
+    pub revoked: String,
+    #[serde(default)]
+    pub invalid: bool,
+}
+
+fn http_client() -> anyhow::Result<reqwest::Client> {
+    Ok(reqwest::Client::builder().timeout(std::time::Duration::from_secs(15)).build()?)
+}
+
+async fn oauth_token(client: &reqwest::Client, client_id: &str, client_secret: &str) -> anyhow::Result<String> {
     if client_id.trim().is_empty() || client_secret.trim().is_empty() {
         anyhow::bail!("chưa cấu hình OAuth Client (Client ID/Secret)");
     }
-    let tag = if tag.trim().is_empty() { "tag:hirlogin".to_string() } else { tag.trim().trim_start_matches("tag:").to_string() };
-    let tag = format!("tag:{tag}");
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()?;
-
     let tok: TokenResp = client
         .post("https://api.tailscale.com/api/v2/oauth/token")
         .form(&[("grant_type", "client_credentials"), ("client_id", client_id), ("client_secret", client_secret)])
@@ -148,6 +154,26 @@ pub async fn create_auth_key(
         .json()
         .await
         .map_err(|e| anyhow::anyhow!("phản hồi lấy access token không đọc được: {e}"))?;
+    Ok(tok.access_token)
+}
+
+fn normalize_tag(tag: &str) -> String {
+    let t = if tag.trim().is_empty() { "hirlogin".to_string() } else { tag.trim().trim_start_matches("tag:").to_string() };
+    format!("tag:{t}")
+}
+
+/// Mint a fresh reusable, pre-authorized auth key tagged `tag`, valid for
+/// `expiry_seconds` (Tailscale caps this at 90 days regardless of what is asked).
+pub async fn create_auth_key(
+    client_id: &str,
+    client_secret: &str,
+    tag: &str,
+    description: &str,
+    expiry_seconds: i64,
+) -> anyhow::Result<String> {
+    let client = http_client()?;
+    let access_token = oauth_token(&client, client_id, client_secret).await?;
+    let tag = normalize_tag(tag);
 
     let body = serde_json::json!({
         "capabilities": { "devices": { "create": {
@@ -158,7 +184,7 @@ pub async fn create_auth_key(
     });
     let key: KeyResp = client
         .post("https://api.tailscale.com/api/v2/tailnet/-/keys")
-        .bearer_auth(&tok.access_token)
+        .bearer_auth(&access_token)
         .json(&body)
         .send()
         .await
@@ -170,6 +196,65 @@ pub async fn create_auth_key(
         .map_err(|e| anyhow::anyhow!("phản hồi tạo key không đọc được: {e}"))?;
 
     Ok(key.key)
+}
+
+/// Every key in the tailnet, newest first. The bulk list endpoint sometimes
+/// answers with only an id per entry, so a key missing its description is
+/// backfilled with one extra call — the team is small, this stays cheap.
+pub async fn list_keys(client_id: &str, client_secret: &str) -> anyhow::Result<Vec<KeyMeta>> {
+    let client = http_client()?;
+    let access_token = oauth_token(&client, client_id, client_secret).await?;
+
+    #[derive(serde::Deserialize)]
+    struct ListResp {
+        #[serde(default)]
+        keys: Vec<KeyMeta>,
+    }
+    let resp: ListResp = client
+        .get("https://api.tailscale.com/api/v2/tailnet/-/keys")
+        .bearer_auth(&access_token)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("không lấy được danh sách key: {e}"))?
+        .error_for_status()
+        .map_err(|e| anyhow::anyhow!("Tailscale từ chối yêu cầu: {e}"))?
+        .json()
+        .await
+        .map_err(|e| anyhow::anyhow!("phản hồi danh sách key không đọc được: {e}"))?;
+
+    let mut out = Vec::with_capacity(resp.keys.len());
+    for k in resp.keys {
+        if k.description.is_empty() && !k.id.is_empty() {
+            let resp = client
+                .get(format!("https://api.tailscale.com/api/v2/tailnet/-/keys/{}", k.id))
+                .bearer_auth(&access_token)
+                .send()
+                .await
+                .ok()
+                .and_then(|r| r.error_for_status().ok());
+            let full: Option<KeyMeta> = match resp { Some(r) => r.json().await.ok(), None => None };
+            out.push(full.unwrap_or(k));
+        } else {
+            out.push(k);
+        }
+    }
+    out.sort_by(|a, b| b.created.cmp(&a.created));
+    Ok(out)
+}
+
+/// Revoke one key by id — immediate, cannot be undone.
+pub async fn revoke_key(client_id: &str, client_secret: &str, key_id: &str) -> anyhow::Result<()> {
+    let client = http_client()?;
+    let access_token = oauth_token(&client, client_id, client_secret).await?;
+    client
+        .delete(format!("https://api.tailscale.com/api/v2/tailnet/-/keys/{key_id}"))
+        .bearer_auth(&access_token)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("không thu hồi được key: {e}"))?
+        .error_for_status()
+        .map_err(|e| anyhow::anyhow!("Tailscale từ chối thu hồi: {e}"))?;
+    Ok(())
 }
 
 #[cfg(test)]

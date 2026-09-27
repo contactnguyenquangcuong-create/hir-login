@@ -35,3 +35,7 @@ export const tailscaleOauthGet = () => invoke<{ client_id: string; has_secret: b
 export const tailscaleOauthSet = (clientId: string, clientSecret: string, tag: string) =>
   invoke<void>("tailscale_oauth_set", { clientId, clientSecret, tag });
 export const tailscaleCreateKey = (description: string) => invoke<string>("tailscale_create_key", { description });
+
+export type TailscaleKey = { id: string; description: string; created: string; expires: string; revoked: string; invalid: boolean };
+export const tailscaleListKeys = () => invoke<TailscaleKey[]>("tailscale_list_keys");
+export const tailscaleRevokeKey = (id: string) => invoke<void>("tailscale_revoke_key", { id });

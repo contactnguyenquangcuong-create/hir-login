@@ -8,6 +8,7 @@ import { startTeamRole, useTeam } from "../../shared/model/teamRole";
 import type { Settings, RemoteProfileStatus } from "../../entities/settings";
 import { teamSyncList, teamSyncPull, teamServerStart, teamServerStop, teamServerStatus, teamInviteGenerate, teamInviteGenerateWithAuth, teamInviteJoin, tailscaleStatus, autostartGet, autostartSet, tailscaleOauthGet, tailscaleOauthSet, tailscaleCreateKey } from "../../entities/settings";
 import { MembersPanel } from "./MembersPanel";
+import { TailscaleKeysPanel } from "./TailscaleKeysPanel";
 import { Section, Row, Block, Pill, Dot, Segmented } from "./ui";
 
 const ROLE_LABEL = { admin: "Quản trị", manager: "Quản lý nhóm", member: "Thành viên" } as const;
@@ -307,6 +308,8 @@ export function TeamTab({
       )}
 
       <MembersPanel serverUrl={serverUrl} />
+
+      {oauthReady && <TailscaleKeysPanel />}
 
       <button type="button" onClick={() => setAdvancedOpen((v) => !v)} className="self-start border-0 bg-transparent p-0 text-label-xs text-text-sub-600 hover:text-text-strong-950">
         {advancedOpen ? "▾ Ẩn cấu hình nâng cao" : "▸ Cấu hình nâng cao"}

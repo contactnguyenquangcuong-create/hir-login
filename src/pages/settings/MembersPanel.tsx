@@ -4,7 +4,7 @@ import { CopyField } from "../../shared/ui/CopyField";
 import { toast } from "../../shared/model/toast";
 import { confirmModal } from "../../shared/model/confirm";
 import { teamCall, useTeam } from "../../shared/model/teamRole";
-import { teamInviteGenerate } from "../../entities/settings";
+import { teamInviteGenerate, teamInviteGenerateWithAuth, tailscaleOauthGet, tailscaleCreateKey } from "../../entities/settings";
 import { Section, Block, Pill, avatar } from "./ui";
 
 type Role = "manager" | "member";
@@ -28,18 +28,36 @@ export function MembersPanel({ serverUrl }: { serverUrl: string }) {
   const [name, setName] = useState("");
   const [newRole, setNewRole] = useState<Role>("member");
   const [issued, setIssued] = useState<{ name: string; code: string } | null>(null);
+  const [oauthReady, setOauthReady] = useState(false);
+  const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
     try { setMembers((await teamCall<{ members: Member[] }>("GET", "/admin/members")).members); } catch { /* not the admin */ }
   }, []);
   useEffect(() => { if (role === "admin") load(); }, [role, load]);
+  useEffect(() => { tailscaleOauthGet().then((o) => setOauthReady(o.has_secret && !!o.client_id)).catch(() => {}); }, []);
   if (role !== "admin") return null;
 
   const run = async (fn: () => Promise<void>) => {
+    setBusy(true);
     try { await fn(); await load(); } catch (e) { toast.err(String(e)); }
+    finally { setBusy(false); }
   };
-  const show = async (who: string, token: string) =>
-    setIssued({ name: who, code: await teamInviteGenerate(serverUrl, token) });
+  // A brand-new machine needs two things to be useful with one code: Tailscale
+  // network access, and this person's Hir-Login permission level. When an OAuth
+  // client is configured, mint them their own Tailscale key (named after them,
+  // so it can be found and revoked on its own in Tailscale's Keys page) instead
+  // of leaving the code Hir-Login-only.
+  const show = async (who: string, token: string) => {
+    let code: string;
+    if (oauthReady) {
+      const key = await tailscaleCreateKey(`Hir-Login: ${who}`);
+      code = await teamInviteGenerateWithAuth(serverUrl, token, key);
+    } else {
+      code = await teamInviteGenerate(serverUrl, token);
+    }
+    setIssued({ name: who, code });
+  };
 
   const add = () => run(async () => {
     const n = name.trim();
@@ -68,7 +86,11 @@ export function MembersPanel({ serverUrl }: { serverUrl: string }) {
   return (
     <Section
       title="Nhân sự"
-      desc={'Mỗi người một mã riêng, gọi theo tên. Chia sẻ thư mục cho họ ngay trong trang Trình duyệt: mở thư mục, bấm "Chia sẻ quyền".'}
+      desc={
+        oauthReady
+          ? 'Mỗi người một mã riêng, kèm sẵn quyền vào mạng Tailscale — dùng được ngay trên máy mới. Chia sẻ thư mục cho họ ở trang Trình duyệt: mở thư mục, bấm "Chia sẻ quyền".'
+          : 'Mỗi người một mã riêng, gọi theo tên. Mã này chưa kèm quyền vào Tailscale — máy nhận mã cần đã ở trong mạng từ trước. Chia sẻ thư mục cho họ ở trang Trình duyệt: mở thư mục, bấm "Chia sẻ quyền".'
+      }
     >
       <Block>
         <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
@@ -87,7 +109,7 @@ export function MembersPanel({ serverUrl }: { serverUrl: string }) {
             <Input inputSize="small" label="Thêm nhân sự" value={name} onChange={(e) => setName(e.target.value)} placeholder="Tên, ví dụ: Lan - Sale 1" />
           </div>
           <div className="w-44"><Select size="small" value={newRole} onChange={(v) => setNewRole(v as Role)} options={ROLES} /></div>
-          <Button type="submit" variant="primary" size="small" disabled={!name.trim()}>Tạo mã</Button>
+          <Button type="submit" variant="primary" size="small" disabled={!name.trim()} isLoading={busy}>Tạo mã</Button>
         </form>
         {issued && (
           <div className="flex flex-col gap-2 rounded-lg bg-success-alpha-10 p-3 ring-1 ring-inset ring-success-alpha-16">
@@ -127,7 +149,7 @@ export function MembersPanel({ serverUrl }: { serverUrl: string }) {
               <Button variant="neutral" mode="ghost" size="xsmall" onClick={() => patch(m, { role: m.role === "manager" ? "member" : "manager" })}>
                 {m.role === "manager" ? "Hạ xuống thành viên" : "Lên quản lý nhóm"}
               </Button>
-              <Button variant="neutral" mode="ghost" size="xsmall" onClick={() => rotate(m)}>Cấp lại mã</Button>
+              <Button variant="neutral" mode="ghost" size="xsmall" onClick={() => rotate(m)} isLoading={busy}>Cấp lại mã</Button>
               <Button variant="neutral" mode="ghost" size="xsmall" onClick={() => patch(m, { disabled: !m.disabled })}>{m.disabled ? "Mở khoá" : "Khoá"}</Button>
               <Button variant="neutral" mode="ghost" size="xsmall" onClick={() => remove(m)}>Xoá</Button>
             </div>

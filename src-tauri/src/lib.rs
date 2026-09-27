@@ -2469,6 +2469,21 @@ async fn tailscale_create_key(description: String) -> Result<String, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Every Tailscale key in the tailnet, for the in-app "quản lý key" list.
+#[tauri::command]
+async fn tailscale_list_keys() -> Result<Vec<tailscale::KeyMeta>, String> {
+    let s = settings::load().map_err(|e| e.to_string())?;
+    let o = s.server_host.tailscale_oauth.ok_or_else(|| "chưa cấu hình OAuth Client".to_string())?;
+    tailscale::list_keys(&o.client_id, &o.client_secret).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn tailscale_revoke_key(id: String) -> Result<(), String> {
+    let s = settings::load().map_err(|e| e.to_string())?;
+    let o = s.server_host.tailscale_oauth.ok_or_else(|| "chưa cấu hình OAuth Client".to_string())?;
+    tailscale::revoke_key(&o.client_id, &o.client_secret, &id).await.map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn team_invite_join(code: String) -> Result<Value, String> {
     let (url, token, auth_key) = team_invite::parse_invite_code(&code).map_err(|e| e.to_string())?;
@@ -3111,6 +3126,8 @@ pub fn run() {
             tailscale_oauth_get,
             tailscale_oauth_set,
             tailscale_create_key,
+            tailscale_list_keys,
+            tailscale_revoke_key,
             sync_activity,
             team_admin,
             sync_kick,
