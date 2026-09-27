@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Button, Input, Select } from "@proxyshard/shardx-ui-kit";
 import { CopyField } from "../../shared/ui/CopyField";
 import { toast } from "../../shared/model/toast";
+import { confirmModal } from "../../shared/model/confirm";
 import { teamCall, useTeam } from "../../shared/model/teamRole";
 import { teamInviteGenerate } from "../../entities/settings";
 import { Section, Block, Pill, avatar } from "./ui";
@@ -48,17 +49,19 @@ export function MembersPanel({ serverUrl }: { serverUrl: string }) {
     await show(n, r.token);
   });
   const patch = (m: Member, p: Record<string, unknown>) => run(async () => { await teamCall("PUT", "/admin/members", { id: m.id, ...p }); });
-  const rename = (m: Member) => {
-    const n = window.prompt("Tên nhân sự", m.name)?.trim();
+  const [renaming, setRenaming] = useState<{ id: string; text: string } | null>(null);
+  const commitRename = (m: Member) => {
+    const n = renaming?.text.trim();
+    setRenaming(null);
     if (n && n !== m.name) patch(m, { name: n });
   };
   const rotate = (m: Member) => run(async () => {
-    if (!window.confirm(`Cấp lại mã cho ${m.name}? Mã cũ hết hiệu lực ngay.`)) return;
+    if ((await confirmModal({ title: `Cấp lại mã cho ${m.name}?`, message: "Mã cũ hết hiệu lực ngay, người này phải dùng mã mới." })) !== true) return;
     const r = await teamCall<{ token: string }>("PUT", "/admin/members", { id: m.id, rotate: true });
     await show(m.name, r.token);
   });
   const remove = (m: Member) => run(async () => {
-    if (!window.confirm(`Xoá ${m.name}? Người này mất quyền ngay.`)) return;
+    if ((await confirmModal({ title: `Xoá ${m.name}?`, message: "Người này mất quyền ngay và mã của họ không dùng được nữa.", danger: true })) !== true) return;
     await teamCall("POST", `/admin/members/${m.id}/delete`);
   });
 
@@ -104,12 +107,23 @@ export function MembersPanel({ serverUrl }: { serverUrl: string }) {
           <div key={m.id} className="flex flex-wrap items-center gap-3 px-5 py-3">
             {avatar(m.name)}
             <div className="flex min-w-0 flex-1 items-center gap-2">
-              <span className={`truncate text-label-sm ${m.disabled ? "text-text-soft-400 line-through" : "text-text-strong-950"}`}>{m.name}</span>
+              {renaming?.id === m.id ? (
+                <input
+                  autoFocus
+                  value={renaming.text}
+                  onChange={(e) => setRenaming({ id: m.id, text: e.target.value })}
+                  onBlur={() => commitRename(m)}
+                  onKeyDown={(e) => { if (e.key === "Enter") commitRename(m); if (e.key === "Escape") setRenaming(null); }}
+                  className="w-48 rounded-md border border-stroke-soft-200 bg-bg-white-0 px-2 py-1 text-label-sm text-text-strong-950"
+                />
+              ) : (
+                <span className={`truncate text-label-sm ${m.disabled ? "text-text-soft-400 line-through" : "text-text-strong-950"}`}>{m.name}</span>
+              )}
               <Pill tone={m.role === "manager" ? "primary" : "neutral"}>{m.role === "manager" ? "Quản lý nhóm" : "Thành viên"}</Pill>
               {m.disabled && <Pill tone="warning">Đã khoá</Pill>}
             </div>
             <div className="flex flex-none flex-wrap justify-end gap-1">
-              <Button variant="neutral" mode="ghost" size="xsmall" onClick={() => rename(m)}>Đổi tên</Button>
+              <Button variant="neutral" mode="ghost" size="xsmall" onClick={() => setRenaming({ id: m.id, text: m.name })}>Đổi tên</Button>
               <Button variant="neutral" mode="ghost" size="xsmall" onClick={() => patch(m, { role: m.role === "manager" ? "member" : "manager" })}>
                 {m.role === "manager" ? "Hạ xuống thành viên" : "Lên quản lý nhóm"}
               </Button>

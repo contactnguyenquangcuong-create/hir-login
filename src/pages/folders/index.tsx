@@ -3,6 +3,7 @@ import { Button, Input } from "@proxyshard/shardx-ui-kit";
 import { Topbar } from "../../shared/ui/Topbar";
 import { FolderIcon } from "../../shared/icons";
 import { toast } from "../../shared/model/toast";
+import { confirmModal } from "../../shared/model/confirm";
 import { useNav } from "../../shared/model/navigation";
 import { startTeamRole, teamCall, useTeam, canShare } from "../../shared/model/teamRole";
 import { useProfile, useFolders } from "../../entities/profile";
@@ -10,7 +11,8 @@ import { ShareFolderModal } from "../../features/manage-profiles/ui/ShareFolderM
 import { Section, Pill } from "../settings/ui";
 
 type Member = { id: string; name: string; role: "manager" | "member"; disabled: boolean };
-type ServerFolder = { name: string; profiles: number; access: Record<string, string> };
+type ServerFolder = { name: string; profiles: number; access: Record<string, string>; canDelete?: boolean; createdBy?: { role: "admin" | "manager"; name: string } };
+type TrashedFolder = { name: string; deletedBy: string; daysLeft: number };
 
 /** Every folder in one place: how many profiles it holds, who may use or manage it, and the sharing dialog. */
 export function FoldersPage() {
@@ -18,10 +20,12 @@ export function FoldersPage() {
   const setSection = useNav((s) => s.setSection);
   const profiles = useProfile((s) => s.profiles);
   const rememberFolder = useProfile((s) => s.rememberFolder);
+  const forgetFolder = useProfile((s) => s.forgetFolder);
   const localFolders = useFolders();
   const [server, setServer] = useState<ServerFolder[] | null>(null);
   const [members, setMembers] = useState<Member[]>([]);
   const [sharing, setSharing] = useState<string | null>(null);
+  const [trash, setTrash] = useState<TrashedFolder[]>([]);
   const [name, setName] = useState("");
 
   useEffect(() => { startTeamRole(); }, []);
@@ -31,6 +35,7 @@ export function FoldersPage() {
     try {
       setServer((await teamCall<{ folders: ServerFolder[] }>("GET", "/admin/folders")).folders);
       setMembers((await teamCall<{ members: Member[] }>("GET", "/admin/members")).members);
+      setTrash((await teamCall<{ items: TrashedFolder[] }>("GET", "/admin/folders/trash").catch(() => ({ items: [] as TrashedFolder[] }))).items);
     } catch (e) { toast.err(String(e)); }
   }, [role]);
   useEffect(() => { load(); }, [load, sharing]);
@@ -51,7 +56,7 @@ export function FoldersPage() {
   // Folders on the server, then any that exist only on this machine so far.
   const rows = useMemo(() => {
     const seen = new Set((server ?? []).map((f) => f.name));
-    const extra = localFolders.filter((f) => !seen.has(f)).map((f) => ({ name: f, profiles: localCount[f] ?? 0, access: {} as Record<string, string>, local: true }));
+    const extra = localFolders.filter((f) => !seen.has(f)).map((f) => ({ name: f, profiles: localCount[f] ?? 0, access: {} as Record<string, string>, canDelete: true, createdBy: undefined, local: true }));
     return [...(server ?? []).map((f) => ({ ...f, local: false })), ...extra];
   }, [server, localFolders, localCount]);
 
@@ -61,10 +66,39 @@ export function FoldersPage() {
     try { await teamCall("PUT", "/admin/folders", { name: n }); rememberFolder(n); setName(""); toast.ok(`Đã tạo thư mục "${n}"`); await load(); }
     catch (e) { toast.err(/409|exists/i.test(String(e)) ? "Thư mục này đã tồn tại." : String(e)); }
   };
-  const remove = async (f: string) => {
-    if (!window.confirm(`Xoá thư mục "${f}"? Mọi chia sẻ của thư mục sẽ mất.`)) return;
-    try { await teamCall("POST", `/admin/folders/${encodeURIComponent(f)}/delete`); await load(); }
-    catch (e) { toast.err(/409/.test(String(e)) ? "Thư mục còn profile, hãy chuyển hoặc xoá hết profile trước." : String(e)); }
+  const remove = async (f: string, onServer: boolean) => {
+    const ok = await confirmModal({
+      title: `Xoá thư mục "${f}"?`,
+      message: onServer
+        ? "Thư mục sẽ vào thùng rác và được giữ 30 ngày, có thể khôi phục. Trong lúc đó mọi người được chia sẻ sẽ không còn thấy nó."
+        : "Thư mục này chỉ có trên máy này và đang trống. Xoá khỏi danh sách?",
+      danger: true,
+    });
+    if (ok !== true) return;
+    if (onServer) {
+      try { await teamCall("POST", `/admin/folders/${encodeURIComponent(f)}/delete`); }
+      catch (e) {
+        const msg = String(e);
+        toast.err(/409/.test(msg) ? "Thư mục còn profile, hãy chuyển hoặc xoá hết profile trước."
+          : /404|405/.test(msg) ? "Máy chủ chưa hỗ trợ xoá thư mục. Hãy cập nhật máy chủ lên bản mới nhất."
+          : msg);
+        return;
+      }
+      toast.ok(`Đã chuyển "${f}" vào thùng rác, giữ 30 ngày`);
+    }
+    // Also drop it from this machine's own list, or it would keep showing here.
+    forgetFolder(f);
+    await load();
+  };
+  const restore = async (f: string) => {
+    try { await teamCall("POST", `/admin/folders/${encodeURIComponent(f)}/restore`); toast.ok(`Đã khôi phục "${f}"`); await load(); }
+    catch (e) { toast.err(/409/.test(String(e)) ? "Đã có thư mục cùng tên, hãy đổi tên hoặc xoá thư mục đó trước." : String(e)); }
+  };
+  const purge = async (f: string) => {
+    const ok = await confirmModal({ title: `Xoá vĩnh viễn "${f}"?`, message: "Sau khi xoá vĩnh viễn không khôi phục được nữa.", danger: true });
+    if (ok !== true) return;
+    try { await teamCall("POST", `/admin/folders/${encodeURIComponent(f)}/purge`); await load(); }
+    catch (e) { toast.err(String(e)); }
   };
 
   return (
@@ -126,11 +160,28 @@ export function FoldersPage() {
                   </div>
                   <div className="flex flex-none gap-1">
                     <Button variant="primary" mode="stroke" size="xsmall" onClick={() => setSharing(f.name)}>Chia sẻ</Button>
-                    {!f.local && f.profiles === 0 && <Button variant="neutral" mode="ghost" size="xsmall" onClick={() => remove(f.name)}>Xoá</Button>}
+                    {f.profiles === 0 && (f.local || f.canDelete !== false) && <Button variant="neutral" mode="ghost" size="xsmall" onClick={() => remove(f.name, !f.local)}>Xoá</Button>}
+                    {!f.local && f.canDelete === false && <span className="self-center text-paragraph-xs text-text-soft-400" title="Chỉ người tạo thư mục hoặc Quản trị mới xoá được. Bạn vẫn dùng và chia sẻ được.">{f.createdBy?.role === "manager" ? `Do Quản lý ${f.createdBy.name} tạo`.replace("  ", " ") : "Do Quản trị tạo"}</span>}
                   </div>
                 </div>
               );
             })}
+          </Section>
+        )}
+
+        {canShare(role) && trash.length > 0 && (
+          <Section title="Thùng rác thư mục" desc="Thư mục đã xoá được giữ 30 ngày rồi tự xoá vĩnh viễn. Khôi phục sẽ trả lại cả phần chia sẻ.">
+            {trash.map((f) => (
+              <div key={f.name} className="flex flex-wrap items-center gap-3 px-5 py-3">
+                <FolderIcon className="size-5 flex-none text-icon-soft-400" />
+                <div className="flex min-w-0 flex-1 flex-col">
+                  <span className="truncate text-label-sm text-text-strong-950">{f.name}</span>
+                  <span className="text-paragraph-xs text-text-soft-400">Xoá bởi {f.deletedBy || "?"} · còn {f.daysLeft} ngày</span>
+                </div>
+                <Button variant="neutral" mode="stroke" size="xsmall" onClick={() => restore(f.name)}>Khôi phục</Button>
+                <Button variant="neutral" mode="ghost" size="xsmall" onClick={() => purge(f.name)}>Xoá vĩnh viễn</Button>
+              </div>
+            ))}
           </Section>
         )}
       </div>

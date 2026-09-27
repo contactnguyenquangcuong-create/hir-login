@@ -465,7 +465,7 @@ async fn put_bundle(
             who.is_privileged()
                 || (who.role == team_acl::Role::Manager && !folder.is_empty()
                     && (acl.level(&who, folder) == Level::Full
-                        || (!acl.owners.contains_key(folder) && !acl.folders.contains_key(folder) && !taken(folder))))
+                        || (!acl.owners.contains_key(folder) && !acl.folders.contains_key(folder) && !acl.trashed.contains_key(folder) && !taken(folder))))
         };
         match live {
             None => {
@@ -805,6 +805,12 @@ async fn admin_folders(
     }
     let folders: Vec<Value> = names.into_iter().filter(|f| acl.level(&who, f) == Level::Full).map(|f| json!({
         "name": f, "profiles": counts.get(&f).copied().unwrap_or(0), "access": acl.folders.get(&f).cloned().unwrap_or_default(),
+        "canDelete": acl.may_delete_folder(&who, &f),
+        // Who made it: "admin", or the manager's name.
+        "createdBy": match acl.owners.get(&f).map(String::as_str) {
+            None | Some("admin") => json!({"role": "admin", "name": ""}),
+            Some(id) => json!({"role": "manager", "name": acl.members.iter().find(|m| m.id == id).map(|m| m.name.clone()).unwrap_or_default()}),
+        },
     })).collect();
     Json(json!({"ok": true, "folders": folders})).into_response()
 }
@@ -823,7 +829,7 @@ async fn admin_folder_create(
     }
     let _g = acl_lock();
     let mut acl = load_acl();
-    let in_use = acl.owners.contains_key(&name) || acl.folders.contains_key(&name)
+    let in_use = acl.owners.contains_key(&name) || acl.folders.contains_key(&name) || acl.trashed.contains_key(&name)
         || meta_map().values().any(|m| m.get("folder").and_then(|f| f.as_str()) == Some(name.as_str()));
     if in_use {
         return (StatusCode::CONFLICT, Json(json!({"ok":false,"error":"folder exists"}))).into_response();
@@ -868,7 +874,8 @@ async fn admin_folder_access(
     Json(json!({"ok": true})).into_response()
 }
 
-/// Remove an empty folder and every share of it.
+/// Delete an empty folder: it goes to the folder trash for 30 days, with its sharing.
+/// Only the admin or the manager who made it; one handed down from above cannot be deleted.
 async fn admin_folder_delete(
     headers: HeaderMap,
     axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
@@ -878,15 +885,75 @@ async fn admin_folder_delete(
     let _g = acl_lock();
     let mut acl = load_acl();
     if acl.level(&who, &folder) != Level::Full { return not_found(); }
+    if !acl.may_delete_folder(&who, &folder) {
+        audit(&who, "folder-delete", &folder, false, "created by someone above");
+        return forbidden("folder-owner");
+    }
     let has_profiles = meta_map().values().any(|m| m.get("folder").and_then(|f| f.as_str()) == Some(folder.as_str())
         && !m.get("deleted").and_then(|d| d.as_bool()).unwrap_or(false));
     if has_profiles {
         return (StatusCode::CONFLICT, Json(json!({"ok":false,"error":"folder not empty"}))).into_response();
     }
-    acl.folders.remove(&folder);
-    acl.owners.remove(&folder);
+    acl.purge_expired_folders(now_ms());
+    acl.trash_folder(&folder, &who, now_ms());
     if let Err(e) = save_acl(&acl) { return err500(e); }
-    audit(&who, "folder-delete", &folder, true, "");
+    audit(&who, "folder-delete", &folder, true, "to trash");
+    Json(json!({"ok": true})).into_response()
+}
+
+/// Deleted folders still within their 30 days (the admin sees all, a manager the ones they made).
+async fn admin_folder_trash(
+    headers: HeaderMap,
+    axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
+) -> Response {
+    let who = match staff_only(&headers, &state) { Ok(w) => w, Err(r) => return r };
+    let _g = acl_lock();
+    let mut acl = load_acl();
+    let before = acl.trashed.len();
+    acl.purge_expired_folders(now_ms());
+    if acl.trashed.len() != before { let _ = save_acl(&acl); }
+    let keep_ms = team_acl::FOLDER_TRASH_DAYS * 24 * 3600 * 1000;
+    let items: Vec<Value> = acl.trashed.iter()
+        .filter(|(_, t)| who.is_privileged() || (t.owner == who.id && !t.by_admin))
+        .map(|(name, t)| json!({
+            "name": name, "deletedBy": t.deleted_by,
+            "daysLeft": (keep_ms.saturating_sub(now_ms().saturating_sub(t.deleted_at_ms)) + 86_399_999) / 86_400_000,
+        })).collect();
+    Json(json!({"ok": true, "items": items})).into_response()
+}
+
+async fn admin_folder_restore(
+    headers: HeaderMap,
+    axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
+    AxumPath(folder): AxumPath<String>,
+) -> Response {
+    let who = match staff_only(&headers, &state) { Ok(w) => w, Err(r) => return r };
+    let _g = acl_lock();
+    let mut acl = load_acl();
+    let owner_ok = acl.trashed.get(&folder).map(|t| who.is_privileged() || (t.owner == who.id && !t.by_admin)).unwrap_or(false);
+    if !owner_ok { return not_found(); }
+    if !acl.restore_folder(&folder) {
+        return (StatusCode::CONFLICT, Json(json!({"ok":false,"error":"name taken"}))).into_response();
+    }
+    if let Err(e) = save_acl(&acl) { return err500(e); }
+    audit(&who, "folder-restore", &folder, true, "");
+    Json(json!({"ok": true})).into_response()
+}
+
+/// Delete a trashed folder for good.
+async fn admin_folder_purge(
+    headers: HeaderMap,
+    axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
+    AxumPath(folder): AxumPath<String>,
+) -> Response {
+    let who = match staff_only(&headers, &state) { Ok(w) => w, Err(r) => return r };
+    let _g = acl_lock();
+    let mut acl = load_acl();
+    let owner_ok = acl.trashed.get(&folder).map(|t| who.is_privileged() || (t.owner == who.id && !t.by_admin)).unwrap_or(false);
+    if !owner_ok { return not_found(); }
+    acl.trashed.remove(&folder);
+    if let Err(e) = save_acl(&acl) { return err500(e); }
+    audit(&who, "folder-purge", &folder, true, "");
     Json(json!({"ok": true})).into_response()
 }
 
@@ -965,7 +1032,10 @@ pub async fn start(port: u16, token: String) -> Result<u16> {
         .route("/admin/members", get(admin_members).put(admin_member_put))
         .route("/admin/members/:id/delete", post(admin_member_delete))
         .route("/admin/folders", get(admin_folders).put(admin_folder_create))
+        .route("/admin/folders/trash", get(admin_folder_trash))
         .route("/admin/folders/:folder/delete", post(admin_folder_delete))
+        .route("/admin/folders/:folder/restore", post(admin_folder_restore))
+        .route("/admin/folders/:folder/purge", post(admin_folder_purge))
         .route("/admin/folders/:folder/access", axum::routing::put(admin_folder_access))
         .route("/admin/audit", get(admin_audit))
         .route("/library/:kind", get(library_list))
@@ -1194,6 +1264,32 @@ mod permission_tests {
         // g deletes inside their folder; only the admin manages people.
         assert_eq!(status(&c, &tok["g"], "POST", format!("{base}/profiles/pa2/delete"), None, "g").await, 200);
         assert_eq!(status(&c, &tok["g"], "PUT", format!("{base}/admin/members"), Some(b"{}".to_vec()), "").await, 403);
+
+        // One group manager may run several groups when the admin hands them over: g now also manages B.
+        assert_eq!(up(&tok["g"], "pb", "B", "z").await, 404, "not yet: B is invisible to g");
+        assert_eq!(put_json(&c, admin, format!("{base}/admin/folders/B/access"), json!({"memberId": ids["g"], "level": "manage"})).await.0, 200);
+        assert_eq!(up(&tok["g"], "pb", "B", "z").await, 200, "g edits a profile in B");
+        assert_eq!(up(&tok["g"], "pb3", "B", "z").await, 200, "and adds one");
+        assert_eq!(up(&tok["g"], "pa3", "A", "z").await, 200, "still manages A");
+        let f: Value = c.get(format!("{base}/admin/folders")).bearer_auth(&tok["g"]).send().await.unwrap().json().await.unwrap();
+        let names: Vec<&str> = f["folders"].as_array().unwrap().iter().map(|x| x["name"].as_str().unwrap()).collect();
+        assert_eq!(names, vec!["A", "B", "G"]);
+        assert_eq!(status(&c, &tok["g"], "POST", format!("{base}/admin/folders/B/delete"), None, "").await, 403, "co-managing does not include deleting the admin's folder");
+
+        // Folder trash: only whoever made a folder (or the admin) may delete it; it keeps 30 days.
+        assert_eq!(status(&c, &tok["g"], "POST", format!("{base}/admin/folders/A/delete"), None, "").await, 403, "A came from the admin");
+        assert_eq!(status(&c, &tok["g"], "POST", format!("{base}/admin/folders/G/delete"), None, "").await, 409, "G still holds a profile");
+        assert_eq!(status(&c, &tok["g"], "POST", format!("{base}/profiles/pa/delete"), None, "g").await, 200);
+        assert_eq!(status(&c, &tok["g"], "POST", format!("{base}/profiles/pg/delete"), None, "g").await, 200);
+        assert_eq!(status(&c, &tok["g"], "POST", format!("{base}/admin/folders/G/delete"), None, "").await, 200);
+        let t: Value = c.get(format!("{base}/admin/folders/trash")).bearer_auth(&tok["g"]).send().await.unwrap().json().await.unwrap();
+        assert_eq!(t["items"][0]["name"], "G");
+        assert_eq!(t["items"][0]["daysLeft"], 30);
+        assert_eq!(status(&c, &tok["h"], "POST", format!("{base}/admin/folders/G/restore"), None, "").await, 404, "not theirs");
+        assert_eq!(status(&c, &tok["g"], "POST", format!("{base}/admin/folders/G/restore"), None, "").await, 200);
+        assert_eq!(status(&c, admin, "POST", format!("{base}/admin/folders/G/delete"), None, "").await, 200, "the admin may delete any");
+        assert_eq!(status(&c, &tok["g"], "POST", format!("{base}/admin/folders/G/restore"), None, "").await, 404, "deleted from above: gone for them");
+        assert_eq!(status(&c, admin, "POST", format!("{base}/admin/folders/G/restore"), None, "").await, 200, "the admin can still restore it");
 
         // Disabling locks someone out at once; the audit trail names who did what.
         put_json(&c, admin, format!("{base}/admin/members"), json!({"id": ids["u"], "disabled": true})).await;

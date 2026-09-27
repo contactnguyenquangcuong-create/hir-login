@@ -1574,5 +1574,6 @@
   "inlineEditor.folderLabel": "Thư mục",
   "inlineEditor.folderNone": "Không có thư mục",
   "inlineEditor.cardHardware": "Phần cứng & màn hình",
-  "inlineEditor.cardPorts": "Chặn cổng mạng"
+  "inlineEditor.cardPorts": "Chặn cổng mạng",
+  "err.folderAbove": "Thư mục này do Quản trị hoặc Quản lý khác tạo, chỉ người tạo mới xoá được."
 }

@@ -194,7 +194,12 @@ pub async fn admin_call(method: &str, path: &str, body: Option<serde_json::Value
     if let Some(b) = body { req = req.json(&b); }
     let resp = req.send().await.context("contact sync server")?;
     if resp.status().as_u16() == 401 { anyhow::bail!("sync server rejected the request: 401"); }
-    if resp.status().as_u16() == 403 { anyhow::bail!("permission denied: only the admin can manage members"); }
+    if resp.status().as_u16() == 403 {
+        let reason = resp.json::<serde_json::Value>().await.ok()
+            .and_then(|v| v.get("reason").and_then(|r| r.as_str().map(String::from))).unwrap_or_default();
+        if reason == "folder-owner" { anyhow::bail!("permission denied: folder made by someone above"); }
+        anyhow::bail!("permission denied: only the admin can manage members");
+    }
     if !resp.status().is_success() { anyhow::bail!("sync server rejected the request: {}", resp.status()); }
     Ok(resp.json().await.unwrap_or(serde_json::Value::Null))
 }

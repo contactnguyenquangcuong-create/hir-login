@@ -95,6 +95,23 @@ pub struct Member {
     pub created_at: String,
 }
 
+/// How long a deleted folder stays restorable.
+pub const FOLDER_TRASH_DAYS: u64 = 30;
+
+#[derive(Clone, Serialize, Deserialize, Default, Debug)]
+pub struct TrashedFolder {
+    pub owner: String,
+    #[serde(default)]
+    pub access: BTreeMap<String, String>,
+    #[serde(rename = "deletedAtMs")]
+    pub deleted_at_ms: u64,
+    #[serde(rename = "deletedBy", default)]
+    pub deleted_by: String,
+    /// Deleted by the admin: whoever was below them loses the folder for good, and cannot bring it back.
+    #[serde(rename = "byAdmin", default)]
+    pub by_admin: bool,
+}
+
 #[derive(Serialize, Deserialize, Default, Debug)]
 pub struct AclStore {
     #[serde(default)]
@@ -105,6 +122,9 @@ pub struct AclStore {
     /// Every folder that was created on purpose -> who created it ("admin" or a member id).
     #[serde(default)]
     pub owners: BTreeMap<String, String>,
+    /// Deleted folders, kept for a while with their owner and sharing so a restore is complete.
+    #[serde(default)]
+    pub trashed: BTreeMap<String, TrashedFolder>,
 }
 
 pub fn hash_token(token: &str) -> String {
@@ -180,6 +200,37 @@ impl AclStore {
         }
     }
 
+    /// Whether `who` may delete (or restore, or purge) `folder`: the admin, or the manager who made it.
+    /// A folder a superior made or handed over can be used and shared but not deleted.
+    pub fn may_delete_folder(&self, who: &Identity, folder: &str) -> bool {
+        who.is_privileged() || self.owners.get(folder).map(|o| o == &who.id).unwrap_or(false)
+    }
+
+    /// Move a folder to the trash, keeping who owned it and who it was shared with.
+    pub fn trash_folder(&mut self, folder: &str, by: &Identity, now_ms: u64) {
+        let owner = self.owners.remove(folder).unwrap_or_else(|| "admin".into());
+        let access = self.folders.remove(folder).unwrap_or_default();
+        self.trashed.insert(folder.to_string(), TrashedFolder { owner, access, deleted_at_ms: now_ms, deleted_by: by.name.clone(), by_admin: by.is_privileged() });
+    }
+
+    /// Bring a trashed folder back. False when its name has been taken meanwhile or it is not in the trash.
+    pub fn restore_folder(&mut self, folder: &str) -> bool {
+        if self.owners.contains_key(folder) || self.folders.contains_key(folder) { return false; }
+        let Some(t) = self.trashed.remove(folder) else { return false };
+        self.owners.insert(folder.to_string(), t.owner);
+        // People removed since then lose their share.
+        let ids: std::collections::HashSet<&str> = self.members.iter().map(|m| m.id.as_str()).collect();
+        let access: BTreeMap<String, String> = t.access.into_iter().filter(|(id, _)| ids.contains(id.as_str())).collect();
+        if !access.is_empty() { self.folders.insert(folder.to_string(), access); }
+        true
+    }
+
+    /// Forget trashed folders older than the retention.
+    pub fn purge_expired_folders(&mut self, now_ms: u64) {
+        let keep = FOLDER_TRASH_DAYS * 24 * 3600 * 1000;
+        self.trashed.retain(|_, t| now_ms.saturating_sub(t.deleted_at_ms) < keep);
+    }
+
     pub fn remove_member(&mut self, member_id: &str) {
         self.members.retain(|m| m.id != member_id);
         for f in self.folders.values_mut() {
@@ -187,6 +238,9 @@ impl AclStore {
         }
         self.folders.retain(|_, v| !v.is_empty());
         self.owners.retain(|_, o| o != member_id);
+        for t in self.trashed.values_mut() {
+            t.access.remove(member_id);
+        }
     }
 }
 
@@ -289,6 +343,31 @@ mod tests {
         assert_eq!(s.level(&binh, "Mine"), Level::Full);
         assert_eq!(s.level(&an, "Mine"), Level::None);
         assert_eq!(s.owners["Mine"], "m2");
+    }
+
+    #[test]
+    fn only_the_maker_or_admin_deletes_a_folder_and_it_can_be_restored() {
+        let (mut s, an, binh) = store();
+        let admin = Identity::admin();
+        s.claim_folder("Mine", &binh);
+        s.set_access("Mine", "m1", Level::Use);
+        s.claim_folder("Boss", &admin);
+        s.set_access("Boss", "m2", Level::Full);
+        assert!(s.may_delete_folder(&binh, "Mine"));
+        assert!(!s.may_delete_folder(&binh, "Boss"), "handed over, not made by them");
+        assert!(!s.may_delete_folder(&an, "Mine"));
+        assert!(s.may_delete_folder(&admin, "Mine"));
+        s.trash_folder("Mine", &binh, 1_000);
+        assert!(s.folders.get("Mine").is_none() && s.trashed.contains_key("Mine"));
+        assert_eq!(s.level(&an, "Mine"), Level::None);
+        assert!(s.restore_folder("Mine"));
+        assert_eq!(s.level(&an, "Mine"), Level::Use, "sharing survives the trip");
+        assert_eq!(s.level(&binh, "Mine"), Level::Full);
+        s.trash_folder("Mine", &binh, 1_000);
+        s.purge_expired_folders(1_000 + 29 * 24 * 3600 * 1000);
+        assert!(s.trashed.contains_key("Mine"), "kept for 30 days");
+        s.purge_expired_folders(1_000 + 31 * 24 * 3600 * 1000);
+        assert!(s.trashed.is_empty(), "gone after 30 days");
     }
 
     #[test]

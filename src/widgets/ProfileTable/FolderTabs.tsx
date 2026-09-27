@@ -35,6 +35,17 @@ export function FolderTabs() {
   const ctx = useContextMenu();
   const role = useTeam((s) => s.role);
   const [sharing, setSharing] = useState<string | null>(null);
+  const folderNames = useTeam((s) => s.folderNames);
+  const registry = useProfile((s) => s.folderRegistry);
+  const forgetFolder = useProfile((s) => s.forgetFolder);
+  // A folder the server no longer shows this person (deleted, or access removed) goes from the
+  // list here as well; only empty ones, so no profile is ever hidden by this.
+  useEffect(() => {
+    if (folderNames === null) return;
+    for (const f of registry) {
+      if (!folderNames.includes(f) && !profiles.some((p) => p.folder === f)) forgetFolder(f);
+    }
+  }, [folderNames, registry, profiles, forgetFolder]);
   useEffect(() => { startTeamRole(); }, []);
 
   // Native non-passive wheel handler turns vertical scroll into horizontal tab scroll.

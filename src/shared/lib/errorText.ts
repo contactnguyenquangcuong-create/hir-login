@@ -19,6 +19,7 @@ const RULES: Rule[] = [
   { re: /permission denied: only an admin or manager/i, key: "err.noAdd" },
   { re: /permission denied: you may not move/i, key: "err.noMove" },
   { re: /permission denied: you may not delete/i, key: "err.noDelete" },
+  { re: /permission denied: folder made by someone above/i, key: "err.folderAbove" },
   { re: /permission denied: only the admin/i, key: "err.noAdmin" },
   { re: /permission denied/i, key: "err.noPerm" },
   { re: /sync server rejected .*\b(401|403)\b|unauthorized/i, key: "err.syncUnauthorized" },
