@@ -91,8 +91,10 @@ fn raw_hardware_id() -> Result<String> {
 
 #[cfg(target_os = "windows")]
 fn raw_hardware_id() -> Result<String> {
+    use std::os::windows::process::CommandExt;
     let out = std::process::Command::new("reg")
         .args(["query", r"HKLM\SOFTWARE\Microsoft\Cryptography", "/v", "MachineGuid"])
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW — no console flash
         .output()
         .context("run reg query")?;
     let text = String::from_utf8_lossy(&out.stdout);

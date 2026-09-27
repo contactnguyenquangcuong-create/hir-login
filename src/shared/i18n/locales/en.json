@@ -1575,5 +1575,6 @@
   "inlineEditor.folderNone": "No folder",
   "inlineEditor.cardHardware": "Hardware & screen",
   "inlineEditor.cardPorts": "Blocked ports",
-  "err.folderAbove": "This folder was created by the admin or another manager; only its creator can delete it."
+  "err.folderAbove": "This folder was created by the admin or another manager; only its creator can delete it.",
+  "fingerprintLibrary.noMatch": "No fingerprints match that search."
 }

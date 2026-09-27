@@ -1141,8 +1141,10 @@ pub fn tailscale_ip() -> Option<String> {
     }
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
         if let Ok(out) = std::process::Command::new("tailscale")
             .args(["ip", "-4"])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW — no console flash
             .output()
         {
             let s = String::from_utf8_lossy(&out.stdout).trim().to_string();

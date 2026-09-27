@@ -1575,5 +1575,6 @@
   "inlineEditor.folderNone": "Không có thư mục",
   "inlineEditor.cardHardware": "Phần cứng & màn hình",
   "inlineEditor.cardPorts": "Chặn cổng mạng",
-  "err.folderAbove": "Thư mục này do Quản trị hoặc Quản lý khác tạo, chỉ người tạo mới xoá được."
+  "err.folderAbove": "Thư mục này do Quản trị hoặc Quản lý khác tạo, chỉ người tạo mới xoá được.",
+  "fingerprintLibrary.noMatch": "Không có vân tay nào khớp tìm kiếm."
 }

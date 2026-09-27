@@ -23,15 +23,25 @@ function PlatformIcon({ platform }: { platform: string }) {
   }
 }
 
-export function FingerprintLibrary() {
+/** `query` narrows the list (see `useFingerprintGroups`) — a library that can run
+ *  into the thousands needs it, or every render is a wall of cards to scroll past. */
+export function FingerprintLibrary({ query = "" }: { query?: string }) {
   const t = useT();
   const isEmpty = useFingerprint((s) => s.items.length === 0);
-  const groups = useFingerprintGroups();
+  const groups = useFingerprintGroups(query);
 
   if (isEmpty) {
     return (
       <div className="rounded-12 bg-bg-white-0 px-6 py-14 text-center text-paragraph-sm text-text-sub-600 ring-1 ring-inset ring-stroke-soft-200">
         {t("fingerprintLibrary.emptyState")}
+      </div>
+    );
+  }
+
+  if (groups.length === 0) {
+    return (
+      <div className="rounded-12 bg-bg-white-0 px-6 py-10 text-center text-paragraph-sm text-text-sub-600 ring-1 ring-inset ring-stroke-soft-200">
+        {t("fingerprintLibrary.noMatch")}
       </div>
     );
   }

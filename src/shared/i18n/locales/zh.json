@@ -1575,5 +1575,6 @@
   "inlineEditor.folderNone": "无文件夹",
   "inlineEditor.cardHardware": "硬件与屏幕",
   "inlineEditor.cardPorts": "端口拦截",
-  "err.folderAbove": "此文件夹由管理员或其他经理创建，只有创建者可以删除。"
+  "err.folderAbove": "此文件夹由管理员或其他经理创建，只有创建者可以删除。",
+  "fingerprintLibrary.noMatch": "没有符合搜索条件的指纹。"
 }

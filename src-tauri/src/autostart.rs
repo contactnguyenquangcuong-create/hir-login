@@ -24,8 +24,10 @@ pub fn is_enabled() -> bool {
             if p.exists() { return true; }
         }
         // also check registry Run key
+        use std::os::windows::process::CommandExt;
         if let Ok(out) = std::process::Command::new("reg")
             .args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "Hir-Login"])
+            .creation_flags(0x08000000) // CREATE_NO_WINDOW — no console flash
             .output()
         {
             if out.status.success() { return true; }
@@ -90,12 +92,15 @@ fn startup_shortcut_path() -> Option<PathBuf> {
 
 #[cfg(target_os = "windows")]
 pub fn set_enabled(enabled: bool) -> Result<()> {
+    use std::os::windows::process::CommandExt;
+    const NO_WINDOW: u32 = 0x08000000; // CREATE_NO_WINDOW — no console flash
     // Use registry Run key — simplest and most reliable on Windows
     if enabled {
         let exe = app_exe_path().ok_or_else(|| anyhow::anyhow!("no exe"))?;
         let val = format!("\"{}\" --minimized", exe.display());
         let out = std::process::Command::new("reg")
             .args(["add", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "Hir-Login", "/t", "REG_SZ", "/d", &val, "/f"])
+            .creation_flags(NO_WINDOW)
             .output()?;
         if !out.status.success() {
             anyhow::bail!("{}", String::from_utf8_lossy(&out.stderr));
@@ -103,6 +108,7 @@ pub fn set_enabled(enabled: bool) -> Result<()> {
     } else {
         let _ = std::process::Command::new("reg")
             .args(["delete", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run", "/v", "Hir-Login", "/f"])
+            .creation_flags(NO_WINDOW)
             .output();
         if let Some(p) = startup_shortcut_path() { let _ = std::fs::remove_file(p); }
     }
