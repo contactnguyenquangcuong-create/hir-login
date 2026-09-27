@@ -81,7 +81,7 @@ export function SettingsPage() {
     setS(next);
     try { await settingsSave(next); setSaved(JSON.stringify(next)); }
     catch (e) { toast.err(String(e)); return; }
-    useTeam.setState({ role: null, name: "", id: "", folderNames: null });
+    useTeam.setState({ role: null, name: "", id: "", isServerAdmin: false, folderNames: null });
     try { localStorage.removeItem("hir.teamRole"); } catch { /* ignore */ }
     toast.ok("Đã ngắt kết nối");
   };

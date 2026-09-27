@@ -20,6 +20,9 @@ type State = {
   role: TeamRole | null;
   name: string;
   id: string;
+  /** True only for whoever holds the server's own token — never a named "admin"
+   *  member. Only they may rank (promote/demote/disable/delete) another admin. */
+  isServerAdmin: boolean;
   /** Folder names this person can see on the server; null until known. */
   folderNames: string[] | null;
   refresh: () => Promise<void>;
@@ -29,11 +32,12 @@ export const useTeam = create<State>((set) => ({
   role: cached(),
   name: "",
   id: "",
+  isServerAdmin: false,
   folderNames: null,
   refresh: async () => {
     try {
-      const me = await teamCall<{ role: TeamRole; name: string; id: string; folders: Record<string, string> | null }>("GET", "/me");
-      set({ role: me.role, name: me.name, id: me.id });
+      const me = await teamCall<{ role: TeamRole; name: string; id: string; isServerAdmin: boolean; folders: Record<string, string> | null }>("GET", "/me");
+      set({ role: me.role, name: me.name, id: me.id, isServerAdmin: me.isServerAdmin });
       // Folders that were taken away (or deleted from above) must disappear here too.
       try {
         const names = me.role === "member"
@@ -45,7 +49,7 @@ export const useTeam = create<State>((set) => ({
     } catch (e) {
       // Only forget the role when sync is off; a dropped connection keeps the last known one.
       if (/sync is not enabled/i.test(String(e))) {
-        set({ role: null, name: "", id: "", folderNames: null });
+        set({ role: null, name: "", id: "", isServerAdmin: false, folderNames: null });
         try { localStorage.removeItem(CACHE); } catch { /* ignore */ }
       }
     }

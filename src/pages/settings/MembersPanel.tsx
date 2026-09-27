@@ -7,16 +7,22 @@ import { teamCall, useTeam } from "../../shared/model/teamRole";
 import { teamInviteGenerate, teamInviteGenerateWithAuth, tailscaleCreateKey } from "../../entities/settings";
 import { Section, Block, Pill, avatar } from "./ui";
 
-type Role = "manager" | "member";
+type Role = "admin" | "manager" | "member";
 type Member = { id: string; name: string; role: Role; disabled: boolean };
 
 const ROLES = [
   { value: "member", label: "Thành viên" },
   { value: "manager", label: "Quản lý nhóm" },
+  { value: "admin", label: "Quản trị" },
 ];
+const ROLE_PILL: Record<Role, { label: string; tone: "warning" | "primary" | "neutral" }> = {
+  admin: { label: "Quản trị", tone: "warning" },
+  manager: { label: "Quản lý nhóm", tone: "primary" },
+  member: { label: "Thành viên", tone: "neutral" },
+};
 
 const LEGEND = [
-  ["Quản trị", "Người giữ server, toàn quyền."],
+  ["Quản trị", "Toàn quyền như người giữ server — kể cả thêm/sửa/xoá nhân sự khác. Mỗi người một mã riêng, không cần nhớ chung một token."],
   ["Quản lý nhóm", "Thêm, sửa, xoá trong thư mục được giao hoặc tự tạo."],
   ["Thành viên", "Chỉ dùng profile trong thư mục được chia sẻ."],
 ];
@@ -27,6 +33,11 @@ const LEGEND = [
  *  right after the admin had just configured one two sections up. */
 export function MembersPanel({ serverUrl, oauthReady, onOpenOauthSetup }: { serverUrl: string; oauthReady: boolean; onOpenOauthSetup: () => void }) {
   const role = useTeam((s) => s.role);
+  // Only whoever holds the server's own token may rank (promote/demote/disable/
+  // delete) an admin — a named admin here is a full equal everywhere else, but
+  // not over a peer's rank. The server enforces this either way; disabling the
+  // controls here just avoids offering an action that would 403.
+  const isServerAdmin = useTeam((s) => s.isServerAdmin);
   const [members, setMembers] = useState<Member[]>([]);
   const [name, setName] = useState("");
   const [newRole, setNewRole] = useState<Role>("member");
@@ -117,7 +128,7 @@ export function MembersPanel({ serverUrl, oauthReady, onOpenOauthSetup }: { serv
           <div className="min-w-[220px] flex-1">
             <Input inputSize="small" label="Thêm nhân sự" value={name} onChange={(e) => setName(e.target.value)} placeholder="Tên, ví dụ: Lan - Sale 1" />
           </div>
-          <div className="w-44"><Select size="small" value={newRole} onChange={(v) => setNewRole(v as Role)} options={ROLES} /></div>
+          <div className="w-44"><Select size="small" value={newRole} onChange={(v) => setNewRole(v as Role)} options={isServerAdmin ? ROLES : ROLES.filter((r) => r.value !== "admin")} /></div>
           <Button type="submit" variant="primary" size="small" disabled={!name.trim()} isLoading={busy}>Tạo mã</Button>
         </form>
         {issued && (
@@ -134,36 +145,38 @@ export function MembersPanel({ serverUrl, oauthReady, onOpenOauthSetup }: { serv
       {members.length === 0 ? (
         <div className="px-5 py-8 text-center text-paragraph-xs text-text-soft-400">Chưa có nhân sự nào. Thêm người đầu tiên ở trên.</div>
       ) : (
-        members.map((m) => (
-          <div key={m.id} className="flex flex-wrap items-center gap-3 px-5 py-3">
-            {avatar(m.name)}
-            <div className="flex min-w-0 flex-1 items-center gap-2">
-              {renaming?.id === m.id ? (
-                <input
-                  autoFocus
-                  value={renaming.text}
-                  onChange={(e) => setRenaming({ id: m.id, text: e.target.value })}
-                  onBlur={() => commitRename(m)}
-                  onKeyDown={(e) => { if (e.key === "Enter") commitRename(m); if (e.key === "Escape") setRenaming(null); }}
-                  className="w-48 rounded-md border border-stroke-soft-200 bg-bg-white-0 px-2 py-1 text-label-sm text-text-strong-950"
-                />
-              ) : (
-                <span className={`truncate text-label-sm ${m.disabled ? "text-text-soft-400 line-through" : "text-text-strong-950"}`}>{m.name}</span>
-              )}
-              <Pill tone={m.role === "manager" ? "primary" : "neutral"}>{m.role === "manager" ? "Quản lý nhóm" : "Thành viên"}</Pill>
-              {m.disabled && <Pill tone="warning">Đã khoá</Pill>}
+        members.map((m) => {
+          const rankLocked = m.role === "admin" && !isServerAdmin;
+          return (
+            <div key={m.id} className="flex flex-wrap items-center gap-3 px-5 py-3">
+              {avatar(m.name)}
+              <div className="flex min-w-0 flex-1 items-center gap-2">
+                {renaming?.id === m.id ? (
+                  <input
+                    autoFocus
+                    value={renaming.text}
+                    onChange={(e) => setRenaming({ id: m.id, text: e.target.value })}
+                    onBlur={() => commitRename(m)}
+                    onKeyDown={(e) => { if (e.key === "Enter") commitRename(m); if (e.key === "Escape") setRenaming(null); }}
+                    className="w-48 rounded-md border border-stroke-soft-200 bg-bg-white-0 px-2 py-1 text-label-sm text-text-strong-950"
+                  />
+                ) : (
+                  <span className={`truncate text-label-sm ${m.disabled ? "text-text-soft-400 line-through" : "text-text-strong-950"}`}>{m.name}</span>
+                )}
+                <Pill tone={ROLE_PILL[m.role].tone}>{ROLE_PILL[m.role].label}</Pill>
+                {m.disabled && <Pill tone="warning">Đã khoá</Pill>}
+                {rankLocked && <span className="text-paragraph-xs text-text-soft-400" title="Chỉ người giữ server mới đổi được cấp bậc của một quản trị viên khác">Chỉ chủ server đổi được</span>}
+              </div>
+              <div className="flex flex-none flex-wrap items-center justify-end gap-1">
+                <Button variant="neutral" mode="ghost" size="xsmall" onClick={() => setRenaming({ id: m.id, text: m.name })}>Đổi tên</Button>
+                <div className="w-36"><Select size="small" value={m.role} onChange={(v) => patch(m, { role: v })} disabled={rankLocked} options={rankLocked || isServerAdmin ? ROLES : ROLES.filter((r) => r.value !== "admin")} /></div>
+                <Button variant="neutral" mode="ghost" size="xsmall" onClick={() => rotate(m)} isLoading={busy}>Cấp lại mã</Button>
+                <Button variant="neutral" mode="ghost" size="xsmall" disabled={rankLocked} onClick={() => patch(m, { disabled: !m.disabled })}>{m.disabled ? "Mở khoá" : "Khoá"}</Button>
+                <Button variant="neutral" mode="ghost" size="xsmall" disabled={rankLocked} onClick={() => remove(m)}>Xoá</Button>
+              </div>
             </div>
-            <div className="flex flex-none flex-wrap justify-end gap-1">
-              <Button variant="neutral" mode="ghost" size="xsmall" onClick={() => setRenaming({ id: m.id, text: m.name })}>Đổi tên</Button>
-              <Button variant="neutral" mode="ghost" size="xsmall" onClick={() => patch(m, { role: m.role === "manager" ? "member" : "manager" })}>
-                {m.role === "manager" ? "Hạ xuống thành viên" : "Lên quản lý nhóm"}
-              </Button>
-              <Button variant="neutral" mode="ghost" size="xsmall" onClick={() => rotate(m)} isLoading={busy}>Cấp lại mã</Button>
-              <Button variant="neutral" mode="ghost" size="xsmall" onClick={() => patch(m, { disabled: !m.disabled })}>{m.disabled ? "Mở khoá" : "Khoá"}</Button>
-              <Button variant="neutral" mode="ghost" size="xsmall" onClick={() => remove(m)}>Xoá</Button>
-            </div>
-          </div>
-        ))
+          );
+        })
       )}
     </Section>
   );

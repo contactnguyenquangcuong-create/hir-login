@@ -682,7 +682,7 @@ async fn me(
     } else {
         json!(acl.folders.iter().filter_map(|(f, m)| m.get(&who.id).map(|_| (f.clone(), acl.level(&who, f).as_str().to_string()))).collect::<std::collections::BTreeMap<_, _>>())
     };
-    Json(json!({"ok": true, "id": who.id, "name": who.name, "role": who.role.as_str(), "privileged": who.is_privileged(), "folders": folders})).into_response()
+    Json(json!({"ok": true, "id": who.id, "name": who.name, "role": who.role.as_str(), "privileged": who.is_privileged(), "isServerAdmin": who.is_server_admin(), "folders": folders})).into_response()
 }
 
 fn admin_only(headers: &HeaderMap, state: &ServerState) -> Result<Identity, Response> {
@@ -731,10 +731,20 @@ async fn admin_member_put(
     let v: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
     let _g = acl_lock();
     let mut acl = load_acl();
-    let role = match v.get("role").and_then(|r| r.as_str()) { Some("manager") => "manager", _ => "member" };
+    let role = match v.get("role").and_then(|r| r.as_str()) { Some("admin") => "admin", Some("manager") => "manager", _ => "member" };
     let mut token = Value::Null;
     let id = if let Some(id) = v.get("id").and_then(|x| x.as_str()) {
         let Some(m) = acl.members.iter_mut().find(|m| m.id == id) else { return not_found() };
+        let was_admin = m.role == "admin";
+        // Two admins can't touch each other's rank, and neither may reach for
+        // "disable" as a side door to the same thing — only the server token
+        // promotes, demotes, disables, or deletes an admin.
+        let touches_admin_rank = (v.get("role").is_some() && (role == "admin" || was_admin))
+            || (was_admin && v.get("disabled").and_then(|x| x.as_bool()).unwrap_or(false));
+        if touches_admin_rank && !who.is_server_admin() {
+            audit(&who, "member", &id, false, "only the server token ranks admins");
+            return forbidden("admin-rank");
+        }
         if let Some(n) = v.get("name").and_then(|x| x.as_str()) { if !n.trim().is_empty() { m.name = n.trim().to_string(); } }
         if v.get("role").is_some() { m.role = role.to_string(); }
         if let Some(d) = v.get("disabled").and_then(|x| x.as_bool()) { m.disabled = d; }
@@ -748,6 +758,11 @@ async fn admin_member_put(
         let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
         if name.is_empty() {
             return (StatusCode::BAD_REQUEST, Json(json!({"ok":false,"error":"name required"}))).into_response();
+        }
+        // Making a brand-new admin is the same "who gets to rank an admin" question.
+        if role == "admin" && !who.is_server_admin() {
+            audit(&who, "member", &name, false, "only the server token ranks admins");
+            return forbidden("admin-rank");
         }
         let t = team_acl::new_token();
         let id = uuid::Uuid::new_v4().simple().to_string();
@@ -779,6 +794,10 @@ async fn admin_member_delete(
     let who = match admin_only(&headers, &state) { Ok(w) => w, Err(r) => return r };
     let _g = acl_lock();
     let mut acl = load_acl();
+    if acl.members.iter().any(|m| m.id == id && m.role == "admin") && !who.is_server_admin() {
+        audit(&who, "member-remove", &id, false, "only the server token ranks admins");
+        return forbidden("admin-rank");
+    }
     acl.remove_member(&id);
     if let Err(e) = save_acl(&acl) { return err500(e); }
     audit(&who, "member-remove", &id, true, "");
@@ -1298,6 +1317,63 @@ mod permission_tests {
         assert_eq!(status(&c, &tok["u"], "GET", format!("{base}/profiles"), None, "").await, 401);
         let a: Value = c.get(format!("{base}/admin/audit")).bearer_auth(admin).send().await.unwrap().json().await.unwrap();
         assert!(a["entries"].as_array().unwrap().iter().any(|e| e["action"] == "edit" && e["who"] == "u" && e["ok"] == false));
+
+        let _ = stop();
+        crate::store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A named "admin" member is a full equal of whoever holds the server's own
+    /// token: same privileges everywhere, but with their own separate key so
+    /// nobody has to share or remember the one token. Only an existing admin
+    /// (never a manager) may create one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_named_admin_member_is_a_full_equal_of_the_server_token() {
+        let _g = crate::cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-acl-admin-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        crate::store::set_data_root(Some(tmp.clone()));
+        let admin = "admin-token-123456";
+        let port = start(0, admin.to_string()).await.expect("start");
+        let base = format!("http://127.0.0.1:{port}");
+        let c = reqwest::Client::new();
+
+        // Only the true admin may mint one — a manager trying is refused.
+        let (_, mgr) = put_json(&c, admin, format!("{base}/admin/members"), json!({"name": "Manager", "role": "manager"})).await;
+        let mgr_tok = mgr["token"].as_str().unwrap().to_string();
+        assert_eq!(put_json(&c, &mgr_tok, format!("{base}/admin/members"), json!({"name": "Sneaky", "role": "admin"})).await.0, 403);
+
+        let (code, r) = put_json(&c, admin, format!("{base}/admin/members"), json!({"name": "Second Admin", "role": "admin"})).await;
+        assert_eq!(code, 200);
+        let second_tok = r["token"].as_str().unwrap().to_string();
+        let second_id = r["id"].as_str().unwrap().to_string();
+
+        // Sees everything without ever being granted a single folder, same as the server token.
+        let up = |who: &str, id: &str, folder: &str| {
+            let (c, base, t) = (c.clone(), base.clone(), who.to_string());
+            let (id, folder) = (id.to_string(), folder.to_string());
+            async move {
+                assert_eq!(status(&c, &t, "POST", format!("{base}/profiles/{id}/lock"), None, "m").await, 200);
+                assert_eq!(status(&c, &t, "PUT", format!("{base}/profiles/{id}/bundle"), Some(bundle(&folder, "ua")), "m").await, 200);
+                status(&c, &t, "POST", format!("{base}/profiles/{id}/unlock"), None, "m").await
+            }
+        };
+        assert_eq!(up(&second_tok, "pz", "Untouched").await, 200);
+        assert_eq!(status(&c, &second_tok, "POST", format!("{base}/profiles/pz/delete"), None, "").await, 200);
+
+        // Manages members exactly like the server token — except ranking another
+        // admin, which stays the server token's call alone. Not even minting a
+        // brand-new admin: that is the same "who gets to be admin" question.
+        assert_eq!(put_json(&c, &second_tok, format!("{base}/admin/members"), json!({"name": "Third", "role": "manager"})).await.0, 200, "ranking non-admins is fine");
+        assert_eq!(put_json(&c, &second_tok, format!("{base}/admin/members"), json!({"name": "Fourth", "role": "admin"})).await.0, 403, "minting a peer admin is not");
+        assert_eq!(put_json(&c, &second_tok, format!("{base}/admin/members"), json!({"id": second_id, "role": "manager"})).await.0, 403, "not even demoting themselves via this door");
+        assert_eq!(put_json(&c, &second_tok, format!("{base}/admin/members"), json!({"id": second_id, "disabled": true})).await.0, 403, "or disabling as a side door to the same thing");
+        assert_eq!(put_json(&c, &second_tok, format!("{base}/admin/members"), json!({"id": second_id, "name": "Renamed OK"})).await.0, 200, "non-rank edits (name) still work on themselves");
+        assert_eq!(status(&c, &second_tok, "POST", format!("{base}/admin/members/{second_id}/delete"), None, "").await, 403, "and can't delete themselves out from under it either");
+
+        // Only the server token ranks an admin: demoted back to member, loses admin reach at once.
+        put_json(&c, admin, format!("{base}/admin/members"), json!({"id": second_id, "role": "member"})).await;
+        assert_eq!(status(&c, &second_tok, "GET", format!("{base}/admin/members"), None, "").await, 403);
 
         let _ = stop();
         crate::store::set_data_root(None);

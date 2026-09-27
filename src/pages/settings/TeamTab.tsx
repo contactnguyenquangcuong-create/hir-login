@@ -1,12 +1,11 @@
 import { useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button, Input, Switch } from "@proxyshard/shardx-ui-kit";
-import { CopyField } from "../../shared/ui/CopyField";
 import { toast } from "../../shared/model/toast";
 import { useT } from "../../shared/i18n";
 import { startTeamRole, useTeam } from "../../shared/model/teamRole";
 import type { Settings, RemoteProfileStatus } from "../../entities/settings";
-import { teamSyncList, teamSyncPull, teamServerStart, teamServerStop, teamServerStatus, teamInviteGenerate, teamInviteGenerateWithAuth, teamInviteJoin, tailscaleStatus, autostartGet, autostartSet, tailscaleOauthGet, tailscaleOauthSet, tailscaleOauthClear, tailscaleCreateKey } from "../../entities/settings";
+import { teamSyncList, teamSyncPull, teamServerStart, teamServerStop, teamServerStatus, teamInviteJoin, tailscaleStatus, autostartGet, autostartSet, tailscaleOauthGet, tailscaleOauthSet, tailscaleOauthClear } from "../../entities/settings";
 import { confirmModal } from "../../shared/model/confirm";
 import { MembersPanel } from "./MembersPanel";
 import { TailscaleKeysPanel } from "./TailscaleKeysPanel";
@@ -28,7 +27,6 @@ export function TeamTab({
   const [serverPort, setServerPort] = useState(8787);
   const [serverIp, setServerIp] = useState<string | null>(null);
   const [serverBusy, setServerBusy] = useState(false);
-  const [inviteCode, setInviteCode] = useState<string | null>(null);
   const [joinCode, setJoinCode] = useState("");
   const [joinBusy, setJoinBusy] = useState(false);
   const [tsInstalled, setTsInstalled] = useState<boolean | null>(null);
@@ -37,14 +35,10 @@ export function TeamTab({
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [syncTesting, setSyncTesting] = useState(false);
   const [syncRows, setSyncRows] = useState<RemoteProfileStatus[] | null>(null);
-  // Off by default: this code carries full admin rights and is easy to hand out
-  // by mistake if it just sits there next to the (safe) per-member codes below.
-  const [showAdminCode, setShowAdminCode] = useState(false);
   const [oauth, setOauth] = useState({ clientId: "", hasSecret: false, tag: "" });
   const [oauthEdit, setOauthEdit] = useState({ clientId: "", clientSecret: "", tag: "tag:hirlogin" });
   const [oauthOpen, setOauthOpen] = useState(false);
   const [oauthSaving, setOauthSaving] = useState(false);
-  const [mintingKey, setMintingKey] = useState(false);
   useEffect(() => {
     tailscaleOauthGet().then((o) => {
       setOauth({ clientId: o.client_id, hasSecret: o.has_secret, tag: o.tag });
@@ -79,29 +73,6 @@ export function TeamTab({
       toast.ok("Đã xoá cấu hình OAuth Client.");
     } catch (e) { toast.err(String(e)); }
   };
-  // One button does the whole thing now: mint a fresh, uniquely-dated Tailscale
-  // key (when OAuth is set up) and bake it straight into the admin code — the
-  // separate "paste an Auth Key" / "name this device" fields this used to need
-  // were exactly the friction (and error surface) the per-member flow below
-  // never had, so this now matches it.
-  const refreshAdminCode = async () => {
-    const token = (sync?.token ?? "").trim();
-    if (!token) { toast.err("Chưa có token."); return; }
-    const url = `http://${serverIp ?? "127.0.0.1"}:${serverPort}`;
-    setMintingKey(true);
-    try {
-      if (oauthReady) {
-        const key = await tailscaleCreateKey(`Hir-Login admin device ${new Date().toISOString().slice(0, 10)}`);
-        setInviteCode(await teamInviteGenerateWithAuth(url, token, key));
-        toast.ok("Đã làm mới mã, kèm Auth Key mới (hạn 90 ngày).");
-      } else {
-        setInviteCode(await teamInviteGenerate(url, token));
-        toast.ok("Đã làm mới mã.");
-      }
-    } catch (e) { toast.err(String(e)); }
-    finally { setMintingKey(false); }
-  };
-
   const isConnected = !!(sync?.enabled && sync?.server_url && sync?.token);
   const serverUrl = serverRunning ? `http://${serverIp ?? "127.0.0.1"}:${serverPort}` : (sync?.server_url ?? "");
 
@@ -115,20 +86,12 @@ export function TeamTab({
   const refreshTs = () => tailscaleStatus().then((s) => setTsInstalled(s.installed)).catch(() => setTsInstalled(false));
   useEffect(() => { startTeamRole(); refreshServer(); refreshTs(); autostartGet().then(setAutoStart).catch(() => {}); }, []);
 
-  // The code is derived from URL + token, so rebuilding it after a restart gives the same one.
-  useEffect(() => {
-    const token = (sync?.token ?? "").trim();
-    if (!serverRunning || inviteCode || token.length < 8) return;
-    teamInviteGenerate(`http://${serverIp ?? "127.0.0.1"}:${serverPort}`, token).then(setInviteCode).catch(() => {});
-  }, [serverRunning, serverIp, serverPort, sync?.token, inviteCode]);
-
   const toggleServer = async () => {
     setServerBusy(true);
     try {
       if (serverRunning) {
         await teamServerStop();
         setServerRunning(false);
-        setInviteCode(null);
       } else {
         const token = (sync?.token ?? "").trim();
         if (token.length < 8) { toast.err("Nhập Token quản trị (từ 8 ký tự) trước khi bật server."); return; }
@@ -138,7 +101,6 @@ export function TeamTab({
         const st = await teamServerStatus();
         setServerIp(st.tailscale_ip ?? null);
         const url = `http://${st.tailscale_ip ?? "127.0.0.1"}:${actualPort}`;
-        setInviteCode(await teamInviteGenerate(url, token));
         onSyncChange({ enabled: true, server_url: url, token, device_name: sync?.device_name ?? null, slim_local: sync?.slim_local ?? true });
         useTeam.getState().refresh();
       }
@@ -255,70 +217,39 @@ export function TeamTab({
           {serverRunning && (
             <Block>
               <div className="flex flex-col gap-0.5">
-                <span className="text-label-sm text-text-strong-950">Thêm nhân sự</span>
+                <span className="text-label-sm text-text-strong-950">Tự động tạo Auth Key cho nhân sự</span>
                 <span className="text-paragraph-xs text-text-soft-400">
-                  Cách dùng hằng ngày: kéo xuống mục <b>Nhân sự</b> bên dưới, tạo một mã riêng cho từng người. Mỗi mã chỉ đúng quyền của người đó.
+                  Thiết lập một lần. Sau đó mỗi mã ở mục <b>Nhân sự</b> bên dưới tự kèm quyền vào mạng Tailscale — không cần dán tay.
                 </span>
               </div>
-
-              {!showAdminCode ? (
-                <button
-                  type="button"
-                  onClick={() => setShowAdminCode(true)}
-                  className="self-start rounded-md border-0 bg-transparent p-0 text-paragraph-xs text-text-soft-400 underline hover:text-text-sub-600"
-                >
-                  Tôi cần thêm chính máy tính của mình vào team (mã quản trị)…
-                </button>
-              ) : (
-                <div className="flex flex-col gap-2.5 rounded-lg bg-warning-alpha-10 p-3 ring-1 ring-inset ring-warning-alpha-16">
-                  <div className="flex flex-col gap-0.5">
-                    <span className="text-label-sm text-warning-base">Mã quản trị — chỉ dùng cho máy của chính bạn</span>
-                    <span className="text-paragraph-xs text-text-sub-600">
-                      Ai cầm mã này cũng có toàn quyền như bạn, kể cả tự đổi quyền người khác. <b>Tuyệt đối không gửi cho nhân sự</b> — nhân sự dùng mã riêng ở mục Nhân sự bên dưới.
-                    </span>
-                  </div>
-                  {inviteCode && <CopyField value={inviteCode} />}
-                  <div>
-                    <Button variant="neutral" mode="stroke" size="small" isLoading={mintingKey} onClick={refreshAdminCode}>
-                      Làm mới mã
-                    </Button>
-                  </div>
-                  {oauthReady ? (
-                    <div className="flex flex-col gap-1.5">
-                      <p className="m-0 text-paragraph-xs text-text-soft-400">
-                        Mỗi lần bấm, mã được cấp lại kèm một Auth Key thật vừa sinh (hạn 90 ngày, thẻ <code className="mono">{oauth.tag}</code>) — không cần mở Tailscale.
-                      </p>
-                      <div className="flex gap-3">
-                        <button type="button" className="self-start border-0 bg-transparent p-0 text-paragraph-xs text-text-soft-400 underline hover:text-text-sub-600" onClick={() => setOauthOpen((v) => !v)}>
-                          Đổi Client ID/Secret
-                        </button>
-                        <button type="button" className="self-start border-0 bg-transparent p-0 text-paragraph-xs text-text-soft-400 underline hover:text-error-base" onClick={clearOauth}>
-                          Xoá cấu hình OAuth
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                    <p className="m-0 text-paragraph-xs text-text-soft-400">
-                      Mã này chưa tự vào mạng Tailscale được — máy nhận mã cần đã ở trong mạng từ trước.{" "}
-                      <button type="button" className="border-0 bg-transparent p-0 text-primary-base underline" onClick={() => setOauthOpen((v) => !v)}>
-                        Cấu hình 1 lần
-                      </button>{" "}để mã tự kèm quyền mạng, không cần làm tay.
-                    </p>
-                  )}
-                  {oauthOpen && (
-                    <div className="flex flex-col gap-2 rounded-lg bg-bg-white-0 p-3 ring-1 ring-inset ring-stroke-soft-200">
-                      <span className="text-paragraph-xs text-text-sub-600">
-                        Tạo 1 lần ở <a href="#" className="text-primary-base hover:underline" onClick={(e) => { e.preventDefault(); openUrl("https://login.tailscale.com/admin/settings/oauth").catch(() => {}); }}>console.tailscale.com → Access controls → OAuth clients</a>: thêm 1 thẻ tên tuỳ ý (ví dụ <code className="mono">tag:hirlogin</code> hoặc <code className="mono">tag:halo</code> — đặt gì cũng được) rồi tạo OAuth Client với quyền <code className="mono">auth_keys</code>, gán đúng thẻ đó. Dán Client ID/Secret vào đây.
-                      </span>
-                      <Input inputSize="small" value={oauthEdit.clientId} onChange={(e) => setOauthEdit((s) => ({ ...s, clientId: e.target.value }))} label="Client ID" placeholder="k..." />
-                      <Input inputSize="small" type="password" value={oauthEdit.clientSecret} onChange={(e) => setOauthEdit((s) => ({ ...s, clientSecret: e.target.value }))} label="Client Secret" placeholder={oauth.hasSecret ? "Đã lưu — dán lại nếu muốn đổi" : "tskey-client-..."} />
-                      <Input inputSize="small" value={oauthEdit.tag} onChange={(e) => setOauthEdit((s) => ({ ...s, tag: e.target.value }))} label="Thẻ (tag) đã gán cho OAuth Client — gõ đúng tên bạn đã đặt" placeholder="vd: tag:hirlogin" />
-                      <div><Button variant="primary" mode="filled" size="small" onClick={saveOauth} isLoading={oauthSaving}>Lưu</Button></div>
-                    </div>
-                  )}
+              {oauthReady ? (
+                <div className="flex flex-col gap-1.5">
                   <p className="m-0 text-paragraph-xs text-text-soft-400">
-                    Lỡ gửi nhầm mã này cho ai đó? Tắt máy chủ, đổi Token quản trị, bật lại — mã cũ mất hiệu lực ngay.
+                    Đã bật, thẻ <code className="mono">{oauth.tag}</code>. Mỗi mã nhân sự tự kèm một Auth Key riêng (hạn 90 ngày).
                   </p>
+                  <div className="flex gap-3">
+                    <button type="button" className="self-start border-0 bg-transparent p-0 text-paragraph-xs text-text-soft-400 underline hover:text-text-sub-600" onClick={() => setOauthOpen((v) => !v)}>
+                      Đổi Client ID/Secret
+                    </button>
+                    <button type="button" className="self-start border-0 bg-transparent p-0 text-paragraph-xs text-text-soft-400 underline hover:text-error-base" onClick={clearOauth}>
+                      Xoá cấu hình OAuth
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  <Button variant="primary" mode="stroke" size="small" onClick={() => setOauthOpen((v) => !v)}>Thiết lập</Button>
+                </div>
+              )}
+              {oauthOpen && (
+                <div className="flex flex-col gap-2 rounded-lg bg-bg-weak-50 p-3 ring-1 ring-inset ring-stroke-soft-200">
+                  <span className="text-paragraph-xs text-text-sub-600">
+                    Tạo 1 lần ở <a href="#" className="text-primary-base hover:underline" onClick={(e) => { e.preventDefault(); openUrl("https://login.tailscale.com/admin/settings/oauth").catch(() => {}); }}>console.tailscale.com → Access controls → OAuth clients</a>: thêm 1 thẻ tên tuỳ ý (ví dụ <code className="mono">tag:hirlogin</code> hoặc <code className="mono">tag:halo</code> — đặt gì cũng được) rồi tạo OAuth Client với quyền <code className="mono">auth_keys</code>, gán đúng thẻ đó. Dán Client ID/Secret vào đây.
+                  </span>
+                  <Input inputSize="small" value={oauthEdit.clientId} onChange={(e) => setOauthEdit((s) => ({ ...s, clientId: e.target.value }))} label="Client ID" placeholder="k..." />
+                  <Input inputSize="small" type="password" value={oauthEdit.clientSecret} onChange={(e) => setOauthEdit((s) => ({ ...s, clientSecret: e.target.value }))} label="Client Secret" placeholder={oauth.hasSecret ? "Đã lưu — dán lại nếu muốn đổi" : "tskey-client-..."} />
+                  <Input inputSize="small" value={oauthEdit.tag} onChange={(e) => setOauthEdit((s) => ({ ...s, tag: e.target.value }))} label="Thẻ (tag) đã gán cho OAuth Client — gõ đúng tên bạn đã đặt" placeholder="vd: tag:hirlogin" />
+                  <div><Button variant="primary" mode="filled" size="small" onClick={saveOauth} isLoading={oauthSaving}>Lưu</Button></div>
                 </div>
               )}
             </Block>
@@ -326,7 +257,7 @@ export function TeamTab({
         </Section>
       )}
 
-      <MembersPanel serverUrl={serverUrl} oauthReady={oauthReady} onOpenOauthSetup={() => { setShowAdminCode(true); setOauthOpen(true); }} />
+      <MembersPanel serverUrl={serverUrl} oauthReady={oauthReady} onOpenOauthSetup={() => setOauthOpen(true)} />
 
       {oauthReady && <TailscaleKeysPanel />}
 

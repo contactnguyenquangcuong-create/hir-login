@@ -79,13 +79,23 @@ impl Identity {
     pub fn is_privileged(&self) -> bool {
         self.role == Role::Admin
     }
+    /// The one true admin — whoever holds the server's own token. A named
+    /// "admin" member (added via `/admin/members`) is a full equal everywhere
+    /// EXCEPT one thing: only the server token may promote, demote, disable or
+    /// delete another admin. Two admins can't touch each other's rank; the
+    /// server token is the single arbiter of who holds it.
+    pub fn is_server_admin(&self) -> bool {
+        self.id == "admin"
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize, Default, Debug)]
 pub struct Member {
     pub id: String,
     pub name: String,
-    /// "manager" or "member".
+    /// "admin" | "manager" | "member". An "admin" member is a full equal of
+    /// whoever holds the server's own token — same rights, own separate key,
+    /// individually revocable without touching that shared token.
     pub role: String,
     #[serde(rename = "tokenHash")]
     pub token_hash: String,
@@ -156,7 +166,11 @@ impl AclStore {
         self.members.iter().find(|m| m.token_hash == h && !m.disabled).map(|m| Identity {
             id: m.id.clone(),
             name: m.name.clone(),
-            role: if m.role == "manager" { Role::Manager } else { Role::Member },
+            role: match m.role.as_str() {
+                "admin" => Role::Admin,
+                "manager" => Role::Manager,
+                _ => Role::Member,
+            },
         })
     }
 
