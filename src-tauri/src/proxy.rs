@@ -25,6 +25,14 @@ impl ProxyKind {
             _ => ProxyKind::Socks5,
         }
     }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ProxyKind::Socks5 => "socks5",
+            ProxyKind::Http => "http",
+            ProxyKind::Https => "https",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -50,11 +58,7 @@ pub struct ProxyEntry {
 impl ProxyEntry {
     /// Build `--proxy-server=<scheme>://[user:pass@]host:port` for ShardX.
     pub fn to_proxy_server_arg(&self) -> String {
-        let scheme = match self.kind {
-            ProxyKind::Socks5 => "socks5",
-            ProxyKind::Http => "http",
-            ProxyKind::Https => "https",
-        };
+        let scheme = self.kind.as_str();
         let host_port = format!("{}:{}", self.host, self.port);
         if self.username.is_empty() && self.password.is_empty() {
             format!("{scheme}://{host_port}")

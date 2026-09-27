@@ -1390,14 +1390,22 @@ fn bulk_rows_from_table(rows: Vec<Vec<String>>) -> Vec<BulkParseRow> {
             (at(0), at(1), at(2), at(3), at(4), at(5))
         };
         let mut err: Option<String> = None;
+        // Report the kind that will actually be used, not just the raw column
+        // text: an explicit scheme prefix in the proxy address (e.g. "http://…")
+        // wins over the column, so the preview should reflect that outcome
+        // rather than silently showing the column's (possibly blank) value.
+        let mut effective_kind = kind.clone();
         if name.is_empty() {
             err = Some("thiếu name".into());
         } else if !color.is_empty() && !is_valid_hex_color(&color) && !is_valid_hex_color(&format!("#{color}")) {
             err = Some("color phải dạng #rrggbb".into());
-        } else if !proxy.is_empty() && proxy::parse_single_with_kind(&proxy, proxy::ProxyKind::parse(&kind)).is_none() {
-            err = Some("proxy không hợp lệ".into());
+        } else if !proxy.is_empty() {
+            match proxy::parse_single_with_kind(&proxy, proxy::ProxyKind::parse(&kind)) {
+                Some(entry) => effective_kind = entry.kind.as_str().to_string(),
+                None => err = Some("proxy không hợp lệ".into()),
+            }
         }
-        out.push(BulkParseRow { row: idx + 1, name, folder, notes, proxy, color, kind, error: err });
+        out.push(BulkParseRow { row: idx + 1, name, folder, notes, proxy, color, kind: effective_kind, error: err });
     }
     out
 }
@@ -3381,7 +3389,7 @@ mod bulk_file_tests {
 
     fn dump(rows: &[BulkParseRow]) -> String {
         rows.iter()
-            .map(|r| format!("{}|{}|{}|{}|{}|{}|{:?}", r.row, r.name, r.folder, r.notes, r.proxy, r.color, r.error))
+            .map(|r| format!("{}|{}|{}|{}|{}|kind={}|{}|{:?}", r.row, r.name, r.folder, r.notes, r.proxy, r.kind, r.color, r.error))
             .collect::<Vec<_>>()
             .join("\n")
     }
