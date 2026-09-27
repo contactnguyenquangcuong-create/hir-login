@@ -9,6 +9,7 @@ import { PS_SIGNATURES } from "../../../entities/proxyshard";
 import type { ProxyEntry } from "../../../entities/proxy";
 import { proxySave, proxyFullTest } from "../../../entities/proxy";
 import { storeBus } from "../../../shared/lib/storeBus";
+import { syncKick } from "../../../entities/profile";
 import { psActive, psSignatureSet } from "../../../entities/proxyshard";
 
 export function ProxyEditor({ initial, onClose, onSaved }: {
@@ -52,6 +53,8 @@ export function ProxyEditor({ initial, onClose, onSaved }: {
       }
       toast.ok(initial.id ? t("proxyEditor.savedToast") : t("proxyEditor.addedToast"));
       onSaved?.(saved);
+      // A profile bound to this proxy now differs from the team's copy.
+      void syncKick().catch(() => {});
       onClose();
       // New proxy, or the host actually changed: geolocate in the background
       // so the country flag shows up without a separate manual Test click.

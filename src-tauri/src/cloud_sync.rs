@@ -18,6 +18,133 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::time::Duration;
 
+// ---- activity + state ----
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+
+fn busy_map() -> &'static Mutex<HashMap<String, &'static str>> {
+    static M: OnceLock<Mutex<HashMap<String, &'static str>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Bumped whenever a background pull changed a local profile, so the UI knows
+/// to reload its list without being told which one.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Marks a profile as mid-sync for as long as it lives; the UI shows "syncing".
+struct BusyGuard(String);
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        if let Ok(mut m) = busy_map().lock() {
+            m.remove(&self.0);
+        }
+    }
+}
+
+fn try_begin(id: &str, phase: &'static str) -> Option<BusyGuard> {
+    let mut m = busy_map().lock().ok()?;
+    if m.contains_key(id) {
+        return None;
+    }
+    m.insert(id.to_string(), phase);
+    Some(BusyGuard(id.to_string()))
+}
+
+/// For the launch/close paths: waits (bounded) for a background pass that is
+/// already working on this profile instead of failing the user's click.
+async fn begin_wait(id: &str, phase: &'static str) -> BusyGuard {
+    for _ in 0..120 {
+        if let Some(g) = try_begin(id, phase) {
+            return g;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    if let Ok(mut m) = busy_map().lock() {
+        m.insert(id.to_string(), phase);
+    }
+    BusyGuard(id.to_string())
+}
+
+#[derive(serde::Serialize)]
+pub struct SyncActivity {
+    pub busy: Vec<String>,
+    pub generation: u64,
+}
+
+pub fn activity() -> SyncActivity {
+    let busy = busy_map()
+        .lock()
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    SyncActivity { busy, generation: GENERATION.load(Ordering::Relaxed) }
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct StateItem {
+    /// The server's `updatedAt` for this profile when we last matched it.
+    remote: String,
+    /// Unix seconds of that moment; a local edit newer than this is unsynced.
+    at: u64,
+    /// Signature of the bound proxy then; a different one now is an unsynced change.
+    #[serde(default)]
+    proxy: String,
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct SyncState {
+    #[serde(default)]
+    items: HashMap<String, StateItem>,
+}
+
+fn state_lock() -> &'static Mutex<()> {
+    static M: OnceLock<Mutex<()>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(()))
+}
+
+fn state_path() -> Result<std::path::PathBuf> {
+    Ok(store::config_root()?.join("sync-state.json"))
+}
+
+fn load_state() -> SyncState {
+    state_path()
+        .ok()
+        .and_then(|p| fs::read_to_string(p).ok())
+        .and_then(|b| serde_json::from_str(&b).ok())
+        .unwrap_or_default()
+}
+
+fn update_state(f: impl FnOnce(&mut SyncState)) {
+    let _g = state_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let mut st = load_state();
+    f(&mut st);
+    if let (Ok(p), Ok(body)) = (state_path(), serde_json::to_string_pretty(&st)) {
+        let tmp = p.with_extension("json.tmp");
+        if fs::write(&tmp, body).is_ok() {
+            let _ = fs::rename(&tmp, &p);
+        }
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Records that this machine now matches what the server holds for `id`.
+async fn mark_synced(id: &str) {
+    let Ok(remote) = list_remote().await else { return };
+    let Some(row) = remote.into_iter().find(|r| r.id == id) else { return };
+    if let Some(updated) = row.updated_at {
+        update_state(|st| {
+            st.items.insert(id.to_string(), StateItem { remote: updated, at: unix_now(), proxy: proxy_signature(id) });
+        });
+    }
+}
+
 fn client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(180))
@@ -54,6 +181,27 @@ fn device_name(cfg: &SyncConfig) -> String {
         .unwrap_or_else(|| "unknown-device".into())
 }
 
+/// The proxy a profile is bound to, if any. It travels inside the bundle so a
+/// profile arriving on another machine finds its proxy there too, instead of
+/// pointing at an id that machine has never heard of.
+fn bound_proxy(id: &str) -> Option<crate::proxy::ProxyEntry> {
+    let stored = crate::profile::load_raw(id).ok()?;
+    let pid = stored.meta.proxy_id.as_deref()?;
+    crate::proxy::get(pid).ok().flatten()
+}
+
+/// What "the proxy changed" means for sync: everything but the country tag,
+/// which each machine refreshes on its own.
+fn proxy_signature(id: &str) -> String {
+    match bound_proxy(id) {
+        Some(mut p) => {
+            p.country.clear();
+            serde_json::to_string(&p).unwrap_or_default()
+        }
+        None => String::new(),
+    }
+}
+
 /// Zips the same files `trash.rs` archives — profile.json plus the
 /// account-carrying subset of user-data, never the cache.
 fn build_bundle(id: &str) -> Result<Vec<u8>> {
@@ -65,6 +213,9 @@ fn build_bundle(id: &str) -> Result<Vec<u8>> {
             .compression_method(zip::CompressionMethod::Deflated);
         zip.start_file("profile.json", opts)?;
         zip.write_all(serde_json::to_string_pretty(&stored)?.as_bytes())?;
+        // `null` when the profile connects directly, so unbinding syncs too.
+        zip.start_file("proxy.json", opts)?;
+        zip.write_all(serde_json::to_string(&bound_proxy(id))?.as_bytes())?;
 
         let udd = store::user_data_root()?.join(id);
         if udd.exists() {
@@ -120,6 +271,8 @@ fn apply_bundle(id: &str, bytes: &[u8]) -> Result<()> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
     let udd = store::user_data_root()?.join(id);
     fs::create_dir_all(&udd)?;
+    // Some(None) = the bundle says "no proxy"; None = an older bundle that says nothing.
+    let mut proxy_in_bundle: Option<Option<crate::proxy::ProxyEntry>> = None;
     for i in 0..zip.len() {
         let mut f = zip.by_index(i)?;
         let Some(rel) = f.enclosed_name() else { continue };
@@ -129,6 +282,12 @@ fn apply_bundle(id: &str, bytes: &[u8]) -> Result<()> {
         }
         let mut buf = Vec::with_capacity(f.size() as usize);
         f.read_to_end(&mut buf)?;
+        if rel_str == "proxy.json" {
+            if let Ok(p) = serde_json::from_slice::<Option<crate::proxy::ProxyEntry>>(&buf) {
+                proxy_in_bundle = Some(p);
+            }
+            continue;
+        }
         if rel_str == "profile.json" {
             // Merge just the fingerprint config + name/notes; keep this
             // machine's own _meta (folder, pin, extensions) as-is so a pull
@@ -147,6 +306,26 @@ fn apply_bundle(id: &str, bytes: &[u8]) -> Result<()> {
         }
         fs::write(out, buf)?;
     }
+    // Bring the proxy across and point the profile at it (same id, so the
+    // binding survives). Remote wins: the profile's proxy is part of what the
+    // team shares.
+    if let Some(proxy) = proxy_in_bundle {
+        if let Ok(mut local) = crate::profile::load_raw(id) {
+            match proxy {
+                Some(mut p) => {
+                    // The country tag is this machine's own reading of the exit IP.
+                    if let Ok(Some(existing)) = crate::proxy::get(&p.id) {
+                        p.country = existing.country;
+                    }
+                    if let Ok(saved) = crate::proxy::upsert(p) {
+                        local.meta.proxy_id = Some(saved.id);
+                    }
+                }
+                None => local.meta.proxy_id = None,
+            }
+            let _ = crate::profile::save_raw(&mut local);
+        }
+    }
     Ok(())
 }
 
@@ -155,6 +334,7 @@ fn apply_bundle(id: &str, bytes: &[u8]) -> Result<()> {
 /// no-op when sync isn't configured.
 pub async fn checkout(profile_id: &str) -> Result<()> {
     let Some((cfg, base, token)) = active_config()? else { return Ok(()) };
+    let _busy = begin_wait(profile_id, "pull").await;
     let holder = device_name(&cfg);
     let c = client();
 
@@ -195,6 +375,7 @@ pub async fn checkout(profile_id: &str) -> Result<()> {
     }
     // 404 = no remote copy yet (first time this profile syncs) — fine, the
     // local copy becomes the first version on checkin.
+    mark_synced(profile_id).await;
 
     Ok(())
 }
@@ -204,6 +385,7 @@ pub async fn checkout(profile_id: &str) -> Result<()> {
 /// fatal — the operator still has their local copy either way.
 pub async fn checkin(profile_id: &str) -> Result<()> {
     let Some((cfg, base, token)) = active_config()? else { return Ok(()) };
+    let _busy = begin_wait(profile_id, "push").await;
     let holder = device_name(&cfg);
     let c = client();
 
@@ -220,6 +402,7 @@ pub async fn checkin(profile_id: &str) -> Result<()> {
         anyhow::bail!("sync server rejected the upload: {}", resp.status());
     }
     unlock(&base, &token, profile_id, &holder).await?;
+    mark_synced(profile_id).await;
 
     // The upload and the unlock both succeeded, so the server has the account
     // data; the caches are the bulk of the disk and rebuild themselves. Never
@@ -360,4 +543,264 @@ pub async fn list_remote() -> Result<Vec<RemoteProfileStatus>> {
             updated_at: r.updated_at,
         })
         .collect())
+}
+
+
+// ---- background sync ----
+
+/// Uploads a profile the server does not have yet, or one edited here since the
+/// last sync. Skips it (Ok(false)) when another device holds the lock.
+async fn push_profile(base: &str, token: &str, holder: &str, id: &str) -> Result<bool> {
+    let c = client();
+    let resp = c
+        .post(format!("{base}/profiles/{id}/lock"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "holder": holder }))
+        .send()
+        .await
+        .context("contact sync server")?;
+    if resp.status().as_u16() == 409 {
+        return Ok(false);
+    }
+    if !resp.status().is_success() {
+        anyhow::bail!("lock rejected: {}", resp.status());
+    }
+    let result: Result<()> = async {
+        let bytes = build_bundle(id).context("zip profile for upload")?;
+        let put = c
+            .put(format!("{base}/profiles/{id}/bundle"))
+            .bearer_auth(token)
+            .header("X-Sync-Holder", holder)
+            .body(bytes)
+            .send()
+            .await
+            .context("upload profile bundle")?;
+        if !put.status().is_success() {
+            anyhow::bail!("upload rejected: {}", put.status());
+        }
+        Ok(())
+    }
+    .await;
+    // Always release, or a failed upload would leave the profile locked.
+    let _ = unlock(base, token, id, holder).await;
+    result?;
+    Ok(true)
+}
+
+/// Downloads and applies a profile's bundle. Ok(false) = the server has none.
+async fn pull_profile(base: &str, token: &str, id: &str) -> Result<bool> {
+    let resp = client()
+        .get(format!("{base}/profiles/{id}/bundle"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .context("download bundle")?;
+    if resp.status().as_u16() == 404 {
+        return Ok(false);
+    }
+    if !resp.status().is_success() {
+        anyhow::bail!("download rejected: {}", resp.status());
+    }
+    let bytes = resp.bytes().await.context("read bundle")?;
+    apply_bundle(id, &bytes)?;
+    Ok(true)
+}
+
+fn local_edit_time(id: &str) -> u64 {
+    store::profiles_dir()
+        .ok()
+        .map(|d| d.join(format!("{id}.json")))
+        .and_then(|p| fs::metadata(p).ok())
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// One pass: bring in what other machines added or changed, and send up what
+/// this one added or edited. Never touches a profile that is running, mid-sync,
+/// or locked by someone else. Returns how many local profiles changed.
+pub async fn sync_round() -> Result<usize> {
+    let Some((cfg, base, token)) = active_config()? else { return Ok(0) };
+    let holder = device_name(&cfg);
+    let remote = list_remote().await?;
+    let state = {
+        let _g = state_lock().lock().unwrap_or_else(|e| e.into_inner());
+        load_state()
+    };
+    let local: std::collections::HashSet<String> = crate::profile::list_all()?
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
+
+    let mut changed = 0usize;
+    let mut touched: Vec<String> = Vec::new();
+
+    for r in &remote {
+        let id = r.id.as_str();
+        if crate::process::Tracker::shared().is_running(id) {
+            continue;
+        }
+        if r.locked && r.holder.as_deref() != Some(holder.as_str()) {
+            continue;
+        }
+        let known = state.items.get(id);
+        let Some(_guard) = try_begin(id, "pull") else { continue };
+
+        if !local.contains(id) {
+            // Synced before but gone here: deleted on this machine — do not bring it back.
+            if known.is_some() {
+                continue;
+            }
+            match pull_profile(&base, &token, id).await {
+                Ok(true) => { changed += 1; touched.push(id.to_string()); }
+                Ok(false) => {}
+                Err(e) => eprintln!("[sync] pull {id}: {e:#}"),
+            }
+            continue;
+        }
+
+        let Some(known) = known else {
+            // Existed before auto-sync: adopt the server's current version as the
+            // baseline rather than overwriting anything.
+            if let Some(u) = r.updated_at.clone() {
+                update_state(|st| { st.items.insert(id.to_string(), StateItem { remote: u, at: unix_now(), proxy: proxy_signature(id) }); });
+            }
+            continue;
+        };
+
+        if r.updated_at.as_deref().is_some_and(|u| u != known.remote) {
+            match pull_profile(&base, &token, id).await {
+                Ok(true) => { changed += 1; touched.push(id.to_string()); }
+                Ok(false) => {}
+                Err(e) => eprintln!("[sync] update {id}: {e:#}"),
+            }
+        } else if local_edit_time(id) > known.at || proxy_signature(id) != known.proxy {
+            match push_profile(&base, &token, &holder, id).await {
+                Ok(true) => touched.push(id.to_string()),
+                Ok(false) => {}
+                Err(e) => eprintln!("[sync] push {id}: {e:#}"),
+            }
+        }
+    }
+
+    // Profiles the server has never seen.
+    let remote_ids: std::collections::HashSet<&str> = remote.iter().map(|r| r.id.as_str()).collect();
+    for id in local.iter().filter(|id| !remote_ids.contains(id.as_str())) {
+        if crate::process::Tracker::shared().is_running(id) {
+            continue;
+        }
+        let Some(_guard) = try_begin(id, "push") else { continue };
+        match push_profile(&base, &token, &holder, id).await {
+            Ok(true) => touched.push(id.clone()),
+            Ok(false) => {}
+            Err(e) => eprintln!("[sync] first upload {id}: {e:#}"),
+        }
+    }
+
+    for id in &touched {
+        mark_synced(id).await;
+    }
+    if changed > 0 {
+        GENERATION.fetch_add(1, Ordering::Relaxed);
+    }
+    Ok(changed)
+}
+
+/// Asks the server to say when something changes. Returns the new position and
+/// the ids uploaded since `after` (None = just report where the server is now).
+async fn wait_for_events(base: &str, token: &str, after: Option<u64>) -> Result<(u64, Vec<String>)> {
+    let url = match after {
+        Some(n) => format!("{base}/events/wait?after={n}"),
+        None => format!("{base}/events/wait"),
+    };
+    let resp = client()
+        .get(url)
+        .bearer_auth(token)
+        .timeout(Duration::from_secs(40))
+        .send()
+        .await
+        .context("contact sync server")?;
+    if !resp.status().is_success() {
+        anyhow::bail!("events rejected: {}", resp.status());
+    }
+    #[derive(serde::Deserialize)]
+    struct R {
+        seq: u64,
+        #[serde(default)]
+        ids: Vec<String>,
+    }
+    let r: R = resp.json().await.context("parse events")?;
+    Ok((r.seq, r.ids))
+}
+
+/// Trigger for "something changed here" (a profile was saved or created): the
+/// next pass sends it up now rather than waiting for the safety-net timer.
+static KICK: OnceLock<tokio::sync::Notify> = OnceLock::new();
+fn kick_cell() -> &'static tokio::sync::Notify {
+    KICK.get_or_init(tokio::sync::Notify::new)
+}
+pub fn kick() {
+    kick_cell().notify_one();
+}
+
+/// Keeps this machine in step with the team server for as long as the app
+/// lives. Other machines' uploads arrive as events and are pulled at once; a
+/// slow safety-net pass (and `kick`) covers local edits and dropped connections.
+pub async fn run_forever() {
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    loop {
+        let Ok(Some((_cfg, base, token))) = active_config() else {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            continue;
+        };
+        // Catch up on anything missed while offline, then listen from "now".
+        if let Err(e) = sync_round().await {
+            eprintln!("[sync] round failed: {e:#}");
+        }
+        let mut pos = match wait_for_events(&base, &token, None).await {
+            Ok((seq, _)) => seq,
+            Err(e) => {
+                eprintln!("[sync] cannot listen: {e:#}");
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                continue;
+            }
+        };
+        let mut last_full = std::time::Instant::now();
+        loop {
+            // Config changed (turned off, new server)? Start over.
+            match active_config() {
+                Ok(Some((_, b, t))) if b == base && t == token => {}
+                _ => break,
+            }
+            tokio::select! {
+                res = wait_for_events(&base, &token, Some(pos)) => match res {
+                    Ok((seq, ids)) => {
+                        pos = seq;
+                        if !ids.is_empty() {
+                            if let Err(e) = sync_round().await {
+                                eprintln!("[sync] round failed: {e:#}");
+                            }
+                            last_full = std::time::Instant::now();
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[sync] listen dropped: {e:#}");
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        break; // reconnect and catch up
+                    }
+                },
+                _ = kick_cell().notified() => {
+                    if let Err(e) = sync_round().await {
+                        eprintln!("[sync] round failed: {e:#}");
+                    }
+                    last_full = std::time::Instant::now();
+                }
+            }
+            if last_full.elapsed() > Duration::from_secs(300) {
+                let _ = sync_round().await;
+                last_full = std::time::Instant::now();
+            }
+        }
+    }
 }

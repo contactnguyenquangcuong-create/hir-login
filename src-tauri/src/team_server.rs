@@ -100,6 +100,76 @@ fn shutdown_cell() -> &'static Mutex<Option<oneshot::Sender<()>>> {
     SHUTDOWN_TX.get_or_init(|| Mutex::new(None))
 }
 
+// ---- change notifications ----
+//
+// Every accepted upload is appended here and wakes anyone waiting on
+// `/events/wait`, so the other machines pull the moment a profile is closed
+// instead of finding out on a timer.
+
+struct EventLog {
+    seq: u64,
+    items: std::collections::VecDeque<(u64, String)>,
+}
+
+static EVENT_LOG: OnceLock<Mutex<EventLog>> = OnceLock::new();
+fn event_log() -> &'static Mutex<EventLog> {
+    EVENT_LOG.get_or_init(|| Mutex::new(EventLog { seq: 0, items: Default::default() }))
+}
+
+static EVENT_TX: OnceLock<tokio::sync::watch::Sender<u64>> = OnceLock::new();
+fn event_tx() -> &'static tokio::sync::watch::Sender<u64> {
+    EVENT_TX.get_or_init(|| tokio::sync::watch::channel(0u64).0)
+}
+
+fn publish_event(id: &str) {
+    let seq = {
+        let mut log = event_log().lock().unwrap_or_else(|e| e.into_inner());
+        log.seq += 1;
+        let seq = log.seq;
+        log.items.push_back((seq, id.to_string()));
+        while log.items.len() > 500 {
+            log.items.pop_front();
+        }
+        seq
+    };
+    let _ = event_tx().send(seq);
+}
+
+fn events_after(after: u64) -> (u64, Vec<String>) {
+    let log = event_log().lock().unwrap_or_else(|e| e.into_inner());
+    let ids = log.items.iter().filter(|(n, _)| *n > after).map(|(_, id)| id.clone()).collect();
+    (log.seq, ids)
+}
+
+/// Long-poll: answers as soon as an upload newer than `after` exists, or after
+/// ~25 seconds with nothing new. Without `after` it just reports the current
+/// position so a client can start listening from "now".
+async fn wait_events(
+    headers: HeaderMap,
+    axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    if !check_auth(&headers, &state.token) {
+        return (StatusCode::UNAUTHORIZED, Json(json!({"ok":false,"error":"unauthorized"}))).into_response();
+    }
+    let Some(after) = q.get("after").and_then(|v| v.parse::<u64>().ok()) else {
+        let (seq, _) = events_after(u64::MAX);
+        return Json(json!({"ok": true, "seq": seq, "ids": Vec::<String>::new()})).into_response();
+    };
+    let mut rx = event_tx().subscribe();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
+    loop {
+        let (seq, ids) = events_after(after);
+        if !ids.is_empty() || seq < after {
+            return Json(json!({"ok": true, "seq": seq, "ids": ids})).into_response();
+        }
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if left.is_zero() || tokio::time::timeout(left, rx.changed()).await.is_err() {
+            return Json(json!({"ok": true, "seq": seq, "ids": Vec::<String>::new()})).into_response();
+        }
+    }
+}
+
 // ---- auth helper ----
 
 fn check_auth(headers: &HeaderMap, token: &str) -> bool {
@@ -297,6 +367,7 @@ async fn put_bundle(
         map.insert(id.clone(), json!({"holder": holder, "acquiredAt": existing.get("acquiredAt").cloned().unwrap_or(json!(now_ms())), "expiresAt": now_ms() + lock_ttl_ms()}));
         let _ = save_json_atomic(&locks_path, &locks);
     }
+    publish_event(&id);
     Json(json!({"ok": true, "sizeBytes": body.len()})).into_response()
 }
 
@@ -359,6 +430,7 @@ pub async fn start(port: u16, token: String) -> Result<u16> {
         .route("/profiles/:id/lock", post(lock_profile))
         .route("/profiles/:id/unlock", post(unlock_profile))
         .route("/profiles/:id/bundle", get(get_bundle).put(put_bundle))
+        .route("/events/wait", get(wait_events))
         .with_state(state.clone());
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await

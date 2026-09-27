@@ -1112,73 +1112,34 @@ fn normalize_color(s: &str) -> Option<String> {
 }
 
 fn parse_csv_rows(text: &str) -> Vec<BulkParseRow> {
-    let mut out = Vec::new();
+    let text = text.trim_start_matches('\u{feff}');
+    // Records end at a newline outside quotes, so a quoted note may hold one.
     let mut lines: Vec<String> = Vec::new();
     let mut cur = String::new();
     let mut in_q = false;
     for ch in text.chars() {
-        if ch == '"' {
-            in_q = !in_q;
-            cur.push(ch);
-        } else if ch == '\n' && !in_q {
-            lines.push(cur.clone());
-            cur.clear();
-        } else if ch == '\r' {
-        } else {
-            cur.push(ch);
+        match ch {
+            '"' => { in_q = !in_q; cur.push(ch); }
+            '\n' if !in_q => { lines.push(std::mem::take(&mut cur)); }
+            '\r' => {}
+            _ => cur.push(ch),
         }
     }
-    if !cur.trim().is_empty() || !lines.is_empty() && cur.len() > 0 {
+    if !cur.trim().is_empty() {
         lines.push(cur);
     }
-    if lines.is_empty() { return out; }
-    let header = split_csv_line(&lines[0]);
-    let lower: Vec<String> = header.iter().map(|h| h.trim().to_lowercase()).collect();
-    let ci = |names: &[&str]| lower.iter().position(|h| names.contains(&h.as_str()));
-    let name_i = ci(&["name", "tên", "ten"]);
-    let folder_i = ci(&["folder", "thư mục", "thu muc", "group"]);
-    let notes_i = ci(&["notes", "note", "ghi chú", "ghi chu"]);
-    let proxy_i = ci(&["proxy"]);
-    let color_i = ci(&["color", "màu", "mau"]);
-    let start = if name_i.is_some() || proxy_i.is_some() || notes_i.is_some() { 1 } else { 0 };
-    for (idx, line) in lines.iter().skip(start).enumerate() {
-        if line.trim().is_empty() { continue; }
-        let cols = split_csv_line(line);
-        let g = |opt: Option<usize>| opt.and_then(|i| cols.get(i).map(|s| s.trim().to_string())).unwrap_or_default();
-        let name = g(name_i);
-        let folder = g(folder_i);
-        let notes = g(notes_i);
-        let proxy = g(proxy_i);
-        let color = g(color_i);
-        let row_num = start + idx + 1;
-        let mut err: Option<String> = None;
-        if name.is_empty() { err = Some("thiếu name".into()); }
-        else if !color.is_empty() && !is_valid_hex_color(&color) && !is_valid_hex_color(&format!("#{color}")) {
-            err = Some("color phải dạng #rrggbb".into());
-        } else if !proxy.is_empty() && proxy::parse_single(&proxy).is_none() {
-            err = Some("proxy không hợp lệ".into());
-        }
-        // also support headerless: if no header detected and 5 cols, map positionally
-        let (name, folder, notes, proxy, color) = if start == 0 && cols.len() >= 1 {
-            // positional fallback already handled by ci miss; use cols[0] as name if name_i None
-            if name_i.is_none() && !cols.is_empty() {
-                let n = cols[0].trim().to_string();
-                let f = cols.get(1).map(|s| s.trim().to_string()).unwrap_or_default();
-                let no = cols.get(2).map(|s| s.trim().to_string()).unwrap_or_default();
-                let pr = cols.get(3).map(|s| s.trim().to_string()).unwrap_or_default();
-                let co = cols.get(4).map(|s| s.trim().to_string()).unwrap_or_default();
-                let e = if n.is_empty() { Some("thiếu name".into()) } else { err.clone() };
-                out.push(BulkParseRow { row: row_num, name: n, folder: f, notes: no, proxy: pr, color: co, error: e });
-                continue;
-            }
-            (name, folder, notes, proxy, color)
-        } else { (name, folder, notes, proxy, color) };
-        out.push(BulkParseRow { row: row_num, name, folder, notes, proxy, color, error: err });
-    }
-    out
+    let Some(first) = lines.first() else { return Vec::new() };
+    // Excel in a Vietnamese/European locale saves ";" (or tabs) rather than ",".
+    let delim = [',', ';', '\t']
+        .into_iter()
+        .max_by_key(|d| first.matches(*d).count())
+        .filter(|d| first.contains(*d))
+        .unwrap_or(',');
+    let rows: Vec<Vec<String>> = lines.iter().map(|l| split_delimited_line(l, delim)).collect();
+    bulk_rows_from_table(rows)
 }
 
-fn split_csv_line(line: &str) -> Vec<String> {
+fn split_delimited_line(line: &str, delim: char) -> Vec<String> {
     let mut cols = Vec::new();
     let mut cur = String::new();
     let mut in_q = false;
@@ -1187,7 +1148,7 @@ fn split_csv_line(line: &str) -> Vec<String> {
         if ch == '"' {
             if in_q && chars.peek() == Some(&'"') { cur.push('"'); chars.next(); }
             else { in_q = !in_q; }
-        } else if ch == ',' && !in_q {
+        } else if ch == delim && !in_q {
             cols.push(cur.trim().to_string());
             cur.clear();
         } else {
@@ -1204,41 +1165,169 @@ fn split_csv_line(line: &str) -> Vec<String> {
     cols
 }
 
+fn xml_unescape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find('&') {
+        out.push_str(&rest[..i]);
+        rest = &rest[i..];
+        let Some(semi) = rest.find(';').filter(|n| *n <= 10) else {
+            out.push('&');
+            rest = &rest[1..];
+            continue;
+        };
+        let ent = &rest[1..semi];
+        let decoded = match ent {
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" => Some('\''),
+            "amp" => Some('&'),
+            // Non-ASCII text (Vietnamese) is often written as &#250; / &#xFA;.
+            _ => ent
+                .strip_prefix("#x")
+                .or_else(|| ent.strip_prefix("#X"))
+                .and_then(|h| u32::from_str_radix(h, 16).ok())
+                .or_else(|| ent.strip_prefix('#').and_then(|d| d.parse::<u32>().ok()))
+                .and_then(char::from_u32),
+        };
+        match decoded {
+            Some(c) => {
+                out.push(c);
+                rest = &rest[semi + 1..];
+            }
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Text of every `<t>` run inside `xml`, joined (a rich-text cell has several).
+fn xml_text_runs(xml: &str) -> String {
+    let mut out = String::new();
+    let mut rest = xml;
+    while let Some(a) = rest.find("<t") {
+        let after = &rest[a + 2..];
+        // `<t>` or `<t xml:space="preserve">`, not `<tag…` (e.g. `<tr`).
+        let Some(first) = after.chars().next() else { break };
+        if first != '>' && first != ' ' {
+            rest = after;
+            continue;
+        }
+        let Some(gt) = after.find('>') else { break };
+        if after[..gt].ends_with('/') {
+            rest = &after[gt + 1..];
+            continue;
+        }
+        let body = &after[gt + 1..];
+        let Some(end) = body.find("</t>") else { break };
+        out.push_str(&xml_unescape(&body[..end]));
+        rest = &body[end + 4..];
+    }
+    out
+}
+
+/// "C" -> 2, "AB" -> 27, from a cell reference like "C12".
+fn col_index(cell_ref: &str) -> usize {
+    let mut n = 0usize;
+    for c in cell_ref.chars().take_while(|c| c.is_ascii_alphabetic()) {
+        n = n * 26 + (c.to_ascii_uppercase() as usize - 'A' as usize + 1);
+    }
+    n.saturating_sub(1)
+}
+
+fn xml_attr<'a>(tag: &'a str, name: &str) -> Option<&'a str> {
+    let key = format!("{name}=\"");
+    let i = tag.find(&key)? + key.len();
+    let j = tag[i..].find('"')?;
+    Some(&tag[i..i + j])
+}
+
+/// Rows of cell text from a worksheet's XML. Cells are placed by their own
+/// reference: Excel leaves blank cells out entirely, so counting the cells
+/// present would slide every later column one to the left.
+fn xlsx_sheet_rows(sheet_xml: &str, shared: &[String]) -> Vec<Vec<String>> {
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut rest = sheet_xml;
+    while let Some(a) = rest.find("<row") {
+        rest = &rest[a..];
+        let Some(open_end) = rest.find('>') else { break };
+        // A self-closing <row .../> has no cells.
+        if rest[..open_end].ends_with('/') {
+            rest = &rest[open_end + 1..];
+            rows.push(Vec::new());
+            continue;
+        }
+        let Some(end_tag) = rest.find("</row>") else { break };
+        let row_xml = &rest[open_end + 1..end_tag];
+        rest = &rest[end_tag + 6..];
+
+        let mut cols: Vec<String> = Vec::new();
+        let mut r2 = row_xml;
+        let mut next_col = 0usize;
+        while let Some(c) = r2.find("<c") {
+            let after = &r2[c + 2..];
+            let Some(first) = after.chars().next() else { break };
+            if first != ' ' && first != '>' && first != '/' {
+                r2 = after;
+                continue;
+            }
+            let Some(tag_end) = after.find('>') else { break };
+            let tag = &after[..tag_end];
+            let self_closing = tag.ends_with('/');
+            let (inner, remaining) = if self_closing {
+                ("", &after[tag_end + 1..])
+            } else {
+                match after[tag_end + 1..].find("</c>") {
+                    Some(e) => (&after[tag_end + 1..tag_end + 1 + e], &after[tag_end + 1 + e + 4..]),
+                    None => break,
+                }
+            };
+            r2 = remaining;
+            let idx = xml_attr(tag, "r").map(col_index).unwrap_or(next_col);
+            next_col = idx + 1;
+            let kind = xml_attr(tag, "t").unwrap_or("");
+            let value = if kind == "inlineStr" {
+                xml_text_runs(inner)
+            } else if let (Some(v0), Some(v1)) = (inner.find("<v>"), inner.find("</v>")) {
+                let raw = xml_unescape(&inner[v0 + 3..v1]);
+                if kind == "s" {
+                    raw.trim().parse::<usize>().ok().and_then(|i| shared.get(i).cloned()).unwrap_or_default()
+                } else {
+                    raw
+                }
+            } else {
+                String::new()
+            };
+            if cols.len() <= idx {
+                cols.resize(idx + 1, String::new());
+            }
+            cols[idx] = value;
+        }
+        rows.push(cols);
+    }
+    rows
+}
+
 fn parse_xlsx_rows(path: &std::path::Path) -> Result<Vec<BulkParseRow>, String> {
     use std::io::Read;
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("không đọc được .xlsx (zip): {e}"))?;
-    // shared strings
     let mut shared: Vec<String> = Vec::new();
     if let Ok(mut f) = zip.by_name("xl/sharedStrings.xml") {
         let mut s = String::new();
         let _ = f.read_to_string(&mut s);
-        // extract <t>...</t>
-        let mut rest = s.as_str();
-        while let Some(a) = rest.find("<t>") {
-            rest = &rest[a+3..];
-            if let Some(b) = rest.find("</t>") {
-                shared.push(rest[..b].to_string());
-                rest = &rest[b+4..];
-            } else { break; }
-        }
-        // if si has is via <t ...> with attrs, fallback regex for <t ...>
-        if shared.is_empty() {
-            // try splitting on <si>
-            for part in s.split("<si>") {
-                if let Some(a) = part.find("<t") {
-                    if let Some(gt) = part[a..].find('>') {
-                        let start = a + gt + 1;
-                        if let Some(b) = part[start..].find("</t>") {
-                            shared.push(part[start..start+b].to_string());
-                        }
-                    }
-                }
-            }
+        for si in s.split("<si").skip(1) {
+            // `<si>` or `<si …>`; skip look-alikes such as `<sst`.
+            let body = si.split("</si>").next().unwrap_or("");
+            shared.push(xml_text_runs(body));
         }
     }
     let mut sheet_xml = String::new();
-    // try sheet1, else first worksheet
     let mut found = false;
     for name in ["xl/worksheets/sheet1.xml", "xl/worksheets/sheet.xml"] {
         if let Ok(mut f) = zip.by_name(name) {
@@ -1248,7 +1337,6 @@ fn parse_xlsx_rows(path: &std::path::Path) -> Result<Vec<BulkParseRow>, String> 
         }
     }
     if !found {
-        // find any worksheet
         for i in 0..zip.len() {
             let n = zip.by_index(i).map(|f| f.name().to_string()).unwrap_or_default();
             if n.starts_with("xl/worksheets/sheet") && n.ends_with(".xml") {
@@ -1263,52 +1351,17 @@ fn parse_xlsx_rows(path: &std::path::Path) -> Result<Vec<BulkParseRow>, String> 
     if !found || sheet_xml.is_empty() {
         return Err("không tìm thấy sheet trong .xlsx".into());
     }
-    // parse rows: collect Vec<Vec<String>>
-    let mut rows: Vec<Vec<String>> = Vec::new();
-    let mut rest = sheet_xml.as_str();
-    while let Some(a) = rest.find("<row") {
-        rest = &rest[a..];
-        let Some(end_tag) = rest.find("</row>") else { break; };
-        let row_xml = &rest[..end_tag+6];
-        rest = &rest[end_tag+6..];
-        let mut cols: Vec<String> = Vec::new();
-        let mut r2 = row_xml;
-        while let Some(cpos) = r2.find("<c ") .or_else(|| r2.find("<c>")) {
-            r2 = &r2[cpos..];
-            let tag_end = r2.find('>').unwrap_or(0);
-            let tag = &r2[..tag_end+1];
-            let is_s = tag.contains("t=\"s\"");
-            // find <v>value</v>
-            let v_start = r2.find("<v>").map(|p| p+3);
-            let v_end = r2.find("</v>");
-            let raw = match (v_start, v_end) {
-                (Some(s), Some(e)) if e > s => &r2[s..e],
-                _ => {
-                    // inlineStr <is><t>..</t></is>
-                    if let Some(a) = r2.find("<t>") {
-                        if let Some(b) = r2[a+3..].find("</t>") {
-                            &r2[a+3..a+3+b]
-                        } else { "" }
-                    } else { "" }
-                }
-            };
-            let val = if is_s {
-                raw.parse::<usize>().ok().and_then(|i| shared.get(i).cloned()).unwrap_or_else(|| raw.to_string())
-            } else {
-                // numeric or inline
-                if raw.contains('<') { String::new() } else { raw.to_string() }
-            };
-            cols.push(val);
-            // move past this <c>
-            if let Some(c_end) = r2.find("</c>") {
-                r2 = &r2[c_end+4..];
-            } else { break; }
-        }
-        rows.push(cols);
+    let rows = xlsx_sheet_rows(&sheet_xml, &shared);
+    Ok(bulk_rows_from_table(rows))
+}
+
+/// Shared by CSV and XLSX: a header row (name/folder/notes/proxy/color, in any
+/// order and language) or, without one, the columns in that fixed order.
+fn bulk_rows_from_table(rows: Vec<Vec<String>>) -> Vec<BulkParseRow> {
+    if rows.is_empty() {
+        return Vec::new();
     }
-    if rows.is_empty() { return Ok(Vec::new()); }
-    // header detection
-    let header: Vec<String> = rows[0].iter().map(|h| h.trim().to_lowercase()).collect();
+    let header: Vec<String> = rows[0].iter().map(|h| h.trim().trim_start_matches('\u{feff}').to_lowercase()).collect();
     let ci = |names: &[&str]| header.iter().position(|h| names.contains(&h.as_str()));
     let name_i = ci(&["name", "tên", "ten"]);
     let folder_i = ci(&["folder", "thư mục", "thu muc", "group"]);
@@ -1318,31 +1371,28 @@ fn parse_xlsx_rows(path: &std::path::Path) -> Result<Vec<BulkParseRow>, String> 
     let has_header = name_i.is_some() || proxy_i.is_some() || notes_i.is_some();
     let start = if has_header { 1 } else { 0 };
     let mut out = Vec::new();
-    for (idx, cols) in rows.iter().skip(start).enumerate() {
-        if cols.iter().all(|c| c.trim().is_empty()) { continue; }
-        let g = |opt: Option<usize>| opt.and_then(|i| cols.get(i).map(|s| s.trim().to_string())).unwrap_or_default();
+    for (idx, cols) in rows.iter().enumerate().skip(start) {
+        if cols.iter().all(|c| c.trim().is_empty()) {
+            continue;
+        }
+        let at = |i: usize| cols.get(i).map(|s| s.trim().to_string()).unwrap_or_default();
+        let g = |opt: Option<usize>| opt.map(&at).unwrap_or_default();
         let (name, folder, notes, proxy, color) = if has_header {
             (g(name_i), g(folder_i), g(notes_i), g(proxy_i), g(color_i))
         } else {
-            (
-                cols.get(0).map(|s| s.trim().to_string()).unwrap_or_default(),
-                cols.get(1).map(|s| s.trim().to_string()).unwrap_or_default(),
-                cols.get(2).map(|s| s.trim().to_string()).unwrap_or_default(),
-                cols.get(3).map(|s| s.trim().to_string()).unwrap_or_default(),
-                cols.get(4).map(|s| s.trim().to_string()).unwrap_or_default(),
-            )
+            (at(0), at(1), at(2), at(3), at(4))
         };
-        let row_num = start + idx + 1;
         let mut err: Option<String> = None;
-        if name.is_empty() { err = Some("thiếu name".into()); }
-        else if !color.is_empty() && !is_valid_hex_color(&color) && !is_valid_hex_color(&format!("#{color}")) {
+        if name.is_empty() {
+            err = Some("thiếu name".into());
+        } else if !color.is_empty() && !is_valid_hex_color(&color) && !is_valid_hex_color(&format!("#{color}")) {
             err = Some("color phải dạng #rrggbb".into());
         } else if !proxy.is_empty() && proxy::parse_single(&proxy).is_none() {
             err = Some("proxy không hợp lệ".into());
         }
-        out.push(BulkParseRow { row: row_num, name, folder, notes, proxy, color, error: err });
+        out.push(BulkParseRow { row: idx + 1, name, folder, notes, proxy, color, error: err });
     }
-    Ok(out)
+    out
 }
 
 #[tauri::command]
@@ -2314,6 +2364,17 @@ fn team_invite_parse(code: String) -> Result<Value, String> {
     Ok(serde_json::json!({"url": url, "token": token}))
 }
 
+/// A profile was saved or created here: send it to the team now.
+#[tauri::command]
+fn sync_kick() {
+    cloud_sync::kick();
+}
+
+#[tauri::command]
+fn sync_activity() -> cloud_sync::SyncActivity {
+    cloud_sync::activity()
+}
+
 #[tauri::command]
 fn autostart_get() -> bool { autostart::is_enabled() }
 
@@ -2956,6 +3017,8 @@ pub fn run() {
             team_invite_parse,
             team_invite_join,
             tailscale_status,
+            sync_activity,
+            sync_kick,
             autostart_get,
             autostart_set,
             license_status,
@@ -3118,6 +3181,9 @@ pub fn run() {
                 }
             }
 
+            // Keep profiles in step with the team server without any click.
+            tauri::async_runtime::spawn(cloud_sync::run_forever());
+
             // Trash older than its week.
             match trash::purge_expired() {
                 Ok(n) if n > 0 => eprintln!("[launcher] trash: {n} expired profile(s) removed"),
@@ -3170,4 +3236,77 @@ pub fn run() {
                 _ => {}
             }
         });
+}
+
+#[cfg(test)]
+mod bulk_file_tests {
+    use super::*;
+
+    fn dump(rows: &[BulkParseRow]) -> String {
+        rows.iter()
+            .map(|r| format!("{}|{}|{}|{}|{}|{}|{:?}", r.row, r.name, r.folder, r.notes, r.proxy, r.color, r.error))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn csv_semicolon_bom_and_quoted_delimiters() {
+        let text = "\u{feff}name;folder;notes;proxy;color\nCSV 01;Ads;ghi chú;socks5://user:pass@1.2.3.4:1080;#8b5cf6\nCSV 02;;;;\nCSV 03;X;\"có ; và , trong ghi chú\";;\n";
+        let rows = parse_csv_rows(text);
+        assert_eq!(rows.len(), 3, "{}", dump(&rows));
+        assert_eq!(rows[0].proxy, "socks5://user:pass@1.2.3.4:1080");
+        assert_eq!(rows[1].name, "CSV 02");
+        assert_eq!(rows[1].error, None);
+        assert_eq!(rows[2].notes, "có ; và , trong ghi chú");
+    }
+
+    #[test]
+    fn xml_entities_decode() {
+        assert_eq!(xml_unescape("ghi ch&#250; ti&#7871;ng &amp; &#x110;&lt;3"), "ghi chú tiếng & Đ<3");
+        assert_eq!(xml_unescape("a & b &unknown; c"), "a & b &unknown; c");
+    }
+
+    #[test]
+    fn csv_comma_still_works() {
+        let rows = parse_csv_rows("name,folder,notes,proxy,color\nFB 01,Ads,via US,http://5.6.7.8:8080,#22c55e\n");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].folder, "Ads");
+        assert_eq!(rows[0].error, None);
+    }
+
+    /// Runs against real Excel-style files when HIR_TEST_XLSX names one.
+    #[test]
+    fn real_xlsx_file() {
+        let Ok(path) = std::env::var("HIR_TEST_XLSX") else { return };
+        let rows = parse_xlsx_rows(std::path::Path::new(&path)).expect("parse");
+        println!("{}\n", dump(&rows));
+    }
+
+    /// Creates profiles from parsed rows inside a throwaway data root (no proxy
+    /// rows: those would write the real proxies.json).
+    #[test]
+    fn bulk_create_makes_profiles() {
+        let tmp = std::env::temp_dir().join(format!("hir-bulk-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        store::set_data_root(Some(tmp.clone()));
+        let rows = vec![
+            BulkRow { name: "Bulk A".into(), folder: "Ads".into(), notes: "n1".into(), proxy: String::new(), color: "#8b5cf6".into() },
+            BulkRow { name: "Bulk B".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: "22c55e".into() },
+            BulkRow { name: "Bulk C".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: "zzz".into() },
+            BulkRow { name: "  ".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new() },
+        ];
+        let res = profile_bulk_create(rows).expect("create");
+        let summary: Vec<String> = res.iter().map(|r| format!("{}:{}:{:?}", r.index, r.ok, r.error)).collect();
+        println!("{}", summary.join("\n"));
+        let list = profile::list_all().unwrap();
+        let mut names: Vec<(String, String, String)> = list.iter().map(|p| (p.name.clone(), p.folder.clone(), p.color.clone().unwrap_or_default())).collect();
+        names.sort();
+        println!("{names:?}");
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(res[0].ok && res[1].ok && !res[2].ok && !res[3].ok, "{summary:?}");
+        assert_eq!(list.len(), 2);
+        assert!(names.contains(&("Bulk A".into(), "Ads".into(), "#8b5cf6".into())));
+        assert!(names.contains(&("Bulk B".into(), String::new(), "#22c55e".into())));
+    }
 }

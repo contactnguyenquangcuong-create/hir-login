@@ -835,6 +835,7 @@
   "profileRow.pinnedTitle": "Pinned",
   "profileRow.statusIdle": "Idle",
   "profileRow.statusRunning": "Running",
+  "profileRow.statusSyncing": "Syncing",
   "profileRowActions.clone": "Clone",
   "profileRowActions.delete": "Delete",
   "profileRowActions.edit": "Edit",

@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { Button, DialogModal } from "@proxyshard/shardx-ui-kit";
@@ -36,7 +36,6 @@ function BulkCreateModal({ onClose }: { onClose: () => void }) {
   const [path, setPath] = useState("");
   const [creating, setCreating] = useState(false);
   const [results, setResults] = useState<CreateItem[] | null>(null);
-  const fileRef = useRef<HTMLInputElement>(null);
 
   const validCount = useMemo(() => rows ? rows.filter((r) => !r.error).length : 0, [rows]);
   const errCount = useMemo(() => rows ? rows.filter((r) => !!r.error).length : 0, [rows]);
@@ -55,48 +54,6 @@ function BulkCreateModal({ onClose }: { onClose: () => void }) {
       setRows(parsed);
       if (parsed.length === 0) toast.err("File trống hoặc không đọc được");
     } catch (e) { toast.err(String(e)); }
-  };
-
-  const onFileInput = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    // For browser-picked file, read as text and call parse inline via temp? Use FileReader + invoke via CSV path not available.
-    // Fallback: read file content and parse client-side then reuse same validation via invoke with a temp write.
-    // Simpler: use FileReader to get text and parse as CSV directly without backend, but for .xlsx we need backend.
-    // For now support .csv via client parse; .xlsx via dialog picker only.
-    if (f.name.toLowerCase().endsWith(".csv")) {
-      const text = await f.text();
-      // quick client parse mirroring backend header logic
-      const lines = text.split(/\r?\n/).filter((l) => l.trim());
-      if (lines.length === 0) { setRows([]); return; }
-      const header = lines[0].split(",").map((s) => s.trim().toLowerCase());
-      const ci = (ns: string[]) => header.findIndex((h) => ns.includes(h));
-      const ni = ci(["name", "tên", "ten"]);
-      const fi = ci(["folder", "thư mục", "thu muc", "group"]);
-      const noi = ci(["notes", "note", "ghi chú", "ghi chu"]);
-      const pi = ci(["proxy"]);
-      const coi = ci(["color", "màu", "mau"]);
-      const hasH = ni >= 0 || pi >= 0;
-      const start = hasH ? 1 : 0;
-      const out: ParseRow[] = [];
-      for (let i = start; i < lines.length; i++) {
-        const cols = lines[i].split(",").map((s) => s.trim().replace(/^"|"$/g, ""));
-        const g = (idx: number) => (idx >= 0 ? (cols[idx] ?? "") : "");
-        let name, folder, notes, proxy, color: string;
-        if (hasH) { name = g(ni); folder = g(fi); notes = g(noi); proxy = g(pi); color = g(coi); }
-        else { name = cols[0] ?? ""; folder = cols[1] ?? ""; notes = cols[2] ?? ""; proxy = cols[3] ?? ""; color = cols[4] ?? ""; }
-        let err: string | null = null;
-        if (!name) err = "thiếu name";
-        else if (color && !/^#?[0-9a-fA-F]{6}$/.test(color.trim())) err = "color phải dạng #rrggbb";
-        out.push({ row: i + 1, name, folder, notes, proxy, color, error: err });
-      }
-      setRows(out);
-      setPath(f.name);
-      setResults(null);
-    } else {
-      toast.err("Với .xlsx hãy dùng nút Chọn file (cần đường dẫn hệ thống)");
-    }
-    if (fileRef.current) fileRef.current.value = "";
   };
 
   const create = async () => {
@@ -134,11 +91,6 @@ function BulkCreateModal({ onClose }: { onClose: () => void }) {
         </p>
         <div className="flex gap-2 items-center">
           <Button variant="neutral" mode="stroke" size="small" onClick={pickFile}>Chọn file .xlsx / .csv</Button>
-          <span className="text-paragraph-xs text-text-soft-400">hoặc</span>
-          <label className="text-paragraph-xs">
-            <input ref={fileRef} type="file" accept=".csv,.xlsx" className="hidden" onChange={onFileInput} />
-            <span className="cursor-pointer rounded-8 border border-stroke-soft-200 px-3 py-1.5 bg-bg-white-0">Chọn .csv từ trình duyệt</span>
-          </label>
           {path && <span className="truncate text-paragraph-xs text-text-soft-400 ml-2">{path}</span>}
         </div>
 

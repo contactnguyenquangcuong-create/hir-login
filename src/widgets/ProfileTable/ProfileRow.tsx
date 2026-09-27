@@ -18,6 +18,7 @@ export function ProfileRow({ profile, proxy, onMenu }: {
   const t = useT();
   const p = profile;
   const isRunning = useProfile((s) => !!s.running[p.id]);
+  const isSyncing = useProfile((s) => s.syncing.has(p.id));
   const runningSince = useProfile((s) => s.running[p.id]);
   const isSel = useProfile((s) => s.selected.has(p.id));
   const isExpanded = useProfile((s) => s.expanded === p.id);
@@ -129,8 +130,8 @@ export function ProfileRow({ profile, proxy, onMenu }: {
           <div className="mono mt-0.5 overflow-hidden text-ellipsis whitespace-nowrap text-[10.5px] text-text-disabled-300">{p.id.slice(0, 8)}</div>
         </div>
         <div>
-          <Badge color={isRunning ? "success" : "gray"} variant='filled' size="small" dot>
-            {isRunning ? t("profileRow.statusRunning") : t("profileRow.statusIdle")}
+          <Badge color={isSyncing ? "warning" : isRunning ? "success" : "gray"} variant='filled' size="small" dot>
+            {isSyncing ? t("profileRow.statusSyncing") : isRunning ? t("profileRow.statusRunning") : t("profileRow.statusIdle")}
           </Badge>
         </div>
         <div

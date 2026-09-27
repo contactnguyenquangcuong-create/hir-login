@@ -52,3 +52,9 @@ export const cookiesExportToFile = (profileId: string, path: string) => invoke<n
 export const cookiesImport = (profileId: string, cookies: any[]) => invoke<number>("cookies_import", { profileId, cookies });
 export const enrichPicksForPreset = (presetId: string) => invoke<{ hardware_concurrency?: number; device_memory?: number; platform_version?: string }>("enrich_picks_for_preset", { presetId });
 export const hostPlatform = () => invoke<string>("host_platform");
+
+/// Profiles being pulled/pushed right now, plus a counter that moves whenever a
+/// background pull changed a local profile (so the list should reload).
+export const syncActivity = () => invoke<{ busy: string[]; generation: number }>("sync_activity");
+/// A profile was saved or created here: tell the team now instead of waiting.
+export const syncKick = () => invoke<void>("sync_kick");

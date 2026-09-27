@@ -13,7 +13,7 @@ import type { ProfileMeta, ProfileForm } from "../model/types";
 import {
   profileList, profileGet, profileSave, profileDelete, profileClone,
   profileSetPin, profileSetFolder, profileBindProxy,
-  profileExportFolder, profileImportFolder,
+  profileExportFolder, profileImportFolder, syncActivity, syncKick,
   profileCreateFromTemplate, processList, processKill, launch, syncLaunch,
   folderDelete, cookiesExportToFile, cookiesImport,
 } from "../model/api";
@@ -127,6 +127,8 @@ export type ProfileStore = {
   running: Record<string, number>;
   /// Profiles whose `launch()` call is in-flight (pre-flight probes can be slow).
   startBusy: Set<string>;
+  /// Profiles mid-sync with the team server (download on open, upload after close).
+  syncing: Set<string>;
   selected: Set<string>;
 
   // UI state lives in the store so feature buttons stay prop-free.
@@ -213,6 +215,7 @@ export const useProfile = create<ProfileStore>((set, get) => ({
 
   running: {},
   startBusy: new Set<string>(),
+  syncing: new Set<string>(),
   selected: new Set<string>(),
 
   search: "",
@@ -260,7 +263,19 @@ export const useProfile = create<ProfileStore>((set, get) => ({
   // total_runtime_ms — re-fetch so the Time column reflects the new total.
   startProcessPolling: () => {
     let cancelled = false;
+    let lastGen = -1;
     const tick = async () => {
+      try {
+        const act = await syncActivity();
+        if (!cancelled) {
+          const prevSyncing = get().syncing;
+          const same = prevSyncing.size === act.busy.length && act.busy.every((id) => prevSyncing.has(id));
+          if (!same) set({ syncing: new Set(act.busy) });
+          // A pull from another machine changed local profiles: reload the table.
+          if (lastGen !== -1 && act.generation !== lastGen) get().reload();
+          lastGen = act.generation;
+        }
+      } catch {}
       try {
         const list = await processList();
         if (cancelled) return;
@@ -355,6 +370,7 @@ export const useProfile = create<ProfileStore>((set, get) => ({
       // entry we're about to write to disk directly.
       const fp = draft.gpu_preset_id ? await fingerprintGet(draft.gpu_preset_id) : null;
       const saved = await profileSave(toStored(draft, fp));
+      void syncKick().catch(() => {});
       await profileBindProxy(saved.id, draft.proxy_id);
       // A profile created while a folder tab is active should land in that
       // folder (otherwise it pops into "All" and the user has to drag it back).

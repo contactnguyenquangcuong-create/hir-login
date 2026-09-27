@@ -835,6 +835,7 @@
   "profileRow.pinnedTitle": "Đã ghim",
   "profileRow.statusIdle": "Chưa chạy",
   "profileRow.statusRunning": "Đang chạy",
+  "profileRow.statusSyncing": "Đang đồng bộ",
   "profileRowActions.clone": "Nhân bản",
   "profileRowActions.delete": "Xoá",
   "profileRowActions.edit": "Sửa",

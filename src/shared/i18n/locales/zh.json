@@ -835,6 +835,7 @@
   "profileRow.pinnedTitle": "已置顶",
   "profileRow.statusIdle": "空闲",
   "profileRow.statusRunning": "运行中",
+  "profileRow.statusSyncing": "同步中",
   "profileRowActions.clone": "克隆",
   "profileRowActions.delete": "删除",
   "profileRowActions.edit": "编辑",
