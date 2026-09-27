@@ -31,6 +31,8 @@ import {
   PlusSignIcon,
   Folder01Icon,
   InformationCircleIcon,
+  CheckmarkCircle02Icon,
+  AlertCircleIcon,
   ArrowDown01Icon,
   Delete02Icon,
   Globe02Icon,
@@ -97,6 +99,8 @@ export const RefreshIcon = make(ArrowReloadHorizontalIcon);
 export const AddIcon = make(PlusSignIcon);
 export const FolderIcon = make(Folder01Icon);
 export const InfoIcon = make(InformationCircleIcon);
+export const CheckCircleIcon = make(CheckmarkCircle02Icon);
+export const AlertIcon = make(AlertCircleIcon);
 export const StarOutlineIcon = make(StarIcon);
 export const LockedIcon = make(LockIcon);
 export const ChevronDownIcon = make(ArrowDown01Icon);

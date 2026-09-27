@@ -168,6 +168,37 @@ fn active_config() -> Result<Option<(SyncConfig, String, String)>> {
     Ok(Some((cfg, base, token)))
 }
 
+/// What the team server said no to, as a message the UI can translate.
+async fn denied(resp: reqwest::Response, what: &str) -> anyhow::Error {
+    let code = resp.status().as_u16();
+    let reason = resp.json::<serde_json::Value>().await.ok()
+        .and_then(|v| v.get("reason").and_then(|r| r.as_str().map(String::from)))
+        .unwrap_or_default();
+    match (code, reason.as_str()) {
+        (404, _) => anyhow::anyhow!("permission denied: no access to this profile"),
+        (403, "edit") => anyhow::anyhow!("permission denied: you may use this profile but not change its settings"),
+        (403, "add") => anyhow::anyhow!("permission denied: only an admin or manager can add"),
+        (403, "move") => anyhow::anyhow!("permission denied: you may not move this profile to another folder"),
+        (403, "delete") => anyhow::anyhow!("permission denied: you may not delete this profile"),
+        (403, _) => anyhow::anyhow!("permission denied: not allowed"),
+        _ => anyhow::anyhow!("sync server rejected the {what}: {code}"),
+    }
+}
+
+/// A call to the team server's member/permission API with this machine's token.
+pub async fn admin_call(method: &str, path: &str, body: Option<serde_json::Value>) -> Result<serde_json::Value> {
+    let Some((_cfg, base, token)) = active_config()? else { anyhow::bail!("sync is not enabled") };
+    let c = client();
+    let url = format!("{base}{path}");
+    let mut req = match method { "PUT" => c.put(url), "POST" => c.post(url), _ => c.get(url) }.bearer_auth(&token);
+    if let Some(b) = body { req = req.json(&b); }
+    let resp = req.send().await.context("contact sync server")?;
+    if resp.status().as_u16() == 401 { anyhow::bail!("sync server rejected the request: 401"); }
+    if resp.status().as_u16() == 403 { anyhow::bail!("permission denied: only the admin can manage members"); }
+    if !resp.status().is_success() { anyhow::bail!("sync server rejected the request: {}", resp.status()); }
+    Ok(resp.json().await.unwrap_or(serde_json::Value::Null))
+}
+
 fn device_name(cfg: &SyncConfig) -> String {
     if let Some(n) = cfg.device_name.as_deref().filter(|s| !s.trim().is_empty()) {
         return n.to_string();
@@ -499,7 +530,7 @@ pub async fn checkout(profile_id: &str) -> Result<()> {
         anyhow::bail!("this profile is in use by {other} — try again once they close it");
     }
     if !resp.status().is_success() {
-        anyhow::bail!("sync server rejected the lock request: {}", resp.status());
+        return Err(denied(resp, "lock request").await);
     }
 
     let resp = c
@@ -518,7 +549,7 @@ pub async fn checkout(profile_id: &str) -> Result<()> {
         }
     } else if resp.status().as_u16() != 404 {
         let _ = unlock(&base, &token, profile_id, &holder).await;
-        anyhow::bail!("sync server rejected the download: {}", resp.status());
+        return Err(denied(resp, "download").await);
     }
     // 404 = no remote copy yet (first time this profile syncs) — fine, the
     // local copy becomes the first version on checkin.
@@ -844,7 +875,7 @@ async fn push_profile(base: &str, token: &str, holder: &str, id: &str) -> Result
         return Ok(false);
     }
     if !resp.status().is_success() {
-        anyhow::bail!("lock rejected: {}", resp.status());
+        return Err(denied(resp, "lock request").await);
     }
     let result: Result<()> = async {
         let bytes = build_bundle(id).context("zip profile for upload")?;
@@ -857,7 +888,7 @@ async fn push_profile(base: &str, token: &str, holder: &str, id: &str) -> Result
             .await
             .context("upload profile bundle")?;
         if !put.status().is_success() {
-            anyhow::bail!("upload rejected: {}", put.status());
+            return Err(denied(put, "upload").await);
         }
         Ok(())
     }

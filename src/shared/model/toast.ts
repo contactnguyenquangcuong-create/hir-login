@@ -1,12 +1,13 @@
 import { create } from "zustand";
 import type { ToastItem } from "../types";
 import { t as tr } from "../i18n";
+import { friendlyError } from "../lib/errorText";
 
 /// Global toast queue (zustand). `toast.ok/err/info` can be called from
 /// anywhere — including non-React code — via the store's static API.
 type ToastState = {
   items: ToastItem[];
-  push: (kind: ToastItem["kind"], text: string) => void;
+  push: (kind: ToastItem["kind"], text: string, detail?: string) => void;
   dismiss: (id: number) => void;
 };
 
@@ -14,12 +15,13 @@ let seq = 0;
 
 export const useToastStore = create<ToastState>((set) => ({
   items: [],
-  push: (kind, text) => {
+  push: (kind, text, detail) => {
     const id = ++seq;
-    set((s) => ({ items: [...s.items, { id, kind, text }] }));
+    set((s) => ({ items: [...s.items, { id, kind, text, detail }] }));
+    // An error carries advice worth reading, so it stays longer than a confirmation.
     setTimeout(() => {
       set((s) => ({ items: s.items.filter((t) => t.id !== id) }));
-    }, 5500);
+    }, kind === "err" ? 9000 : 5500);
   },
   dismiss: (id) => set((s) => ({ items: s.items.filter((t) => t.id !== id) })),
 }));
@@ -30,6 +32,9 @@ export const useToastStore = create<ToastState>((set) => ({
 // through as it came.
 export const toast = {
   ok: (t: string) => useToastStore.getState().push("ok", tr(t)),
-  err: (t: string) => useToastStore.getState().push("err", tr(t)),
+  err: (t: string) => {
+    const f = friendlyError(tr(t));
+    useToastStore.getState().push("err", f.text, f.detail);
+  },
   info: (t: string) => useToastStore.getState().push("info", tr(t)),
 };

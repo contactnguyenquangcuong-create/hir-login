@@ -149,9 +149,7 @@ async fn wait_events(
     axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
 ) -> Response {
-    if !check_auth(&headers, &state.token) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"ok":false,"error":"unauthorized"}))).into_response();
-    }
+    let Some(who) = authenticate(&headers, &state.token) else { return unauthorized() };
     let Some(after) = q.get("after").and_then(|v| v.parse::<u64>().ok()) else {
         let (seq, _) = events_after(u64::MAX);
         return Json(json!({"ok": true, "seq": seq, "ids": Vec::<String>::new()})).into_response();
@@ -159,7 +157,15 @@ async fn wait_events(
     let mut rx = event_tx().subscribe();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
     loop {
-        let (seq, ids) = events_after(after);
+        let (seq, raw) = events_after(after);
+        let ids: Vec<String> = if who.is_privileged() {
+            raw
+        } else {
+            let (acl, meta) = (load_acl(), meta_map());
+            raw.into_iter()
+                .filter(|id| id.starts_with("lib:") || profile_level(&who, &acl, &meta, id) > Level::None)
+                .collect()
+        };
         if !ids.is_empty() || seq < after {
             return Json(json!({"ok": true, "seq": seq, "ids": ids})).into_response();
         }
@@ -198,6 +204,99 @@ fn check_auth(headers: &HeaderMap, token: &str) -> bool {
     diff == 0
 }
 
+// ---- identity, permissions, audit ----
+
+use crate::team_acl::{self, AclStore, Identity, Level};
+
+fn bearer(headers: &HeaderMap) -> Option<String> {
+    let h = headers.get("authorization")?.to_str().ok()?;
+    let t = h.strip_prefix("Bearer ").or_else(|| h.strip_prefix("bearer "))?;
+    Some(t.trim().to_string())
+}
+
+/// The admin token (the one the server was started with) or a member's own.
+fn authenticate(headers: &HeaderMap, admin_token: &str) -> Option<Identity> {
+    if check_auth(headers, admin_token) {
+        return Some(Identity::admin());
+    }
+    let token = bearer(headers)?;
+    load_acl().authenticate(&token)
+}
+
+fn unauthorized() -> Response {
+    (StatusCode::UNAUTHORIZED, Json(json!({"ok":false,"error":"unauthorized"}))).into_response()
+}
+
+fn forbidden(reason: &str) -> Response {
+    (StatusCode::FORBIDDEN, Json(json!({"ok":false,"error":"forbidden","reason":reason}))).into_response()
+}
+
+/// Something the caller may not see is reported exactly like something that
+/// does not exist.
+fn not_found() -> Response {
+    (StatusCode::NOT_FOUND, Json(json!({"ok":false,"error":"not found"}))).into_response()
+}
+
+fn acl_lock() -> std::sync::MutexGuard<'static, ()> {
+    static L: OnceLock<Mutex<()>> = OnceLock::new();
+    L.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn load_acl() -> AclStore {
+    server_data_dir().map(|d| AclStore::load(&d)).unwrap_or_default()
+}
+
+fn save_acl(acl: &AclStore) -> Result<()> {
+    acl.save(&server_data_dir()?)?;
+    Ok(())
+}
+
+fn meta_map() -> serde_json::Map<String, Value> {
+    load_json(&meta_path().unwrap_or_default(), json!({})).as_object().cloned().unwrap_or_default()
+}
+
+/// `who`'s level on a profile, from the folder recorded when it was uploaded.
+/// A profile the server has no record of is reachable only by admins/managers.
+fn profile_level(who: &Identity, acl: &AclStore, meta: &serde_json::Map<String, Value>, id: &str) -> Level {
+    match meta.get(id) {
+        Some(m) => acl.level(who, m.get("folder").and_then(|f| f.as_str()).unwrap_or("")),
+        None => if who.is_privileged() { Level::Full } else { Level::None },
+    }
+}
+
+fn audit(who: &Identity, action: &str, target: &str, ok: bool, note: &str) {
+    use std::io::Write;
+    let Ok(dir) = server_data_dir() else { return };
+    let line = json!({
+        "t": time_format(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()),
+        "who": who.name, "role": who.role.as_str(), "action": action, "target": target, "ok": ok, "note": note,
+    });
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("audit.log")) {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
+/// profile.json and proxy.json out of an uploaded bundle.
+fn read_bundle_meta(bytes: &[u8]) -> Option<(Value, Value)> {
+    use std::io::Read;
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).ok()?;
+    let mut read = |name: &str| -> Value {
+        z.by_name(name)
+            .ok()
+            .and_then(|mut f| {
+                let mut s = String::new();
+                f.read_to_string(&mut s).ok()?;
+                serde_json::from_str(&s).ok()
+            })
+            .unwrap_or(Value::Null)
+    };
+    let profile = read("profile.json");
+    if profile.is_null() {
+        return None;
+    }
+    Some((profile, read("proxy.json")))
+}
+
 // ---- handlers ----
 
 async fn health() -> impl IntoResponse {
@@ -208,9 +307,7 @@ async fn list_profiles(
     headers: HeaderMap,
     axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
 ) -> Response {
-    if !check_auth(&headers, &state.token) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"ok":false,"error":"unauthorized"}))).into_response();
-    }
+    let Some(who) = authenticate(&headers, &state.token) else { return unauthorized() };
     let locks: Value = load_json(&locks_path().unwrap_or_default(), json!({}));
     let meta: Value = load_json(&meta_path().unwrap_or_default(), json!({}));
     let locks_map = locks.as_object().cloned().unwrap_or_default();
@@ -218,7 +315,8 @@ async fn list_profiles(
     let mut ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     for k in locks_map.keys() { ids.insert(k.clone()); }
     for k in meta_map.keys() { ids.insert(k.clone()); }
-    let profiles: Vec<Value> = ids.into_iter().map(|id| {
+    let acl = load_acl();
+    let profiles: Vec<Value> = ids.into_iter().filter(|id| profile_level(&who, &acl, &meta_map, id) > Level::None).map(|id| {
         let lock = locks_map.get(&id).cloned().unwrap_or(Value::Null);
         let held = !lock.is_null() && !is_expired(&lock);
         let m = meta_map.get(&id);
@@ -228,6 +326,7 @@ async fn list_profiles(
             "updatedBy": m.and_then(|v| v.get("updatedBy")).cloned().unwrap_or(Value::Null),
             "sizeBytes": m.and_then(|v| v.get("sizeBytes")).cloned().unwrap_or(Value::Null),
             "deleted": m.and_then(|v| v.get("deleted")).and_then(|v| v.as_bool()).unwrap_or(false),
+            "access": profile_level(&who, &acl, &meta_map, &id).as_str(),
             "locked": held,
             "holder": if held { lock.get("holder").cloned().unwrap_or(Value::Null) } else { Value::Null },
             "lockExpiresAt": if held { lock.get("expiresAt").cloned().unwrap_or(Value::Null) } else { Value::Null },
@@ -242,11 +341,13 @@ async fn lock_profile(
     AxumPath(id): AxumPath<String>,
     body: axum::body::Bytes,
 ) -> Response {
-    if !check_auth(&headers, &state.token) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"ok":false,"error":"unauthorized"}))).into_response();
-    }
+    let Some(who) = authenticate(&headers, &state.token) else { return unauthorized() };
     if !safe_id(&id) {
         return (StatusCode::BAD_REQUEST, Json(json!({"ok":false,"error":"bad id"}))).into_response();
+    }
+    if profile_level(&who, &load_acl(), &meta_map(), &id) < Level::Use {
+        audit(&who, "lock", &id, false, "no access");
+        return not_found();
     }
     let v: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
     let holder = v.get("holder").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
@@ -276,11 +377,12 @@ async fn unlock_profile(
     AxumPath(id): AxumPath<String>,
     body: axum::body::Bytes,
 ) -> Response {
-    if !check_auth(&headers, &state.token) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"ok":false,"error":"unauthorized"}))).into_response();
-    }
+    let Some(who) = authenticate(&headers, &state.token) else { return unauthorized() };
     if !safe_id(&id) {
         return (StatusCode::BAD_REQUEST, Json(json!({"ok":false,"error":"bad id"}))).into_response();
+    }
+    if profile_level(&who, &load_acl(), &meta_map(), &id) < Level::Use {
+        return not_found();
     }
     let v: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
     let holder = v.get("holder").and_then(|x| x.as_str()).unwrap_or("").to_string();
@@ -305,11 +407,12 @@ async fn get_bundle(
     axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
     AxumPath(id): AxumPath<String>,
 ) -> Response {
-    if !check_auth(&headers, &state.token) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"ok":false,"error":"unauthorized"}))).into_response();
-    }
+    let Some(who) = authenticate(&headers, &state.token) else { return unauthorized() };
     if !safe_id(&id) {
         return (StatusCode::BAD_REQUEST, Json(json!({"ok":false,"error":"bad id"}))).into_response();
+    }
+    if profile_level(&who, &load_acl(), &meta_map(), &id) < Level::Use {
+        return not_found();
     }
     let dir = match bundles_dir() { Ok(d) => d, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok":false,"error":e.to_string()}))).into_response() };
     let path = dir.join(format!("{id}.zip"));
@@ -329,9 +432,7 @@ async fn put_bundle(
     AxumPath(id): AxumPath<String>,
     body: axum::body::Bytes,
 ) -> Response {
-    if !check_auth(&headers, &state.token) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"ok":false,"error":"unauthorized"}))).into_response();
-    }
+    let Some(who) = authenticate(&headers, &state.token) else { return unauthorized() };
     if !safe_id(&id) {
         return (StatusCode::BAD_REQUEST, Json(json!({"ok":false,"error":"bad id"}))).into_response();
     }
@@ -339,6 +440,42 @@ async fn put_bundle(
         return (StatusCode::PAYLOAD_TOO_LARGE, Json(json!({"ok":false,"error":"bundle too large"}))).into_response();
     }
     let holder = headers.get("x-sync-holder").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    // What this upload does to the profile decides what it needs.
+    let Some((new_profile, new_proxy)) = read_bundle_meta(&body) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"ok":false,"error":"not a profile bundle"}))).into_response();
+    };
+    let new_folder = team_acl::folder_of(&new_profile);
+    let new_sig = team_acl::protected_signature(&new_profile, &new_proxy);
+    {
+        let acl = load_acl();
+        let old = meta_map().get(&id).cloned();
+        let live = old.as_ref().filter(|m| !m.get("deleted").and_then(|d| d.as_bool()).unwrap_or(false));
+        match live {
+            None => {
+                // A profile the server has never held (or one that was deleted): adding is for admins and managers.
+                if !who.is_privileged() {
+                    audit(&who, "add", &id, false, "not allowed to add");
+                    return forbidden("add");
+                }
+            }
+            Some(m) => {
+                let old_folder = m.get("folder").and_then(|f| f.as_str()).unwrap_or("");
+                let lvl = acl.level(&who, old_folder);
+                if lvl < Level::Use {
+                    return not_found();
+                }
+                if old_folder != new_folder && lvl < Level::Full {
+                    audit(&who, "move", &id, false, "folder change");
+                    return forbidden("move");
+                }
+                let changed = m.get("sig").and_then(|x| x.as_str()).map(|old_sig| old_sig != new_sig).unwrap_or(false);
+                if changed && lvl < Level::Edit {
+                    audit(&who, "edit", &id, false, "config change without edit access");
+                    return forbidden("edit");
+                }
+            }
+        }
+    }
     let locks_path = match locks_path() { Ok(p) => p, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok":false,"error":e.to_string()}))).into_response() };
     let mut locks = load_json(&locks_path, json!({}));
     let existing = locks.get(&id).cloned().unwrap_or(Value::Null);
@@ -361,7 +498,7 @@ async fn put_bundle(
         let dt = time_format(secs);
         dt
     };
-    meta_map.insert(id.clone(), json!({"updatedAt": now_iso, "updatedBy": holder, "sizeBytes": body.len()}));
+    meta_map.insert(id.clone(), json!({"updatedAt": now_iso, "updatedBy": holder, "sizeBytes": body.len(), "folder": new_folder, "sig": new_sig}));
     let _ = save_json_atomic(&meta_path, &meta);
     // refresh lock TTL
     if let Some(map) = locks.as_object_mut() {
@@ -381,12 +518,23 @@ async fn delete_profile(
     AxumPath(id): AxumPath<String>,
     body: axum::body::Bytes,
 ) -> Response {
-    if !check_auth(&headers, &state.token) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"ok":false,"error":"unauthorized"}))).into_response();
-    }
+    let Some(who) = authenticate(&headers, &state.token) else { return unauthorized() };
     if !safe_id(&id) {
         return (StatusCode::BAD_REQUEST, Json(json!({"ok":false,"error":"bad id"}))).into_response();
     }
+    let (folder, known) = {
+        let meta = meta_map();
+        (meta.get(&id).and_then(|m| m.get("folder")).and_then(|f| f.as_str()).unwrap_or("").to_string(), meta.contains_key(&id))
+    };
+    let lvl = profile_level(&who, &load_acl(), &meta_map(), &id);
+    if lvl < Level::Use && known {
+        return not_found();
+    }
+    if lvl < Level::Delete {
+        audit(&who, "delete", &id, false, "no delete access");
+        return forbidden("delete");
+    }
+    audit(&who, "delete", &id, true, "");
     let by = serde_json::from_slice::<Value>(&body)
         .ok()
         .and_then(|v| v.get("holder").and_then(|h| h.as_str().map(|s| s.to_string())))
@@ -406,6 +554,7 @@ async fn delete_profile(
         if let Some(m) = meta.as_object_mut() {
             m.insert(id.clone(), json!({
                 "deleted": true,
+                "folder": folder,
                 "updatedAt": time_format(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()),
                 "updatedBy": by,
             }));
@@ -433,9 +582,7 @@ async fn library_list(
     axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
     AxumPath(kind): AxumPath<String>,
 ) -> Response {
-    if !check_auth(&headers, &state.token) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"ok":false,"error":"unauthorized"}))).into_response();
-    }
+    let Some(_who) = authenticate(&headers, &state.token) else { return unauthorized() };
     if !safe_kind(&kind) {
         return (StatusCode::BAD_REQUEST, Json(json!({"ok":false,"error":"bad kind"}))).into_response();
     }
@@ -459,9 +606,7 @@ async fn library_get(
     axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
     AxumPath((kind, id)): AxumPath<(String, String)>,
 ) -> Response {
-    if !check_auth(&headers, &state.token) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"ok":false,"error":"unauthorized"}))).into_response();
-    }
+    let Some(_who) = authenticate(&headers, &state.token) else { return unauthorized() };
     if !safe_kind(&kind) || !safe_id(&id) {
         return (StatusCode::BAD_REQUEST, Json(json!({"ok":false,"error":"bad request"}))).into_response();
     }
@@ -481,11 +626,12 @@ async fn library_put(
     AxumPath((kind, id)): AxumPath<(String, String)>,
     body: axum::body::Bytes,
 ) -> Response {
-    if !check_auth(&headers, &state.token) {
-        return (StatusCode::UNAUTHORIZED, Json(json!({"ok":false,"error":"unauthorized"}))).into_response();
-    }
+    let Some(who) = authenticate(&headers, &state.token) else { return unauthorized() };
     if !safe_kind(&kind) || !safe_id(&id) {
         return (StatusCode::BAD_REQUEST, Json(json!({"ok":false,"error":"bad request"}))).into_response();
+    }
+    if !who.is_privileged() {
+        return forbidden("add");
     }
     if body.len() > MAX_BUNDLE_BYTES {
         return (StatusCode::PAYLOAD_TOO_LARGE, Json(json!({"ok":false,"error":"too large"}))).into_response();
@@ -499,6 +645,164 @@ async fn library_put(
     }
     publish_event(&format!("lib:{kind}/{id}"));
     Json(json!({"ok": true})).into_response()
+}
+
+// ---- members & folder access (admin token only, except /me) ----
+
+async fn me(
+    headers: HeaderMap,
+    axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
+) -> Response {
+    let Some(who) = authenticate(&headers, &state.token) else { return unauthorized() };
+    let acl = load_acl();
+    let folders: Value = if who.is_privileged() {
+        Value::Null
+    } else {
+        json!(acl.folders.iter().filter_map(|(f, m)| m.get(&who.id).map(|l| (f.clone(), l.clone()))).collect::<std::collections::BTreeMap<_, _>>())
+    };
+    Json(json!({"ok": true, "id": who.id, "name": who.name, "role": who.role.as_str(), "privileged": who.is_privileged(), "folders": folders})).into_response()
+}
+
+fn admin_only(headers: &HeaderMap, state: &ServerState) -> Result<Identity, Response> {
+    match authenticate(headers, &state.token) {
+        None => Err(unauthorized()),
+        Some(w) if w.role == team_acl::Role::Admin => Ok(w),
+        Some(_) => Err(forbidden("admin")),
+    }
+}
+
+async fn admin_members(
+    headers: HeaderMap,
+    axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
+) -> Response {
+    if let Err(r) = admin_only(&headers, &state) { return r; }
+    let acl = load_acl();
+    let members: Vec<Value> = acl.members.iter().map(|m| json!({
+        "id": m.id, "name": m.name, "role": m.role, "disabled": m.disabled, "createdAt": m.created_at,
+        "folders": acl.folders.iter().filter_map(|(f, x)| x.get(&m.id).map(|l| (f.clone(), l.clone()))).collect::<std::collections::BTreeMap<_, _>>(),
+    })).collect();
+    Json(json!({"ok": true, "members": members})).into_response()
+}
+
+/// Add a member, or with `id` change one (name, role, disabled, `rotate`).
+/// A new or rotated token is returned once and stored only as a hash.
+async fn admin_member_put(
+    headers: HeaderMap,
+    axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
+    body: axum::body::Bytes,
+) -> Response {
+    let who = match admin_only(&headers, &state) { Ok(w) => w, Err(r) => return r };
+    let v: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+    let _g = acl_lock();
+    let mut acl = load_acl();
+    let role = match v.get("role").and_then(|r| r.as_str()) { Some("manager") => "manager", _ => "member" };
+    let mut token = Value::Null;
+    let id = if let Some(id) = v.get("id").and_then(|x| x.as_str()) {
+        let Some(m) = acl.members.iter_mut().find(|m| m.id == id) else { return not_found() };
+        if let Some(n) = v.get("name").and_then(|x| x.as_str()) { if !n.trim().is_empty() { m.name = n.trim().to_string(); } }
+        if v.get("role").is_some() { m.role = role.to_string(); }
+        if let Some(d) = v.get("disabled").and_then(|x| x.as_bool()) { m.disabled = d; }
+        if v.get("rotate").and_then(|x| x.as_bool()).unwrap_or(false) {
+            let t = team_acl::new_token();
+            m.token_hash = team_acl::hash_token(&t);
+            token = json!(t);
+        }
+        id.to_string()
+    } else {
+        let name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+        if name.is_empty() {
+            return (StatusCode::BAD_REQUEST, Json(json!({"ok":false,"error":"name required"}))).into_response();
+        }
+        let t = team_acl::new_token();
+        let id = uuid::Uuid::new_v4().simple().to_string();
+        acl.members.push(team_acl::Member {
+            id: id.clone(), name, role: role.into(), token_hash: team_acl::hash_token(&t), disabled: false,
+            created_at: time_format(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()),
+        });
+        token = json!(t);
+        id
+    };
+    if let Err(e) = save_acl(&acl) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok":false,"error":e.to_string()}))).into_response();
+    }
+    audit(&who, "member", &id, true, "");
+    Json(json!({"ok": true, "id": id, "token": token})).into_response()
+}
+
+async fn admin_member_delete(
+    headers: HeaderMap,
+    axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    let who = match admin_only(&headers, &state) { Ok(w) => w, Err(r) => return r };
+    let _g = acl_lock();
+    let mut acl = load_acl();
+    acl.remove_member(&id);
+    if let Err(e) = save_acl(&acl) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok":false,"error":e.to_string()}))).into_response();
+    }
+    audit(&who, "member-remove", &id, true, "");
+    Json(json!({"ok": true})).into_response()
+}
+
+/// Every folder the server knows of (from uploaded profiles) with who may do what in it.
+async fn admin_folders(
+    headers: HeaderMap,
+    axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
+) -> Response {
+    if let Err(r) = admin_only(&headers, &state) { return r; }
+    let acl = load_acl();
+    let mut names: std::collections::BTreeSet<String> = acl.folders.keys().cloned().collect();
+    let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+    for m in meta_map().values() {
+        if m.get("deleted").and_then(|d| d.as_bool()).unwrap_or(false) { continue; }
+        if let Some(f) = m.get("folder").and_then(|f| f.as_str()).filter(|f| !f.is_empty()) {
+            names.insert(f.to_string());
+            *counts.entry(f.to_string()).or_default() += 1;
+        }
+    }
+    let folders: Vec<Value> = names.into_iter().map(|f| json!({
+        "name": f, "profiles": counts.get(&f).copied().unwrap_or(0), "access": acl.folders.get(&f).cloned().unwrap_or_default(),
+    })).collect();
+    Json(json!({"ok": true, "folders": folders})).into_response()
+}
+
+/// `{ "memberId": "...", "level": "none" | "use" | "edit" | "delete" }`
+async fn admin_folder_access(
+    headers: HeaderMap,
+    axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
+    AxumPath(folder): AxumPath<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    let who = match admin_only(&headers, &state) { Ok(w) => w, Err(r) => return r };
+    let v: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+    let member = v.get("memberId").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let level = Level::parse(v.get("level").and_then(|x| x.as_str()).unwrap_or("none"));
+    let _g = acl_lock();
+    let mut acl = load_acl();
+    if !acl.members.iter().any(|m| m.id == member) {
+        return not_found();
+    }
+    acl.set_access(&folder, &member, if level == Level::Full { Level::Delete } else { level });
+    if let Err(e) = save_acl(&acl) {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok":false,"error":e.to_string()}))).into_response();
+    }
+    audit(&who, "access", &format!("{folder}:{member}"), true, level.as_str());
+    // Whoever gained or lost the folder should see it at once.
+    for (id, m) in meta_map() {
+        if m.get("folder").and_then(|f| f.as_str()) == Some(folder.as_str()) { publish_event(&id); }
+    }
+    Json(json!({"ok": true})).into_response()
+}
+
+async fn admin_audit(
+    headers: HeaderMap,
+    axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
+) -> Response {
+    if let Err(r) = admin_only(&headers, &state) { return r; }
+    let text = server_data_dir().ok().and_then(|d| std::fs::read_to_string(d.join("audit.log")).ok()).unwrap_or_default();
+    let lines: Vec<Value> = text.lines().rev().take(200).filter_map(|l| serde_json::from_str(l).ok()).collect();
+    Json(json!({"ok": true, "entries": lines})).into_response()
 }
 
 fn time_format(secs: u64) -> String {
@@ -562,6 +866,12 @@ pub async fn start(port: u16, token: String) -> Result<u16> {
         .route("/profiles/:id/bundle", get(get_bundle).put(put_bundle))
         .route("/events/wait", get(wait_events))
         .route("/profiles/:id/delete", post(delete_profile))
+        .route("/me", get(me))
+        .route("/admin/members", get(admin_members).put(admin_member_put))
+        .route("/admin/members/:id/delete", post(admin_member_delete))
+        .route("/admin/folders", get(admin_folders))
+        .route("/admin/folders/:folder/access", axum::routing::put(admin_folder_access))
+        .route("/admin/audit", get(admin_audit))
         .route("/library/:kind", get(library_list))
         .route("/library/:kind/:id", get(library_get).put(library_put))
         .with_state(state.clone());
@@ -674,4 +984,101 @@ pub fn tailscale_ip() -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod permission_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn bundle(folder: &str, ua: &str) -> Vec<u8> {
+        let profile = json!({"_meta": {"folder": folder, "name": "p"}, "navigator": {"user_agent": ua}});
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut z = zip::ZipWriter::new(&mut buf);
+            let o = zip::write::SimpleFileOptions::default();
+            z.start_file("profile.json", o).unwrap();
+            z.write_all(profile.to_string().as_bytes()).unwrap();
+            z.start_file("proxy.json", o).unwrap();
+            z.write_all(b"null").unwrap();
+            z.finish().unwrap();
+        }
+        buf.into_inner()
+    }
+
+    async fn status(c: &reqwest::Client, tok: &str, method: &str, url: String, body: Option<Vec<u8>>, holder: &str) -> u16 {
+        let mut r = match method { "GET" => c.get(url), "PUT" => c.put(url), _ => c.post(url) }.bearer_auth(tok).header("x-sync-holder", holder);
+        if let Some(b) = body { r = r.body(b); } else if method == "POST" { r = r.json(&json!({"holder": holder})); }
+        r.send().await.unwrap().status().as_u16()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn folder_permissions_are_enforced_by_the_server() {
+        let _g = crate::cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-acl-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        crate::store::set_data_root(Some(tmp.clone()));
+        let admin = "admin-token-123456";
+        let port = start(0, admin.to_string()).await.expect("start");
+        let base = format!("http://127.0.0.1:{port}");
+        let c = reqwest::Client::new();
+
+        // Admin uploads one profile into folder A and one into B.
+        for (id, f) in [("pa", "A"), ("pb", "B")] {
+            assert_eq!(status(&c, admin, "POST", format!("{base}/profiles/{id}/lock"), None, "adm").await, 200);
+            assert_eq!(status(&c, admin, "PUT", format!("{base}/profiles/{id}/bundle"), Some(bundle(f, "ua1")), "adm").await, 200);
+            assert_eq!(status(&c, admin, "POST", format!("{base}/profiles/{id}/unlock"), None, "adm").await, 200);
+        }
+
+        // Members: u uses A, e edits A, d deletes A; nobody is granted B.
+        let mut tok = std::collections::HashMap::new();
+        let mut ids = std::collections::HashMap::new();
+        for n in ["u", "e", "d"] {
+            let r: Value = c.put(format!("{base}/admin/members")).bearer_auth(admin).json(&json!({"name": n})).send().await.unwrap().json().await.unwrap();
+            tok.insert(n, r["token"].as_str().unwrap().to_string());
+            ids.insert(n, r["id"].as_str().unwrap().to_string());
+        }
+        for (n, lvl) in [("u", "use"), ("e", "edit"), ("d", "delete")] {
+            let r = c.put(format!("{base}/admin/folders/A/access")).bearer_auth(admin)
+                .json(&json!({"memberId": ids[n], "level": lvl})).send().await.unwrap();
+            assert_eq!(r.status(), 200);
+        }
+        // Members cannot administer.
+        assert_eq!(status(&c, &tok["d"], "GET", format!("{base}/admin/members"), None, "").await, 403);
+
+        // Visibility: only folder A is listed, B is simply not there.
+        let list: Value = c.get(format!("{base}/profiles")).bearer_auth(&tok["u"]).send().await.unwrap().json().await.unwrap();
+        let seen: Vec<&str> = list["profiles"].as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap()).collect();
+        assert_eq!(seen, vec!["pa"]);
+        assert_eq!(status(&c, &tok["u"], "GET", format!("{base}/profiles/pb/bundle"), None, "").await, 404);
+        assert_eq!(status(&c, &tok["u"], "POST", format!("{base}/profiles/pb/lock"), None, "u").await, 404);
+        assert_eq!(status(&c, &tok["d"], "POST", format!("{base}/profiles/pb/delete"), None, "d").await, 404);
+
+        // "Use" saves the session (same config) but cannot change configuration.
+        assert_eq!(status(&c, &tok["u"], "POST", format!("{base}/profiles/pa/lock"), None, "u").await, 200);
+        assert_eq!(status(&c, &tok["u"], "PUT", format!("{base}/profiles/pa/bundle"), Some(bundle("A", "ua1")), "u").await, 200);
+        assert_eq!(status(&c, &tok["u"], "PUT", format!("{base}/profiles/pa/bundle"), Some(bundle("A", "hacked")), "u").await, 403);
+        assert_eq!(status(&c, &tok["u"], "POST", format!("{base}/profiles/pa/unlock"), None, "u").await, 200);
+        // "Edit" may change config, but not move it to another folder.
+        assert_eq!(status(&c, &tok["e"], "POST", format!("{base}/profiles/pa/lock"), None, "e").await, 200);
+        assert_eq!(status(&c, &tok["e"], "PUT", format!("{base}/profiles/pa/bundle"), Some(bundle("A", "ua2")), "e").await, 200);
+        assert_eq!(status(&c, &tok["e"], "PUT", format!("{base}/profiles/pa/bundle"), Some(bundle("B", "ua2")), "e").await, 403);
+        assert_eq!(status(&c, &tok["e"], "POST", format!("{base}/profiles/pa/unlock"), None, "e").await, 200);
+        // Deleting needs "delete"; adding a profile needs admin/manager.
+        assert_eq!(status(&c, &tok["e"], "POST", format!("{base}/profiles/pa/delete"), None, "e").await, 403);
+        assert_eq!(status(&c, &tok["d"], "POST", format!("{base}/profiles/new/lock"), None, "d").await, 404);
+        assert_eq!(status(&c, &tok["d"], "PUT", format!("{base}/library/fingerprints/x"), Some(b"x".to_vec()), "d").await, 403);
+        assert_eq!(status(&c, &tok["d"], "POST", format!("{base}/profiles/pa/delete"), None, "d").await, 200);
+
+        // A disabled member is locked out at once; revoking access hides the folder.
+        c.put(format!("{base}/admin/members")).bearer_auth(admin).json(&json!({"id": ids["u"], "disabled": true})).send().await.unwrap();
+        assert_eq!(status(&c, &tok["u"], "GET", format!("{base}/profiles"), None, "").await, 401);
+        // Audit trail recorded the refusals.
+        let a: Value = c.get(format!("{base}/admin/audit")).bearer_auth(admin).send().await.unwrap().json().await.unwrap();
+        assert!(a["entries"].as_array().unwrap().iter().any(|e| e["action"] == "edit" && e["ok"] == false));
+
+        let _ = stop();
+        crate::store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

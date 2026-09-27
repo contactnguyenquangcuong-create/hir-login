@@ -11,7 +11,7 @@ export type Section =
   | "patchlog"
   | "settings";
 
-export type ToastItem = { id: number; kind: "ok" | "err" | "info"; text: string };
+export type ToastItem = { id: number; kind: "ok" | "err" | "info"; text: string; detail?: string };
 
 export type ConfirmButton = { label: string; value: any; danger?: boolean; primary?: boolean };
 export type ConfirmReq = {

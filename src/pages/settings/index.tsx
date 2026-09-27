@@ -5,6 +5,7 @@ import { Button, Input, Select, Switch, Textarea } from "@proxyshard/shardx-ui-k
 import { DownloadIcon } from "../../shared/icons";
 import { Topbar } from "../../shared/ui/Topbar";
 import { CopyField } from "../../shared/ui/CopyField";
+import { MembersPanel } from "./MembersPanel";
 import { toast } from "../../shared/model/toast";
 import { withUtm } from "../../shared/lib/utils";
 import type { Settings, ApiInfo, RemoteProfileStatus } from "../../entities/settings";
@@ -539,6 +540,8 @@ function SyncSection({
           </div>
         )}
       </div>
+
+      {serverRunning && <MembersPanel serverUrl={`http://${serverIp ?? "127.0.0.1"}:${serverPort}`} />}
 
       {/* Advanced — replaces the old standalone enabled/url/token block */}
       <button type="button" onClick={() => setAdvancedOpen((v) => !v)} className="self-start text-paragraph-xs text-text-soft-400 hover:text-text-sub-600">

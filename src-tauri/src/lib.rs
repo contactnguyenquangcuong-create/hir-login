@@ -29,6 +29,7 @@ mod modguard;
 mod runner;
 mod wasm;
 mod trash;
+mod team_acl;
 mod team_server;
 mod team_invite;
 mod tailscale;
@@ -2371,6 +2372,14 @@ fn sync_kick() {
 }
 
 #[tauri::command]
+async fn team_admin(method: String, path: String, body: Option<Value>) -> Result<Value, String> {
+    if !(path == "/me" || path.starts_with("/admin/")) {
+        return Err("bad path".into());
+    }
+    cloud_sync::admin_call(&method, &path, body).await.map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
 fn sync_activity() -> cloud_sync::SyncActivity {
     cloud_sync::activity()
 }
@@ -3018,6 +3027,7 @@ pub fn run() {
             team_invite_join,
             tailscale_status,
             sync_activity,
+            team_admin,
             sync_kick,
             autostart_get,
             autostart_set,
