@@ -230,6 +230,12 @@ export function SettingsPage() {
           <TeamTab
             sync={s.sync}
             onSyncChange={(patch) => setS({ ...s, sync: { ...s.sync!, ...patch } as typeof s.sync })}
+            onSyncCommit={async (patch) => {
+              const next = { ...s, sync: { ...s.sync!, ...patch } as typeof s.sync };
+              setS(next);
+              await settingsSave(next);
+              setSaved(JSON.stringify(next));
+            }}
             onDisconnect={disconnect}
           />
         )}

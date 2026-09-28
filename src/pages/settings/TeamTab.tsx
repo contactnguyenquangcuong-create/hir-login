@@ -14,10 +14,17 @@ import { Section, Row, Block, Pill, Dot, Segmented } from "./ui";
 const ROLE_LABEL = { admin: "Quản trị", manager: "Quản lý nhóm", member: "Thành viên" } as const;
 
 export function TeamTab({
-  sync, onSyncChange, onDisconnect,
+  sync, onSyncChange, onSyncCommit, onDisconnect,
 }: {
   sync: Settings["sync"];
   onSyncChange: (patch: Record<string, unknown>) => void;
+  // Like onSyncChange, but persists to disk immediately instead of waiting
+  // for "Lưu cài đặt". Every backend call reads the token from the saved
+  // settings.json, not from this page's in-memory state — so a token handed
+  // out by joining or starting a server must land on disk before anything
+  // else (a `/me` refresh, an admin action) tries to use it, or that request
+  // reads the previous, now-wrong token and gets a bogus 401.
+  onSyncCommit: (patch: Record<string, unknown>) => Promise<void>;
   onDisconnect: () => void;
 }) {
   const t = useT();
@@ -101,7 +108,7 @@ export function TeamTab({
         const st = await teamServerStatus();
         setServerIp(st.tailscale_ip ?? null);
         const url = `http://${st.tailscale_ip ?? "127.0.0.1"}:${actualPort}`;
-        onSyncChange({ enabled: true, server_url: url, token, device_name: sync?.device_name ?? null, slim_local: sync?.slim_local ?? true });
+        await onSyncCommit({ enabled: true, server_url: url, token, device_name: sync?.device_name ?? null, slim_local: sync?.slim_local ?? true });
         useTeam.getState().refresh();
       }
     } catch (e) { toast.err(String(e)); }
@@ -113,7 +120,7 @@ export function TeamTab({
     setJoinBusy(true);
     try {
       const res = await teamInviteJoin(joinCode.trim());
-      onSyncChange({ enabled: true, server_url: res.url, token: res.token as string });
+      await onSyncCommit({ enabled: true, server_url: res.url, token: res.token as string });
       toast.ok(`Đã kết nối tới ${res.url}`);
       setJoinCode("");
       refreshTs();
