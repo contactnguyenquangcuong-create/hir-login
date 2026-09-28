@@ -43,6 +43,12 @@ export function MembersPanel({ serverUrl, oauthReady, onOpenOauthSetup }: { serv
   const [newRole, setNewRole] = useState<Role>("member");
   const [issued, setIssued] = useState<{ name: string; code: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  // Must stay above the early `return null` below: a hook declared after it
+  // was skipped whenever `role` wasn't yet "admin" (e.g. right after joining
+  // or disconnecting a team), so this component called a different number of
+  // hooks from one render to the next — React error #300, "Rendered fewer
+  // hooks than expected" — and crashed into the app's ErrorBoundary.
+  const [renaming, setRenaming] = useState<{ id: string; text: string } | null>(null);
 
   const load = useCallback(async () => {
     try { setMembers((await teamCall<{ members: Member[] }>("GET", "/admin/members")).members); } catch { /* not the admin */ }
@@ -84,7 +90,6 @@ export function MembersPanel({ serverUrl, oauthReady, onOpenOauthSetup }: { serv
     await show(n, r.token);
   });
   const patch = (m: Member, p: Record<string, unknown>) => run(async () => { await teamCall("PUT", "/admin/members", { id: m.id, ...p }); });
-  const [renaming, setRenaming] = useState<{ id: string; text: string } | null>(null);
   const commitRename = (m: Member) => {
     const n = renaming?.text.trim();
     setRenaming(null);
