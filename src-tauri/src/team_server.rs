@@ -745,6 +745,17 @@ async fn admin_member_put(
             audit(&who, "member", &id, false, "only the server token ranks admins");
             return forbidden("admin-rank");
         }
+        // Rotating your own token kills the very session making this request:
+        // the new token is only ever handed back as an invite code to copy
+        // elsewhere, never applied to this device, so a self-rotate leaves the
+        // admin logged in with a token that no longer works. This was already
+        // explicitly ruled out as a feature (a superior issues the code, not
+        // yourself) — this closes the same door reached through the regular
+        // "Cấp lại mã" button instead of a dedicated self-service endpoint.
+        if v.get("rotate").and_then(|x| x.as_bool()).unwrap_or(false) && id == who.id {
+            audit(&who, "member", &id, false, "cannot rotate your own token");
+            return forbidden("self-rotate");
+        }
         if let Some(n) = v.get("name").and_then(|x| x.as_str()) { if !n.trim().is_empty() { m.name = n.trim().to_string(); } }
         if v.get("role").is_some() { m.role = role.to_string(); }
         if let Some(d) = v.get("disabled").and_then(|x| x.as_bool()) { m.disabled = d; }
@@ -1408,6 +1419,41 @@ mod permission_tests {
         assert_eq!(body["error"], "a member with this name already exists");
         // Case-insensitive: "cuongpc" is the same clash to a human reading the list.
         assert_eq!(put_json(&c, admin, format!("{base}/admin/members"), json!({"name": "cuongpc", "role": "member"})).await.0, 400);
+
+        let _ = stop();
+        crate::store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A named admin rotating their OWN token through the regular "Cấp lại mã"
+    /// button (not the dedicated, already-rejected self-service endpoint)
+    /// invalidates the very session making the request, since the new token is
+    /// only ever handed back as an invite code — it never becomes this
+    /// device's own token. That silently locked the admin out (reported as a
+    /// confusing "wrong sync token" 401 on the next unrelated action) until
+    /// they reconnected with a fresh code.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_member_cannot_rotate_their_own_token() {
+        let _g = crate::cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-acl-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        crate::store::set_data_root(Some(tmp.clone()));
+        let admin = "admin-token-123456";
+        let port = start(0, admin.to_string()).await.expect("start");
+        let base = format!("http://127.0.0.1:{port}");
+        let c = reqwest::Client::new();
+
+        let (_, r) = put_json(&c, admin, format!("{base}/admin/members"), json!({"name": "A", "role": "admin"})).await;
+        let a_tok = r["token"].as_str().unwrap().to_string();
+        let a_id = r["id"].as_str().unwrap().to_string();
+
+        let (code, body) = put_json(&c, &a_tok, format!("{base}/admin/members"), json!({"id": a_id, "rotate": true})).await;
+        assert_eq!(code, 403);
+        assert_eq!(body["reason"], "self-rotate");
+        // Their old token still works — the rotate never took effect.
+        assert_eq!(status(&c, &a_tok, "GET", format!("{base}/admin/members"), None, "").await, 200);
+        // The server token (a superior) rotating it FOR them still works fine.
+        assert_eq!(put_json(&c, admin, format!("{base}/admin/members"), json!({"id": a_id, "rotate": true})).await.0, 200);
 
         let _ = stop();
         crate::store::set_data_root(None);

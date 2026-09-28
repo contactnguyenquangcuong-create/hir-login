@@ -1568,6 +1568,7 @@
   "err.noMove": "你不能把此配置文件移到其他文件夹。",
   "err.noDelete": "你没有删除此配置文件的权限。",
   "err.noAdminRank": "只有持有此服务器自身令牌的人才能更改另一位管理员的级别。",
+  "err.noSelfRotate": "不能给自己重新发码——请上级为你发一个新的。",
   "err.noAdmin": "只有管理员可以管理成员。",
   "err.noPerm": "你没有权限执行此操作。",
   "sidebar.navFolders": "文件夹",

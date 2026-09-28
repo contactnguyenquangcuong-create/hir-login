@@ -21,6 +21,7 @@ const RULES: Rule[] = [
   { re: /permission denied: you may not delete/i, key: "err.noDelete" },
   { re: /permission denied: folder made by someone above/i, key: "err.folderAbove" },
   { re: /permission denied: only the server token can change another admin's rank/i, key: "err.noAdminRank" },
+  { re: /cannot rotate your own token/i, key: "err.noSelfRotate" },
   { re: /permission denied: only the admin/i, key: "err.noAdmin" },
   { re: /permission denied/i, key: "err.noPerm" },
   // Scoped to our own sync server's 401/403 text (see cloud_sync::admin_call):

@@ -38,6 +38,7 @@ export function MembersPanel({ serverUrl, oauthReady, onOpenOauthSetup }: { serv
   // not over a peer's rank. The server enforces this either way; disabling the
   // controls here just avoids offering an action that would 403.
   const isServerAdmin = useTeam((s) => s.isServerAdmin);
+  const meId = useTeam((s) => s.id);
   const [members, setMembers] = useState<Member[]>([]);
   const [name, setName] = useState("");
   const [newRole, setNewRole] = useState<Role>("member");
@@ -156,6 +157,7 @@ export function MembersPanel({ serverUrl, oauthReady, onOpenOauthSetup }: { serv
       ) : (
         members.map((m) => {
           const rankLocked = m.role === "admin" && !isServerAdmin;
+          const isSelf = m.id === meId;
           return (
             <div key={m.id} className="flex flex-wrap items-center gap-3 px-5 py-3">
               {avatar(m.name)}
@@ -179,7 +181,14 @@ export function MembersPanel({ serverUrl, oauthReady, onOpenOauthSetup }: { serv
               <div className="flex flex-none flex-wrap items-center justify-end gap-1">
                 <Button variant="neutral" mode="ghost" size="xsmall" onClick={() => setRenaming({ id: m.id, text: m.name })}>Đổi tên</Button>
                 <div className="w-36"><Select size="small" value={m.role} onChange={(v) => patch(m, { role: v })} disabled={rankLocked} options={rankLocked || isServerAdmin ? ROLES : ROLES.filter((r) => r.value !== "admin")} /></div>
-                <Button variant="neutral" mode="ghost" size="xsmall" onClick={() => rotate(m)} isLoading={busy}>Cấp lại mã</Button>
+                <Button
+                  variant="neutral" mode="ghost" size="xsmall"
+                  disabled={isSelf}
+                  title={isSelf ? "Nhờ người cấp trên cấp mã mới cho bạn — tự cấp lại sẽ khoá luôn phiên đang dùng" : undefined}
+                  onClick={() => rotate(m)} isLoading={busy}
+                >
+                  Cấp lại mã
+                </Button>
                 <Button variant="neutral" mode="ghost" size="xsmall" disabled={rankLocked} onClick={() => patch(m, { disabled: !m.disabled })}>{m.disabled ? "Mở khoá" : "Khoá"}</Button>
                 <Button variant="neutral" mode="ghost" size="xsmall" disabled={rankLocked} onClick={() => remove(m)}>Xoá</Button>
               </div>

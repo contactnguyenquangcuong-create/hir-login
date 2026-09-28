@@ -1568,6 +1568,7 @@
   "err.noMove": "You can't move this profile to another folder.",
   "err.noDelete": "You don't have permission to delete this profile.",
   "err.noAdminRank": "Only whoever holds this server's own token can change another admin's rank.",
+  "err.noSelfRotate": "You can't reissue your own code — ask someone above you to issue a new one.",
   "err.noAdmin": "Only the admin can manage members.",
   "err.noPerm": "You don't have permission to do this.",
   "sidebar.navFolders": "Folders",

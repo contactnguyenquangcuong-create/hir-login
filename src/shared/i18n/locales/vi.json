@@ -1568,6 +1568,7 @@
   "err.noMove": "Bạn không được chuyển profile sang thư mục khác.",
   "err.noDelete": "Bạn không có quyền xoá profile này.",
   "err.noAdminRank": "Chỉ người giữ token gốc của server này mới đổi được cấp bậc của một quản trị viên khác.",
+  "err.noSelfRotate": "Không thể tự cấp lại mã cho chính mình — nhờ người cấp trên cấp mã mới cho bạn.",
   "err.noAdmin": "Chỉ admin mới quản lý được nhân sự.",
   "err.noPerm": "Bạn không có quyền làm thao tác này.",
   "sidebar.navFolders": "Thư mục",

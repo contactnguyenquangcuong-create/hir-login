@@ -203,6 +203,7 @@ pub async fn admin_call(method: &str, path: &str, body: Option<serde_json::Value
         // opposite of what's actually true and send them looking in the wrong
         // place. Only the server's own token may do this.
         if reason == "admin-rank" { anyhow::bail!("permission denied: only the server token can change another admin's rank"); }
+        if reason == "self-rotate" { anyhow::bail!("cannot rotate your own token"); }
         anyhow::bail!("permission denied: only the admin can manage members");
     }
     if !resp.status().is_success() {
