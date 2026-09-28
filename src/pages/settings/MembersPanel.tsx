@@ -50,10 +50,15 @@ export function MembersPanel({ serverUrl, oauthReady, onOpenOauthSetup }: { serv
   useEffect(() => { if (role === "admin") load(); }, [role, load]);
   if (role !== "admin") return null;
 
+  // `add` creates the member first, then mints a Tailscale key and invite code
+  // for them — if that second step fails, the member still exists server-side.
+  // Refreshing the list only on success used to leave it stale in that case:
+  // the admin would see "no members yet", assume the whole thing failed, and
+  // retry with the same name — silently creating a second member each time.
   const run = async (fn: () => Promise<void>) => {
     setBusy(true);
-    try { await fn(); await load(); } catch (e) { toast.err(String(e)); }
-    finally { setBusy(false); }
+    try { await fn(); } catch (e) { toast.err(String(e)); }
+    finally { await load(); setBusy(false); }
   };
   // A brand-new machine needs two things to be useful with one code: Tailscale
   // network access, and this person's Hir-Login permission level. When an OAuth

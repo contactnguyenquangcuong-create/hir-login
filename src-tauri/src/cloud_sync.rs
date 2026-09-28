@@ -198,9 +198,28 @@ pub async fn admin_call(method: &str, path: &str, body: Option<serde_json::Value
         let reason = resp.json::<serde_json::Value>().await.ok()
             .and_then(|v| v.get("reason").and_then(|r| r.as_str().map(String::from))).unwrap_or_default();
         if reason == "folder-owner" { anyhow::bail!("permission denied: folder made by someone above"); }
+        // An admin trying to rank a peer admin IS "the admin" — the generic
+        // "only the admin can manage members" text below would tell them the
+        // opposite of what's actually true and send them looking in the wrong
+        // place. Only the server's own token may do this.
+        if reason == "admin-rank" { anyhow::bail!("permission denied: only the server token can change another admin's rank"); }
         anyhow::bail!("permission denied: only the admin can manage members");
     }
-    if !resp.status().is_success() { anyhow::bail!("sync server rejected the request: {}", resp.status()); }
+    if !resp.status().is_success() {
+        let status = resp.status();
+        // Validation errors (duplicate name, missing field, …) carry a specific
+        // reason in the body — without it every one of them collapsed into the
+        // same generic "server rejected the request, try again later", which
+        // is actively wrong advice for something that will never succeed by
+        // retrying (e.g. two members can't share a name).
+        let msg = resp.json::<serde_json::Value>().await.ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str().map(String::from)))
+            .filter(|m| !m.is_empty());
+        match msg {
+            Some(m) => anyhow::bail!("sync server rejected the request: {status} — {m}"),
+            None => anyhow::bail!("sync server rejected the request: {status}"),
+        }
+    }
     Ok(resp.json().await.unwrap_or(serde_json::Value::Null))
 }
 

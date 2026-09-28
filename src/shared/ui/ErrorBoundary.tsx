@@ -20,6 +20,10 @@ export class ErrorBoundary extends Component<Props, State> {
 
   render() {
     if (!this.state.error) return this.props.children;
+    // Shown on screen (not just logged to a devtools console the user has no
+    // easy way to open) so a screenshot of this screen is enough to diagnose
+    // the crash — no need to ask "what did it say" after the fact.
+    const detail = `${this.state.error.name}: ${this.state.error.message}`;
     return (
       <div style={{
         display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
@@ -29,6 +33,13 @@ export class ErrorBoundary extends Component<Props, State> {
         <div style={{ fontSize: 15, fontWeight: 600 }}>Đã xảy ra lỗi hiển thị</div>
         <div style={{ fontSize: 13, color: "#9a9a9a", maxWidth: 480 }}>
           Một phần giao diện gặp lỗi. Bấm nút dưới để tải lại — dữ liệu profile không bị ảnh hưởng.
+        </div>
+        <div style={{
+          maxWidth: 560, maxHeight: 140, overflow: "auto", fontFamily: "monospace", fontSize: 11,
+          color: "#c9c9c9", background: "#1a1a1d", borderRadius: 8, padding: "8px 12px", textAlign: "left",
+          whiteSpace: "pre-wrap", wordBreak: "break-word",
+        }}>
+          {detail}
         </div>
         <button
           onClick={() => window.location.reload()}

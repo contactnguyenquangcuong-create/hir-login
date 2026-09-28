@@ -759,6 +759,13 @@ async fn admin_member_put(
         if name.is_empty() {
             return (StatusCode::BAD_REQUEST, Json(json!({"ok":false,"error":"name required"}))).into_response();
         }
+        // A retried "Tạo mã" after some later step failed (e.g. Tailscale
+        // rejecting the key) would otherwise silently create a second member
+        // with the same name each time, since this call on its own always
+        // succeeded — only visible after reopening the app.
+        if acl.members.iter().any(|m| m.name.eq_ignore_ascii_case(&name)) {
+            return (StatusCode::BAD_REQUEST, Json(json!({"ok":false,"error":"a member with this name already exists"}))).into_response();
+        }
         // Making a brand-new admin is the same "who gets to rank an admin" question.
         if role == "admin" && !who.is_server_admin() {
             audit(&who, "member", &name, false, "only the server token ranks admins");
@@ -1374,6 +1381,33 @@ mod permission_tests {
         // Only the server token ranks an admin: demoted back to member, loses admin reach at once.
         put_json(&c, admin, format!("{base}/admin/members"), json!({"id": second_id, "role": "member"})).await;
         assert_eq!(status(&c, &second_tok, "GET", format!("{base}/admin/members"), None, "").await, 403);
+
+        let _ = stop();
+        crate::store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A retried "Tạo mã" after a later step (minting a Tailscale key) failed
+    /// used to silently create a second member with the same name each time,
+    /// since this call alone always succeeded — only visible after reopening
+    /// the app. The server now refuses it outright.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_member_cannot_share_a_name_with_an_existing_one() {
+        let _g = crate::cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-acl-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        crate::store::set_data_root(Some(tmp.clone()));
+        let admin = "admin-token-123456";
+        let port = start(0, admin.to_string()).await.expect("start");
+        let base = format!("http://127.0.0.1:{port}");
+        let c = reqwest::Client::new();
+
+        assert_eq!(put_json(&c, admin, format!("{base}/admin/members"), json!({"name": "CuongPC", "role": "admin"})).await.0, 200);
+        let (code, body) = put_json(&c, admin, format!("{base}/admin/members"), json!({"name": "CuongPC", "role": "member"})).await;
+        assert_eq!(code, 400);
+        assert_eq!(body["error"], "a member with this name already exists");
+        // Case-insensitive: "cuongpc" is the same clash to a human reading the list.
+        assert_eq!(put_json(&c, admin, format!("{base}/admin/members"), json!({"name": "cuongpc", "role": "member"})).await.0, 400);
 
         let _ = stop();
         crate::store::set_data_root(None);
