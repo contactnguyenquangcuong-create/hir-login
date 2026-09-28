@@ -185,6 +185,30 @@ async fn denied(resp: reqwest::Response, what: &str) -> anyhow::Error {
     }
 }
 
+/// The server said 401: this machine's token is no longer valid — disabled or
+/// deleted from above, not a network blip or a permission limit on one action
+/// (that's 403). Turns sync off locally at once and tells the running app, so
+/// a revoked member is logged out within moments instead of only finding out
+/// the next time they happen to notice a failed action. Safe to call
+/// repeatedly (e.g. a retry loop hitting the same 401 every few seconds):
+/// once `sync.enabled` is already false, this is a no-op.
+fn kicked_out() {
+    let Ok(mut s) = settings::load() else { return };
+    if !s.sync.enabled {
+        return;
+    }
+    s.sync.enabled = false;
+    s.sync.server_url = None;
+    s.sync.token = None;
+    if settings::save(&s).is_err() {
+        return;
+    }
+    if let Some(app) = crate::app_handle() {
+        use tauri::Emitter;
+        let _ = app.emit("team:kicked-out", ());
+    }
+}
+
 /// A call to the team server's member/permission API with this machine's token.
 pub async fn admin_call(method: &str, path: &str, body: Option<serde_json::Value>) -> Result<serde_json::Value> {
     let Some((_cfg, base, token)) = active_config()? else { anyhow::bail!("sync is not enabled") };
@@ -193,7 +217,7 @@ pub async fn admin_call(method: &str, path: &str, body: Option<serde_json::Value
     let mut req = match method { "PUT" => c.put(url), "POST" => c.post(url), _ => c.get(url) }.bearer_auth(&token);
     if let Some(b) = body { req = req.json(&b); }
     let resp = req.send().await.context("contact sync server")?;
-    if resp.status().as_u16() == 401 { anyhow::bail!("sync server rejected the request: 401"); }
+    if resp.status().as_u16() == 401 { kicked_out(); anyhow::bail!("sync server rejected the request: 401"); }
     if resp.status().as_u16() == 403 {
         let reason = resp.json::<serde_json::Value>().await.ok()
             .and_then(|v| v.get("reason").and_then(|r| r.as_str().map(String::from))).unwrap_or_default();
@@ -727,6 +751,7 @@ pub async fn list_remote() -> Result<Vec<RemoteProfileStatus>> {
         .send()
         .await
         .context("contact sync server")?;
+    if resp.status().as_u16() == 401 { kicked_out(); }
     if !resp.status().is_success() {
         anyhow::bail!("sync server error: {}", resp.status());
     }
@@ -1107,6 +1132,7 @@ async fn wait_for_events(base: &str, token: &str, after: Option<u64>) -> Result<
         .send()
         .await
         .context("contact sync server")?;
+    if resp.status().as_u16() == 401 { kicked_out(); }
     if !resp.status().is_success() {
         anyhow::bail!("events rejected: {}", resp.status());
     }
@@ -1360,6 +1386,44 @@ mod tests {
         let row = row.expect("tombstone listed");
         assert_eq!(row["deleted"], true);
         assert_eq!(row["updatedBy"], "machine-a");
+    }
+
+    /// A member disabled or deleted from above leaves this machine holding a
+    /// token the server no longer recognises. The very next call that notices
+    /// (here, `list_remote`, one of a few entry points instrumented for this)
+    /// must switch sync off locally right away — not just report an error and
+    /// keep quietly retrying with the same dead token forever.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_401_from_the_team_server_disables_sync_locally() {
+        let _g = TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-kick-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        store::set_data_root(Some(tmp.clone()));
+
+        let real_token = "server-admin-token-1234";
+        let port = crate::team_server::start(0, real_token.to_string()).await.expect("start");
+        let base = format!("http://127.0.0.1:{port}");
+
+        let mut s = settings::load().unwrap();
+        s.sync.enabled = true;
+        s.sync.server_url = Some(base.clone());
+        // A token the server has never heard of, exactly what a disabled or
+        // deleted member's now-stale token looks like from this machine.
+        s.sync.token = Some("a-token-the-server-does-not-know".to_string());
+        settings::save(&s).unwrap();
+
+        let err = list_remote().await;
+
+        let after = settings::load().unwrap();
+
+        let _ = crate::team_server::stop();
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert!(err.is_err(), "an unrecognised token must be refused");
+        assert!(!after.sync.enabled, "sync should be switched off locally once the token is rejected");
+        assert_eq!(after.sync.server_url, None);
+        assert_eq!(after.sync.token, None);
     }
 
     fn write_ext(dir: &std::path::Path, name: &str, version: &str) {

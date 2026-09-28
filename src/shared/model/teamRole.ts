@@ -1,6 +1,8 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { settingsGet } from "../../entities/settings";
+import { toast } from "./toast";
 
 export type TeamRole = "admin" | "manager" | "member";
 
@@ -85,7 +87,10 @@ let started = false;
 /** Start refreshing the role in the background (once). Retries quickly (every
  *  3s) while a team is configured but no role has been confirmed yet — the
  *  state a fresh join, a just-toggled server, or a network blip leaves this
- *  in — and settles into a slow 60s cadence once a role is known. */
+ *  in — and settles into a slow 60s cadence once a role is known. Also listens
+ *  for "team:kicked-out", emitted by the Rust side the moment any team-server
+ *  call comes back 401 (this machine's token disabled or deleted from above):
+ *  that reacts immediately instead of waiting for the next poll. */
 export function startTeamRole() {
   if (started) return;
   started = true;
@@ -96,6 +101,10 @@ export function startTeamRole() {
     setTimeout(tick, delay);
   };
   void tick();
+  void listen("team:kicked-out", () => {
+    toast.err("Tài khoản của bạn đã bị thu hồi quyền hoặc mã đã hết hiệu lực. Cần mã mới từ người cấp trên.");
+    void useTeam.getState().refresh();
+  });
 }
 
 /** Members cannot add, change or delete anything. Fails closed: once a team is
