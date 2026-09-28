@@ -1415,7 +1415,7 @@ fn build_bulk_template_xlsx() -> Result<Vec<u8>, String> {
     use std::io::Write;
     let rows: [[&str; 6]; 3] = [
         ["Tên", "Thư mục", "Ghi chú", "Proxy", "Loại proxy", "Màu"],
-        ["FB 01", "Shop A", "Nick chạy quảng cáo", "socks5://user:pass@1.2.3.4:1080", "socks5", "#8b5cf6"],
+        ["FB 01", "Shop A", "Nick chạy quảng cáo", "1.2.3.4:1080:user:pass", "socks5", "#8b5cf6"],
         ["FB 02", "Shop B", "", "1.2.3.4:8080:user:pass", "http", "#22c55e"],
     ];
     let esc = |t: &str| t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
