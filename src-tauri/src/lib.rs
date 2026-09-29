@@ -268,7 +268,36 @@ fn host_ram_bucket_gb() -> u32 {
     }
 }
 
-/// Pick (hardware_concurrency, device_memory): Mac → curated table, Win/Linux → host-bracketed.
+/// (hardware_concurrency, deviceMemory) for a Windows/Linux fingerprint.
+///
+/// Never claims more than the host can honestly back (cores up to the host's
+/// own +2 threads, RAM up to what the host has), but is free to claim a smaller
+/// machine. It used to sit within 4 threads of the host and force 16+ GB on
+/// anything with 12+ threads, so on a typical modern PC every profile came out
+/// as one of just two RAM values (16 or 32) and two core counts. RAM now follows
+/// the core count in tiers a real machine of that size comes in:
+/// ≤6 cores → 4/8/16, 8–10 → 8/16/32, 12+ → 16/32.
+fn pick_x86_hardware(host_cores: u32, host_ram: u32, mut rnd: impl FnMut() -> usize) -> (u32, u32) {
+    // Real x86 logical-core counts (SMT + Intel hybrid).
+    const X86_CORES: [u32; 9] = [4, 6, 8, 12, 16, 20, 24, 28, 32];
+    let lo = (host_cores / 3).max(4);
+    let hi = host_cores + 2;
+    let cand: Vec<u32> = X86_CORES.into_iter().filter(|&n| n >= lo && n <= hi).collect();
+    let cores = if cand.is_empty() {
+        X86_CORES
+            .into_iter()
+            .min_by_key(|&n| (n as i64 - host_cores as i64).abs())
+            .unwrap()
+    } else {
+        cand[rnd() % cand.len()]
+    };
+    let tier: &[u32] = if cores <= 6 { &[4, 8, 16] } else if cores <= 10 { &[8, 16, 32] } else { &[16, 32] };
+    let mem_cand: Vec<u32> = tier.iter().copied().filter(|&m| m <= host_ram).collect();
+    let mem = if mem_cand.is_empty() { host_ram } else { mem_cand[rnd() % mem_cand.len()] };
+    (cores, mem)
+}
+
+/// Pick (hardware_concurrency, device_memory): Mac → curated table, Win/Linux → host-bounded.
 pub(crate) fn randomize_hardware(payload: &mut serde_json::Map<String, Value>) {
     let model = payload
         .get("_meta")
@@ -285,36 +314,7 @@ pub(crate) fn randomize_hardware(payload: &mut serde_json::Map<String, Value>) {
     let (cores, mem): (u32, u32) = if let Some(pool) = mac_hw_configs(model) {
         pool[pick8() % pool.len()]
     } else if platform == "Windows" || platform == "Linux" {
-        let c = host_logical_cores();
-        // Real x86 logical-core counts (SMT + Intel hybrid); bracket host within [C-4, C+2].
-        const X86_CORES: [u32; 9] = [4, 6, 8, 12, 16, 20, 24, 28, 32];
-        let lo = c.saturating_sub(4);
-        let hi = c + 2;
-        let cand: Vec<u32> = X86_CORES
-            .into_iter()
-            .filter(|&n| n >= lo && n <= hi)
-            .collect();
-        let cores = if cand.is_empty() {
-            X86_CORES
-                .into_iter()
-                .min_by_key(|&n| (n as i64 - c as i64).abs())
-                .unwrap()
-        } else {
-            cand[pick8() % cand.len()]
-        };
-        // deviceMemory: core-tied floor and host-RAM ceiling.
-        let real = host_ram_bucket_gb();
-        let floor = if cores >= 12 { 16 } else { 8 };
-        let mem_cand: Vec<u32> = [8u32, 16, 32]
-            .into_iter()
-            .filter(|&m| m >= floor && m <= real)
-            .collect();
-        let mem = if mem_cand.is_empty() {
-            real
-        } else {
-            mem_cand[pick8() % mem_cand.len()]
-        };
-        (cores, mem)
+        pick_x86_hardware(host_logical_cores(), host_ram_bucket_gb(), pick8)
     } else {
         return;
     };
@@ -1081,6 +1081,9 @@ struct BulkRow {
     /// scheme prefix of its own.
     #[serde(default)]
     kind: String,
+    /// "Windows" | "macOS" | "Linux" — blank means "pick any".
+    #[serde(default)]
+    os: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1100,7 +1103,21 @@ struct BulkParseRow {
     proxy: String,
     color: String,
     kind: String,
+    os: String,
     error: Option<String>,
+}
+
+/// The OS column of a bulk sheet: blank = automatic (Ok(None)); otherwise the
+/// canonical platform name a library fingerprint carries.
+fn parse_bulk_os(s: &str) -> Result<Option<&'static str>, ()> {
+    let t = s.trim().to_lowercase();
+    if t.is_empty() || t == "auto" || t == "tự động" || t == "tu dong" {
+        return Ok(None);
+    }
+    if t.starts_with("win") { return Ok(Some("Windows")); }
+    if t.starts_with("mac") || t == "osx" || t == "os x" || t == "darwin" { return Ok(Some("macOS")); }
+    if t.starts_with("linux") { return Ok(Some("Linux")); }
+    Err(())
 }
 
 fn is_valid_hex_color(s: &str) -> bool {
@@ -1375,6 +1392,7 @@ fn bulk_rows_from_table(rows: Vec<Vec<String>>) -> Vec<BulkParseRow> {
     let proxy_i = ci(&["proxy"]);
     let color_i = ci(&["color", "màu", "mau"]);
     let kind_i = ci(&["kind", "loại proxy", "loai proxy", "proxy type", "protocol", "loại", "loai"]);
+    let os_i = ci(&["os", "hệ điều hành", "he dieu hanh", "hđh", "hdh", "platform", "nền tảng", "nen tang"]);
     let has_header = name_i.is_some() || proxy_i.is_some() || notes_i.is_some();
     let start = if has_header { 1 } else { 0 };
     let mut out = Vec::new();
@@ -1384,10 +1402,10 @@ fn bulk_rows_from_table(rows: Vec<Vec<String>>) -> Vec<BulkParseRow> {
         }
         let at = |i: usize| cols.get(i).map(|s| s.trim().to_string()).unwrap_or_default();
         let g = |opt: Option<usize>| opt.map(&at).unwrap_or_default();
-        let (name, folder, notes, proxy, color, kind) = if has_header {
-            (g(name_i), g(folder_i), g(notes_i), g(proxy_i), g(color_i), g(kind_i))
+        let (name, folder, notes, proxy, color, kind, os) = if has_header {
+            (g(name_i), g(folder_i), g(notes_i), g(proxy_i), g(color_i), g(kind_i), g(os_i))
         } else {
-            (at(0), at(1), at(2), at(3), at(4), at(5))
+            (at(0), at(1), at(2), at(3), at(4), at(5), at(6))
         };
         let mut err: Option<String> = None;
         // Report the kind that will actually be used, not just the raw column
@@ -1399,13 +1417,17 @@ fn bulk_rows_from_table(rows: Vec<Vec<String>>) -> Vec<BulkParseRow> {
             err = Some("thiếu name".into());
         } else if !color.is_empty() && !is_valid_hex_color(&color) && !is_valid_hex_color(&format!("#{color}")) {
             err = Some("color phải dạng #rrggbb".into());
+        } else if parse_bulk_os(&os).is_err() {
+            err = Some("hệ điều hành chỉ nhận Windows / macOS / Linux (để trống = tự động)".into());
         } else if !proxy.is_empty() {
             match proxy::parse_single_with_kind(&proxy, proxy::ProxyKind::parse(&kind)) {
                 Some(entry) => effective_kind = entry.kind.as_str().to_string(),
                 None => err = Some("proxy không hợp lệ".into()),
             }
         }
-        out.push(BulkParseRow { row: idx + 1, name, folder, notes, proxy, color, kind: effective_kind, error: err });
+        // Shown (and later sent back) as the canonical name, or blank for automatic.
+        let os = parse_bulk_os(&os).ok().flatten().unwrap_or("").to_string();
+        out.push(BulkParseRow { row: idx + 1, name, folder, notes, proxy, color, kind: effective_kind, os, error: err });
     }
     out
 }
@@ -1413,13 +1435,13 @@ fn bulk_rows_from_table(rows: Vec<Vec<String>>) -> Vec<BulkParseRow> {
 /// A ready-to-fill Excel sheet: header row (with the folder column), two example rows.
 fn build_bulk_template_xlsx() -> Result<Vec<u8>, String> {
     use std::io::Write;
-    let rows: [[&str; 6]; 3] = [
-        ["Tên", "Thư mục", "Ghi chú", "Proxy", "Loại proxy", "Màu"],
-        ["FB 01", "Shop A", "Nick chạy quảng cáo", "1.2.3.4:1080:user:pass", "socks5", "#8b5cf6"],
-        ["FB 02", "Shop B", "", "1.2.3.4:8080:user:pass", "http", "#22c55e"],
+    let rows: [[&str; 7]; 3] = [
+        ["Tên", "Thư mục", "Ghi chú", "Proxy", "Loại proxy", "Màu", "Hệ điều hành"],
+        ["FB 01", "Shop A", "Nick chạy quảng cáo", "1.2.3.4:1080:user:pass", "socks5", "#8b5cf6", "Windows"],
+        ["FB 02", "Shop B", "", "1.2.3.4:8080:user:pass", "http", "#22c55e", "macOS"],
     ];
     let esc = |t: &str| t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
-    let mut sheet = String::from(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols><col min="1" max="1" width="18" customWidth="1"/><col min="2" max="2" width="18" customWidth="1"/><col min="3" max="3" width="28" customWidth="1"/><col min="4" max="4" width="38" customWidth="1"/><col min="5" max="5" width="14" customWidth="1"/><col min="6" max="6" width="12" customWidth="1"/></cols><sheetData>"#);
+    let mut sheet = String::from(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols><col min="1" max="1" width="18" customWidth="1"/><col min="2" max="2" width="18" customWidth="1"/><col min="3" max="3" width="28" customWidth="1"/><col min="4" max="4" width="38" customWidth="1"/><col min="5" max="5" width="14" customWidth="1"/><col min="6" max="6" width="12" customWidth="1"/><col min="7" max="7" width="16" customWidth="1"/></cols><sheetData>"#);
     for (r, row) in rows.iter().enumerate() {
         sheet.push_str(&format!(r#"<row r="{}">"#, r + 1));
         for (c, v) in row.iter().enumerate() {
@@ -1480,6 +1502,23 @@ fn profile_bulk_create(rows: Vec<BulkRow>) -> Result<Vec<BulkCreateItem>, String
             out.push(BulkCreateItem { index: idx, ok: false, id: None, error: Some("color phải dạng #rrggbb".into()) });
             continue;
         }
+        // Resolved before the proxy is saved so a row that can't be built never
+        // leaves a stray proxy behind.
+        let want_os = match parse_bulk_os(&r.os) {
+            Ok(w) => w,
+            Err(()) => {
+                out.push(BulkCreateItem { index: idx, ok: false, id: None, error: Some("hệ điều hành chỉ nhận Windows / macOS / Linux".into()) });
+                continue;
+            }
+        };
+        let candidates: Vec<&fingerprints::LibraryEntry> = match want_os {
+            Some(os) => fps.iter().filter(|f| f.platform == os).collect(),
+            None => fps.iter().collect(),
+        };
+        if candidates.is_empty() {
+            out.push(BulkCreateItem { index: idx, ok: false, id: None, error: Some(format!("thư viện chưa có fingerprint {}", want_os.unwrap_or("nào"))) });
+            continue;
+        }
         let proxy_id: Option<String> = if r.proxy.trim().is_empty() {
             None
         } else {
@@ -1505,9 +1544,9 @@ fn profile_bulk_create(rows: Vec<BulkRow>) -> Result<Vec<BulkCreateItem>, String
             r.name.hash(&mut h);
             idx.hash(&mut h);
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos().hash(&mut h);
-            (h.finish() as usize) % fps.len()
+            (h.finish() as usize) % candidates.len()
         };
-        let tpl_id = fps[pick].id.clone();
+        let tpl_id = candidates[pick].id.clone();
         let mut merged = match merge_library_fingerprint(&tpl_id) {
             Ok(m) => m,
             Err(e) => {
@@ -3432,6 +3471,7 @@ mod bulk_file_tests {
         assert_eq!(rows[1].notes, "");
         assert_eq!(rows[1].proxy, "1.2.3.4:8080:user:pass");
         assert_eq!(rows[1].kind, "http");
+        assert_eq!((rows[0].os.as_str(), rows[1].os.as_str()), ("Windows", "macOS"));
         assert!(rows.iter().all(|r| r.error.is_none()), "{:?}", rows.iter().map(|r| &r.error).collect::<Vec<_>>());
     }
 
@@ -3452,10 +3492,10 @@ mod bulk_file_tests {
         std::fs::create_dir_all(&tmp).unwrap();
         store::set_data_root(Some(tmp.clone()));
         let rows = vec![
-            BulkRow { name: "Bulk A".into(), folder: "Ads".into(), notes: "n1".into(), proxy: String::new(), color: "#8b5cf6".into(), kind: String::new() },
-            BulkRow { name: "Bulk B".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: "22c55e".into(), kind: String::new() },
-            BulkRow { name: "Bulk C".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: "zzz".into(), kind: String::new() },
-            BulkRow { name: "  ".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new() },
+            BulkRow { name: "Bulk A".into(), folder: "Ads".into(), notes: "n1".into(), proxy: String::new(), color: "#8b5cf6".into(), kind: String::new(), os: String::new() },
+            BulkRow { name: "Bulk B".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: "22c55e".into(), kind: String::new(), os: String::new() },
+            BulkRow { name: "Bulk C".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: "zzz".into(), kind: String::new(), os: String::new() },
+            BulkRow { name: "  ".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new(), os: String::new() },
         ];
         let res = profile_bulk_create(rows).expect("create");
         let summary: Vec<String> = res.iter().map(|r| format!("{}:{}:{:?}", r.index, r.ok, r.error)).collect();
@@ -3470,5 +3510,132 @@ mod bulk_file_tests {
         assert_eq!(list.len(), 2);
         assert!(names.contains(&("Bulk A".into(), "Ads".into(), "#8b5cf6".into())));
         assert!(names.contains(&("Bulk B".into(), String::new(), "#22c55e".into())));
+    }
+    #[test]
+    fn os_column_accepts_common_spellings_and_rejects_typos() {
+        assert_eq!(parse_bulk_os(""), Ok(None));
+        assert_eq!(parse_bulk_os("  Auto "), Ok(None));
+        assert_eq!(parse_bulk_os("Windows"), Ok(Some("Windows")));
+        assert_eq!(parse_bulk_os("win 11"), Ok(Some("Windows")));
+        assert_eq!(parse_bulk_os("macOS"), Ok(Some("macOS")));
+        assert_eq!(parse_bulk_os("Mac"), Ok(Some("macOS")));
+        assert_eq!(parse_bulk_os("OSX"), Ok(Some("macOS")));
+        assert_eq!(parse_bulk_os("Linux"), Ok(Some("Linux")));
+        assert_eq!(parse_bulk_os("android"), Err(()));
+        assert_eq!(parse_bulk_os("beos"), Err(()));
+
+        let rows = bulk_rows_from_table(vec![
+            vec!["Tên".into(), "Hệ điều hành".into()],
+            vec!["A".into(), "mac".into()],
+            vec!["B".into(), "".into()],
+            vec!["C".into(), "beos".into()],
+        ]);
+        assert_eq!(rows[0].os, "macOS");
+        assert_eq!(rows[1].os, "");
+        assert!(rows[0].error.is_none() && rows[1].error.is_none());
+        assert!(rows[2].error.as_deref().unwrap_or("").contains("hệ điều hành"));
+    }
+
+    /// The OS column picks a fingerprint of that platform; blank stays automatic.
+    /// RAM and core count are never taken from the sheet — they are re-rolled
+    /// per profile from realistic pools, so two profiles need not match.
+    #[test]
+    fn bulk_create_honours_the_os_column_and_leaves_hardware_automatic() {
+        let _g = cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-bulk-os-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        store::set_data_root(Some(tmp.clone()));
+        let available: std::collections::BTreeSet<String> =
+            fingerprints::list_all().unwrap().into_iter().map(|f| f.platform).collect();
+        println!("library platforms: {available:?}");
+        let mut rows = Vec::new();
+        for (i, os) in ["Windows", "macOS", "Windows", "macOS"].iter().enumerate() {
+            rows.push(BulkRow { name: format!("OS {i}"), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new(), os: (*os).into() });
+        }
+        rows.push(BulkRow { name: "OS auto".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new(), os: String::new() });
+        rows.push(BulkRow { name: "OS bad".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new(), os: "beos".into() });
+        let res = profile_bulk_create(rows).expect("create");
+        let summary: Vec<String> = res.iter().map(|r| format!("{}:{}:{:?}", r.index, r.ok, r.error)).collect();
+        println!("{}", summary.join("\n"));
+
+        let mut seen: Vec<(String, String, Option<u64>, Option<u64>)> = Vec::new();
+        for r in res.iter().filter(|r| r.ok) {
+            let stored = profile::load_raw(r.id.as_ref().unwrap()).unwrap();
+            let nav = stored.config.get("navigator").cloned().unwrap_or(Value::Null);
+            let name = stored.config.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            seen.push((
+                name,
+                nav.get("platform").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                nav.get("hardware_concurrency").and_then(|v| v.as_u64()),
+                nav.get("device_memory").and_then(|v| v.as_u64()),
+            ));
+        }
+        println!("{seen:?}");
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert!(!res[5].ok && res[5].error.as_deref().unwrap_or("").contains("hệ điều hành"), "{summary:?}");
+        for (name, platform, cores, mem) in &seen {
+            let want = match name.as_str() { "OS 0" | "OS 2" => Some("Windows"), "OS 1" | "OS 3" => Some("macOS"), _ => None };
+            if let Some(w) = want {
+                assert_eq!(platform, w, "{name}: {seen:?}");
+            }
+            // Present and realistic, whichever OS it landed on.
+            assert!(cores.is_some_and(|c| (2..=64).contains(&c)), "{name}: cores {cores:?}");
+            assert!(mem.is_some_and(|m| [4u64, 8, 16, 32, 64].contains(&m)), "{name}: memory {mem:?}");
+        }
+        // An OS the library has no fingerprint for is reported, not silently swapped.
+        for (i, os) in ["Windows", "macOS"].iter().enumerate() {
+            if !available.contains(*os) {
+                assert!(!res[i].ok && res[i].error.as_deref().unwrap_or("").contains("chưa có fingerprint"), "{summary:?}");
+            } else {
+                assert!(res[i].ok, "{summary:?}");
+            }
+        }
+        assert!(res[4].ok, "blank OS stays automatic: {summary:?}");
+    }
+}
+
+#[cfg(test)]
+mod hardware_variety_tests {
+    use super::pick_x86_hardware;
+    use std::collections::BTreeSet;
+
+    /// Every value a host can produce, by feeding the picker each random byte.
+    fn all(host_cores: u32, host_ram: u32) -> Vec<(u32, u32)> {
+        let mut out = Vec::new();
+        for a in 0..=255usize {
+            for b in 0..=255usize {
+                let mut seq = [a, b].into_iter();
+                out.push(pick_x86_hardware(host_cores, host_ram, || seq.next().unwrap_or(0)));
+            }
+        }
+        out
+    }
+
+    /// A 16-thread, 32 GB PC used to yield only {12,16} cores and {16,32} GB.
+    #[test]
+    fn a_big_host_no_longer_collapses_to_two_ram_values() {
+        let all = all(16, 32);
+        let ram: BTreeSet<u32> = all.iter().map(|x| x.1).collect();
+        let cores: BTreeSet<u32> = all.iter().map(|x| x.0).collect();
+        assert!(ram.is_superset(&BTreeSet::from([4, 8, 16, 32])), "{ram:?}");
+        assert!(cores.len() >= 4, "{cores:?}");
+    }
+
+    #[test]
+    fn claims_stay_believable_for_the_host_and_for_each_other() {
+        for (hc, hr) in [(4, 8), (8, 16), (12, 16), (16, 32), (24, 32), (32, 32)] {
+            for (cores, mem) in all(hc, hr) {
+                assert!(cores <= hc + 2, "host {hc}c/{hr}G claimed {cores} cores");
+                assert!(mem <= hr, "host {hc}c/{hr}G claimed {mem} GB");
+                if cores >= 12 {
+                    assert!(mem >= 16 || hr < 16, "{cores} cores with only {mem} GB");
+                }
+                if cores > 6 {
+                    assert!(mem >= 8, "{cores} cores with only {mem} GB");
+                }
+            }
+        }
     }
 }
