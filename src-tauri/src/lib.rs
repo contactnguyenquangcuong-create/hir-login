@@ -1511,9 +1511,15 @@ fn profile_bulk_create(rows: Vec<BulkRow>) -> Result<Vec<BulkCreateItem>, String
                 continue;
             }
         };
+        // Blank = automatic, but among desktop systems only: the library also
+        // holds phone fingerprints (Android), which a desktop team sheet must
+        // never turn into a mobile profile by chance.
         let candidates: Vec<&fingerprints::LibraryEntry> = match want_os {
             Some(os) => fps.iter().filter(|f| f.platform == os).collect(),
-            None => fps.iter().collect(),
+            None => {
+                let desktop: Vec<_> = fps.iter().filter(|f| matches!(f.platform.as_str(), "Windows" | "macOS" | "Linux")).collect();
+                if desktop.is_empty() { fps.iter().collect() } else { desktop }
+            }
         };
         if candidates.is_empty() {
             out.push(BulkCreateItem { index: idx, ok: false, id: None, error: Some(format!("thư viện chưa có fingerprint {}", want_os.unwrap_or("nào"))) });
@@ -3593,6 +3599,8 @@ mod bulk_file_tests {
             }
         }
         assert!(res[4].ok, "blank OS stays automatic: {summary:?}");
+        let auto = seen.iter().find(|x| x.0 == "OS auto").expect("auto row created");
+        assert!(["Windows", "macOS", "Linux"].contains(&auto.1.as_str()), "automatic never picks a phone: {}", auto.1);
     }
 }
 

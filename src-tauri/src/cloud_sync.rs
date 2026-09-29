@@ -96,6 +96,11 @@ struct StateItem {
 struct SyncState {
     #[serde(default)]
     items: HashMap<String, StateItem>,
+    /// Profiles whose last close did not reach the server. This machine holds
+    /// the newest copy (a fresh login, for one) that the server does not have,
+    /// so the next open must not pull the server's older copy over it.
+    #[serde(default)]
+    pending: std::collections::HashSet<String>,
 }
 
 fn state_lock() -> &'static Mutex<()> {
@@ -171,11 +176,14 @@ fn active_config() -> Result<Option<(SyncConfig, String, String)>> {
 /// What the team server said no to, as a message the UI can translate.
 async fn denied(resp: reqwest::Response, what: &str) -> anyhow::Error {
     let code = resp.status().as_u16();
-    let reason = resp.json::<serde_json::Value>().await.ok()
-        .and_then(|v| v.get("reason").and_then(|r| r.as_str().map(String::from)))
+    let body = resp.json::<serde_json::Value>().await.ok();
+    let text = |k: &str| body.as_ref()
+        .and_then(|v| v.get(k).and_then(|r| r.as_str().map(String::from)))
         .unwrap_or_default();
+    let (reason, error) = (text("reason"), text("error"));
     match (code, reason.as_str()) {
         (404, _) => anyhow::anyhow!("permission denied: no access to this profile"),
+        (403, _) if error.contains("hold the lock") => anyhow::anyhow!("you do not hold the lock for this profile"),
         (403, "edit") => anyhow::anyhow!("permission denied: you may use this profile but not change its settings"),
         (403, "add") => anyhow::anyhow!("permission denied: only an admin or manager can add"),
         (403, "move") => anyhow::anyhow!("permission denied: you may not move this profile to another folder"),
@@ -565,6 +573,69 @@ fn install_bundled_extensions(bundled: HashMap<String, Vec<(String, Vec<u8>)>>) 
     }
 }
 
+/// Takes (or renews) this device's lock on a profile: pushes the expiry out
+/// while we still hold it, and re-acquires it if it lapsed or the server
+/// forgot it — but never takes it from another device (409).
+async fn relock(c: &reqwest::Client, base: &str, token: &str, id: &str, holder: &str) -> Result<()> {
+    let resp = c
+        .post(format!("{base}/profiles/{id}/lock"))
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "holder": holder }))
+        .send()
+        .await
+        .context("renew lock")?;
+    if resp.status().as_u16() == 401 { kicked_out(); }
+    if resp.status().as_u16() == 409 {
+        let body: serde_json::Value = resp.json().await.unwrap_or_default();
+        let other = body.get("holder").and_then(|v| v.as_str()).unwrap_or("another device");
+        anyhow::bail!("profile is now held by {other}; this session could not be saved to the server");
+    }
+    if !resp.status().is_success() {
+        return Err(denied(resp, "lock request").await);
+    }
+    Ok(())
+}
+
+/// The lock a profile is opened under lasts 6 hours and nothing renewed it, so
+/// a profile left open past that lost the right to save: the close-time upload
+/// was refused, the failure only went to a log, and the next open replaced the
+/// local copy (with the fresh login in it) by the older one on the server.
+/// While the profile runs, renew it every half hour.
+fn keep_lock_alive(profile_id: &str, holder: &str) {
+    static RUNNING: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    let set = RUNNING.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+    if !set.lock().map(|mut s| s.insert(profile_id.to_string())).unwrap_or(false) {
+        return; // one heartbeat per profile is enough
+    }
+    let (id, holder) = (profile_id.to_string(), holder.to_string());
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(30 * 60)).await;
+            if !crate::process::Tracker::shared().is_running(&id) {
+                break;
+            }
+            let Ok(Some((_cfg, base, token))) = active_config() else { break };
+            if let Err(e) = relock(&client(), &base, &token, &id, &holder).await {
+                eprintln!("[sync] renewing the lock on {id}: {e:#}");
+            }
+        }
+        if let Ok(mut s) = set.lock() {
+            s.remove(&id);
+        }
+    });
+}
+
+/// Tells the UI a close did not reach the server, so it is never silent.
+fn report_checkin_failed(profile_id: &str, err: &anyhow::Error) {
+    let name = crate::profile::load_raw(profile_id).ok()
+        .and_then(|p| p.config.get("name").and_then(|v| v.as_str().map(String::from)))
+        .unwrap_or_else(|| profile_id.to_string());
+    if let Some(app) = crate::app_handle() {
+        use tauri::Emitter;
+        let _ = app.emit("sync:checkin-failed", serde_json::json!({ "id": profile_id, "name": name, "error": format!("{err:#}") }));
+    }
+}
+
 /// Call before spawning the browser. Locks the profile on the server (fails
 /// loudly if another device holds it) and pulls its latest bundle down. A
 /// no-op when sync isn't configured.
@@ -589,6 +660,15 @@ pub async fn checkout(profile_id: &str) -> Result<()> {
     }
     if !resp.status().is_success() {
         return Err(denied(resp, "lock request").await);
+    }
+    keep_lock_alive(profile_id, &holder);
+
+    // The last close never reached the server, so this machine's copy is the
+    // newer one. Pulling now would replace it — the login included — with the
+    // older copy still on the server. Keep it; the next close saves it.
+    if load_state().pending.contains(profile_id) {
+        eprintln!("[sync] {profile_id}: last close was not saved to the server — keeping this machine's copy");
+        return Ok(());
     }
 
     let resp = c
@@ -625,17 +705,33 @@ pub async fn checkin(profile_id: &str) -> Result<()> {
     let holder = device_name(&cfg);
     let c = client();
 
-    let bytes = build_bundle(profile_id).context("zip profile for upload")?;
-    let resp = c
-        .put(format!("{base}/profiles/{profile_id}/bundle"))
-        .bearer_auth(&token)
-        .header("X-Sync-Holder", &holder)
-        .body(bytes)
-        .send()
-        .await
-        .context("upload profile bundle")?;
-    if !resp.status().is_success() {
-        anyhow::bail!("sync server rejected the upload: {}", resp.status());
+    let upload: Result<()> = async {
+        let bytes = build_bundle(profile_id).context("zip profile for upload")?;
+        // Renew first: the lock is only good for 6 hours, and an upload without
+        // it is refused.
+        relock(&c, &base, &token, profile_id, &holder).await?;
+        let resp = c
+            .put(format!("{base}/profiles/{profile_id}/bundle"))
+            .bearer_auth(&token)
+            .header("X-Sync-Holder", &holder)
+            .body(bytes)
+            .send()
+            .await
+            .context("upload profile bundle")?;
+        if resp.status().as_u16() == 401 { kicked_out(); }
+        if !resp.status().is_success() {
+            return Err(denied(resp, "upload").await);
+        }
+        Ok(())
+    }
+    .await;
+    match upload {
+        Ok(()) => update_state(|st| { st.pending.remove(profile_id); }),
+        Err(e) => {
+            update_state(|st| { st.pending.insert(profile_id.to_string()); });
+            report_checkin_failed(profile_id, &e);
+            return Err(e);
+        }
     }
     unlock(&base, &token, profile_id, &holder).await?;
     mark_synced(profile_id).await;
@@ -1079,15 +1175,23 @@ pub async fn sync_round() -> Result<usize> {
             continue;
         };
 
-        if r.updated_at.as_deref().is_some_and(|u| u != known.remote) {
+        // A profile whose last close never reached the server holds the newer
+        // copy (a fresh login): send it up rather than pulling the older one over it.
+        let unsaved = state.pending.contains(id);
+        if !unsaved && r.updated_at.as_deref().is_some_and(|u| u != known.remote) {
             match pull_profile(&base, &token, id).await {
                 Ok(true) => { changed += 1; touched.push(id.to_string()); }
                 Ok(false) => {}
                 Err(e) => eprintln!("[sync] update {id}: {e:#}"),
             }
-        } else if local_edit_time(id) > known.at || proxy_signature(id) != known.proxy {
+        } else if unsaved || local_edit_time(id) > known.at || proxy_signature(id) != known.proxy {
             match push_profile(&base, &token, &holder, id).await {
-                Ok(true) => touched.push(id.to_string()),
+                Ok(true) => {
+                    touched.push(id.to_string());
+                    if unsaved {
+                        update_state(|st| { st.pending.remove(id); });
+                    }
+                }
                 Ok(false) => {}
                 Err(e) => eprintln!("[sync] push {id}: {e:#}"),
             }
@@ -1424,6 +1528,136 @@ mod tests {
         assert!(!after.sync.enabled, "sync should be switched off locally once the token is rejected");
         assert_eq!(after.sync.server_url, None);
         assert_eq!(after.sync.token, None);
+    }
+
+    /// Runs `body` against a live team server, with this machine set up as
+    /// "machine-a" and one profile ("sess-1") holding a login cookie.
+    async fn with_synced_profile<F, Fut>(body: F)
+    where
+        F: FnOnce(String, String, std::path::PathBuf) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        let _g = TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-sess-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        store::set_data_root(Some(tmp.clone()));
+        let token = "session-test-token-1234".to_string();
+        let port = crate::team_server::start(0, token.clone()).await.expect("start");
+        let base = format!("http://127.0.0.1:{port}");
+        let mut s = settings::load().unwrap();
+        s.sync.enabled = true;
+        s.sync.server_url = Some(base.clone());
+        s.sync.token = Some(token.clone());
+        s.sync.device_name = Some("machine-a".into());
+        s.sync.slim_local = false;
+        settings::save(&s).unwrap();
+        let mut stored = crate::profile::StoredProfile::default();
+        stored.meta.id = "sess-1".into();
+        stored.config.insert("name".into(), serde_json::json!("Session test"));
+        crate::profile::save_raw(&mut stored).unwrap();
+        let cookies = store::user_data_root().unwrap().join("sess-1/Default/Cookies");
+        std::fs::create_dir_all(cookies.parent().unwrap()).unwrap();
+        std::fs::write(&cookies, "logged-out").unwrap();
+
+        body(base, token, cookies).await;
+
+        let _ = crate::team_server::stop();
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The cookie file inside the bundle the server currently holds.
+    async fn server_cookie(base: &str, token: &str) -> String {
+        let bytes = client().get(format!("{base}/profiles/sess-1/bundle")).bearer_auth(token)
+            .send().await.unwrap().bytes().await.unwrap();
+        let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).unwrap();
+        let mut f = z.by_name("user-data/Default/Cookies").unwrap();
+        let mut out = String::new();
+        f.read_to_string(&mut out).unwrap();
+        out
+    }
+
+    /// A profile that has been logged into carries megabytes of state (local
+    /// storage, IndexedDB, cookies). axum caps a request body at 2 MB unless told
+    /// otherwise, so the server refused every such close with 413 — a fresh,
+    /// empty profile saved fine, a logged-in one never did, and the next open
+    /// pulled the old empty copy back over it: "log in, close, reopen, logged out".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_logged_in_profile_bigger_than_two_megabytes_saves_and_comes_back() {
+        with_synced_profile(|base, token, cookies| async move {
+            checkout("sess-1").await.expect("open");
+            // Incompressible, so the zipped bundle really is ~6 MB.
+            let big: Vec<u8> = (0..400_000).flat_map(|_| *uuid::Uuid::new_v4().as_bytes()).collect();
+            let idb = cookies.parent().unwrap().join("IndexedDB/https_mail.google.com_0.indexeddb.leveldb/000005.ldb");
+            std::fs::create_dir_all(idb.parent().unwrap()).unwrap();
+            std::fs::write(&idb, &big).unwrap();
+            std::fs::write(&cookies, "logged-in").unwrap();
+            assert!(build_bundle("sess-1").unwrap().len() > 3_000_000, "the bundle must really exceed axum's 2 MB default");
+
+            checkin("sess-1").await.expect("a big logged-in profile must save on close");
+            assert_eq!(server_cookie(&base, &token).await, "logged-in");
+
+            // Wipe the local copy the way a fresh machine (or a pull) would find it,
+            // then open again: everything comes back from the server.
+            std::fs::remove_file(&idb).unwrap();
+            std::fs::write(&cookies, "logged-out").unwrap();
+            checkout("sess-1").await.expect("reopen");
+            assert_eq!(std::fs::read_to_string(&cookies).unwrap(), "logged-in");
+            assert_eq!(std::fs::read(&idb).unwrap(), big);
+        }).await;
+    }
+
+    /// The lock a profile opens under lasts 6 hours and nothing renewed it, so a
+    /// profile left open past that could not be saved on close — silently — and
+    /// the next open pulled the older server copy over the fresh login. Closing
+    /// now renews the lock first, so a lapsed (or forgotten) lock no longer
+    /// costs the session.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn closing_saves_the_session_even_after_the_lock_lapsed() {
+        with_synced_profile(|base, token, cookies| async move {
+            checkout("sess-1").await.expect("open");
+            std::fs::write(&cookies, "logged-in").unwrap();
+            // The lock lapses / the server forgets it while the profile is open.
+            unlock(&base, &token, "sess-1", "machine-a").await.unwrap();
+
+            checkin("sess-1").await.expect("close saves despite the lost lock");
+
+            assert_eq!(server_cookie(&base, &token).await, "logged-in");
+            assert!(!load_state().pending.contains("sess-1"));
+        }).await;
+    }
+
+    /// If a close cannot be saved, the next open must not replace this
+    /// machine's newer copy (the login) with the older one on the server; the
+    /// following successful close then saves it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_close_is_not_overwritten_by_the_next_open() {
+        with_synced_profile(|base, token, cookies| async move {
+            checkout("sess-1").await.expect("open");
+            checkin("sess-1").await.expect("first close");
+            assert_eq!(server_cookie(&base, &token).await, "logged-out");
+
+            // Second session: log in, but another device grabs the lock before the close.
+            checkout("sess-1").await.expect("reopen");
+            std::fs::write(&cookies, "logged-in").unwrap();
+            unlock(&base, &token, "sess-1", "machine-a").await.unwrap();
+            let steal = client().post(format!("{base}/profiles/sess-1/lock")).bearer_auth(&token)
+                .json(&serde_json::json!({"holder": "machine-b"})).send().await.unwrap();
+            assert!(steal.status().is_success());
+
+            assert!(checkin("sess-1").await.is_err(), "close cannot be saved while another device holds it");
+            assert!(load_state().pending.contains("sess-1"));
+            assert_eq!(server_cookie(&base, &token).await, "logged-out", "server still has the old copy");
+
+            // The other device lets go; this machine opens the profile again.
+            unlock(&base, &token, "sess-1", "machine-b").await.unwrap();
+            checkout("sess-1").await.expect("reopen again");
+            assert_eq!(std::fs::read_to_string(&cookies).unwrap(), "logged-in", "the login survived the reopen");
+
+            checkin("sess-1").await.expect("close saves now");
+            assert_eq!(server_cookie(&base, &token).await, "logged-in");
+            assert!(!load_state().pending.contains("sess-1"));
+        }).await;
     }
 
     fn write_ext(dir: &std::path::Path, name: &str, version: &str) {

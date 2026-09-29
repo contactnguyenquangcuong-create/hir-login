@@ -1046,6 +1046,35 @@ pub fn running_info() -> Option<(u16, String)> {
         .and_then(|g| g.as_ref().map(|s| (s.port, s.token.clone())))
 }
 
+/// Refuses an unauthenticated request before its body is read (see `big_upload`).
+async fn require_token(
+    axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if authenticate(req.headers(), &state.token).is_none() {
+        return unauthorized();
+    }
+    next.run(req).await
+}
+
+/// A PUT route that may carry a whole profile. axum cuts every request body at
+/// 2 MB by default, which is far below what a logged-in profile holds (local
+/// storage, IndexedDB, cookies): the server dropped the connection on every
+/// such upload, so a profile that had been logged into could never be saved and
+/// the next open restored the older, logged-out copy. The raised limit is only
+/// for these upload routes, and a caller must show a valid token first, so an
+/// anonymous peer cannot make the server buffer gigabytes.
+fn big_upload<H, T>(handler: H, state: &Arc<ServerState>) -> axum::routing::MethodRouter<Arc<ServerState>>
+where
+    H: axum::handler::Handler<T, Arc<ServerState>>,
+    T: 'static,
+{
+    axum::routing::put(handler)
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_BUNDLE_BYTES))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), require_token))
+}
+
 pub async fn start(port: u16, token: String) -> Result<u16> {
     if token.len() < 8 {
         anyhow::bail!("token phải dài ít nhất 8 ký tự");
@@ -1062,7 +1091,7 @@ pub async fn start(port: u16, token: String) -> Result<u16> {
         .route("/profiles", get(list_profiles))
         .route("/profiles/:id/lock", post(lock_profile))
         .route("/profiles/:id/unlock", post(unlock_profile))
-        .route("/profiles/:id/bundle", get(get_bundle).put(put_bundle))
+        .route("/profiles/:id/bundle", get(get_bundle).merge(big_upload(put_bundle, &state)))
         .route("/events/wait", get(wait_events))
         .route("/profiles/:id/delete", post(delete_profile))
         .route("/me", get(me))
@@ -1076,7 +1105,7 @@ pub async fn start(port: u16, token: String) -> Result<u16> {
         .route("/admin/folders/:folder/access", axum::routing::put(admin_folder_access))
         .route("/admin/audit", get(admin_audit))
         .route("/library/:kind", get(library_list))
-        .route("/library/:kind/:id", get(library_get).put(library_put))
+        .route("/library/:kind/:id", get(library_get).merge(big_upload(library_put, &state)))
         .with_state(state.clone());
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await
@@ -1419,6 +1448,38 @@ mod permission_tests {
         assert_eq!(body["error"], "a member with this name already exists");
         // Case-insensitive: "cuongpc" is the same clash to a human reading the list.
         assert_eq!(put_json(&c, admin, format!("{base}/admin/members"), json!({"name": "cuongpc", "role": "member"})).await.0, 400);
+
+        let _ = stop();
+        crate::store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// The upload routes accept bodies far beyond axum's 2 MB default (a logged-in
+    /// profile is megabytes), but only from a caller who has shown a valid token —
+    /// an anonymous peer is turned away before the server reads any of it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn big_uploads_need_a_token_before_the_body_is_read() {
+        let _g = crate::cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-acl-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        crate::store::set_data_root(Some(tmp.clone()));
+        let admin = "admin-token-123456";
+        let port = start(0, admin.to_string()).await.expect("start");
+        let base = format!("http://127.0.0.1:{port}");
+        let c = reqwest::Client::new();
+        let big = vec![7u8; 5 * 1024 * 1024];
+
+        for url in [format!("{base}/profiles/p1/bundle"), format!("{base}/library/fingerprints/f1")] {
+            let anon = c.put(&url).body(big.clone()).send().await;
+            // 401 (or the connection dropped once the server had said no): never accepted.
+            assert!(anon.map(|r| r.status().as_u16() == 401).unwrap_or(true), "{url}: anonymous upload");
+            let wrong = c.put(&url).bearer_auth("wrong-token-000").body(big.clone()).send().await;
+            assert!(wrong.map(|r| r.status().as_u16() == 401).unwrap_or(true), "{url}: wrong token");
+        }
+        // With the token the size is no longer the problem (this body is not a
+        // bundle, so the profile route answers 400 rather than 413).
+        let r = c.put(format!("{base}/profiles/p1/bundle")).bearer_auth(admin).header("x-sync-holder", "m").body(big).send().await.unwrap();
+        assert_eq!(r.status().as_u16(), 400);
 
         let _ = stop();
         crate::store::set_data_root(None);

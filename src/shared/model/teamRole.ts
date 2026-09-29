@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { settingsGet } from "../../entities/settings";
-import { toast } from "./toast";
+import { toast, useToastStore } from "./toast";
 
 export type TeamRole = "admin" | "manager" | "member";
 
@@ -104,6 +104,15 @@ export function startTeamRole() {
   void listen("team:kicked-out", () => {
     toast.err("Tài khoản của bạn đã bị thu hồi quyền hoặc mã đã hết hiệu lực. Cần mã mới từ người cấp trên.");
     void useTeam.getState().refresh();
+  });
+  // A profile closed but its state (logins included) did not reach the server.
+  // Never silent: the copy on this machine is kept and saved on the next close.
+  void listen<{ id: string; name: string; error: string }>("sync:checkin-failed", (e) => {
+    useToastStore.getState().push(
+      "err",
+      `Chưa lưu được phiên của profile "${e.payload.name}" lên server. Bản trên máy này được giữ nguyên và sẽ lưu lại ở lần đóng sau.`,
+      e.payload.error,
+    );
   });
 }
 

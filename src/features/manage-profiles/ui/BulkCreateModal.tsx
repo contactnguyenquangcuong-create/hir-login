@@ -87,7 +87,7 @@ function BulkCreateModal({ onClose }: { onClose: () => void }) {
           <div className="flex flex-col gap-1">
             <span className="text-label-sm text-text-strong-950">Bước 1: tải file mẫu và điền</span>
             <span className="text-paragraph-xs text-text-soft-400">
-              Các cột: <b>Tên</b> (bắt buộc), <b>Thư mục</b>, <b>Ghi chú</b>, <b>Proxy</b>, <b>Loại proxy</b> (http/https/socks5 — chỉ cần khi ô Proxy không có tiền tố như <code>http://</code>), <b>Màu</b> (#rrggbb), <b>Hệ điều hành</b> (Windows / macOS / Linux — để trống = tự động). Thư mục chưa có sẽ được tạo. Ngoài hệ điều hành, mọi thông số khác (fingerprint, RAM, số nhân…) đều tự chọn ngẫu nhiên.
+              Các cột: <b>Tên</b> (bắt buộc), <b>Thư mục</b>, <b>Ghi chú</b>, <b>Proxy</b>, <b>Loại proxy</b> (http/https/socks5 — chỉ cần khi ô Proxy không có tiền tố như <code>http://</code>), <b>Màu</b> (#rrggbb), <b>Hệ điều hành</b> (Windows / macOS / Linux — để trống = tự chọn ngẫu nhiên trong 3 hệ này). Thư mục chưa có sẽ được tạo. Ngoài hệ điều hành, mọi thông số khác (fingerprint, RAM, số nhân…) đều tự chọn ngẫu nhiên.
             </span>
           </div>
           <div><Button variant="neutral" mode="stroke" size="small" onClick={downloadTemplate}>Tải file Excel mẫu (.xlsx)</Button></div>
