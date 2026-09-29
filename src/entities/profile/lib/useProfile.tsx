@@ -11,7 +11,7 @@ import { proxyList, type ProxyEntry } from "../../proxy";
 import { fingerprintList, fingerprintGet, type FingerprintEntry } from "../../fingerprint";
 import type { ProfileMeta, ProfileForm } from "../model/types";
 import {
-  profileList, profileGet, profileSave, profileDelete, profileClone,
+  profileList, profileGet, profileSave, profileDelete, profileClone, profileBulkAndroidToDesktop,
   profileSetPin, profileSetFolder, profileBindProxy,
   profileExportFolder, profileImportFolder, syncActivity, syncKick,
   profileCreateFromTemplate, processList, processKill, launch, syncLaunch,
@@ -196,6 +196,8 @@ export type ProfileStore = {
   syncGroup: string | null;
   bulkStop: () => Promise<void>;
   bulkDelete: () => Promise<void>;
+  /** Turns the Android profiles in the selection into desktop ones (asks which OS). */
+  bulkAndroidToDesktop: () => Promise<void>;
   bulkExport: () => Promise<void>;
   /** Export the current selection (or every profile, if none selected) as a
    *  folder-per-profile bundle — carry it to another machine and import it
@@ -626,6 +628,36 @@ export const useProfile = create<ProfileStore>((set, get) => ({
     get().reload();
     storeBus.emit("profiles");
     toast.ok(t("useProfile.movedToTrash", { n: ids.length }));
+  },
+
+  bulkAndroidToDesktop: async () => {
+    const { selected, profiles } = get();
+    const ids = [...selected].filter((id) => profiles.find((p) => p.id === id)?.mobile);
+    if (ids.length === 0) return;
+    const os = await confirmModal({
+      title: `Đổi ${ids.length} profile Android sang máy tính`,
+      message:
+        "Chọn hệ điều hành mới. Tên, ghi chú, thư mục, proxy và màu được giữ nguyên; chỉ vân tay (fingerprint) và cấu hình phần cứng được tạo lại. " +
+        "Tài khoản đã đăng nhập trên profile đó có thể bị yêu cầu đăng nhập lại. Profile không phải Android trong phần đã chọn không bị đổi.",
+      buttons: [
+        { label: "Huỷ", value: "cancel" },
+        { label: "Tự động (Windows/macOS/Linux)", value: "auto" },
+        { label: "Windows", value: "Windows" },
+        { label: "macOS", value: "macOS" },
+        { label: "Linux", value: "Linux" },
+      ],
+    });
+    if (os == null || os === "cancel") return;
+    try {
+      const res = await profileBulkAndroidToDesktop(ids, os === "auto" ? "" : String(os));
+      const ok = res.filter((r) => r.ok).length;
+      const fail = res.filter((r) => !r.ok);
+      get().reload();
+      storeBus.emit("profiles");
+      if (ok > 0) toast.ok(`Đã đổi ${ok} profile sang máy tính${fail.length ? `, ${fail.length} lỗi` : ""}`);
+      if (fail.length > 0) toast.err(fail.map((f) => f.error).filter(Boolean).slice(0, 3).join("; "));
+      if (fail.length === 0) get().clearSelected();
+    } catch (e) { toast.err(String(e)); }
   },
 
   // Dump selected profile FingerprintConfigs as a JSON array to clipboard.

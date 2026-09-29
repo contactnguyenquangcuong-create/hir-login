@@ -8,6 +8,7 @@ import {
 } from "../../../shared/icons";
 import { useProfile, useSyncBlockReason } from "../../../entities/profile";
 import { useT } from "../../../shared/i18n";
+import { canEdit, useTeam } from "../../../shared/model/teamRole";
 
 export function BulkActionsBar() {
   const t = useT();
@@ -17,6 +18,11 @@ export function BulkActionsBar() {
   const bulkStop = useProfile((s) => s.bulkStop);
   const bulkExport = useProfile((s) => s.bulkExport);
   const bulkDelete = useProfile((s) => s.bulkDelete);
+  const bulkAndroidToDesktop = useProfile((s) => s.bulkAndroidToDesktop);
+  // Only offered when the selection really contains a phone profile.
+  const androidCount = useProfile((s) => s.profiles.filter((p) => s.selected.has(p.id) && p.mobile).length);
+  const role = useTeam((s) => s.role);
+  const configured = useTeam((s) => s.configured);
   const clearSelected = useProfile((s) => s.clearSelected);
   const syncBlocked = useSyncBlockReason();
 
@@ -46,6 +52,11 @@ export function BulkActionsBar() {
         </span>
       )}
       <Button variant="neutral" mode="stroke" className="pr-2" size="2xsmall" leftIcon={<StopIcon className="size-3.5" />} onClick={bulkStop}>{t("bulkActionsBar.stop")}</Button>
+      {androidCount > 0 && canEdit(role, configured) && (
+        <Button variant="neutral" mode="stroke" className="pr-2" size="2xsmall" onClick={bulkAndroidToDesktop}>
+          Đổi {androidCount} Android sang máy tính
+        </Button>
+      )}
       <Button variant="neutral" mode="stroke" className="pl-2" size="2xsmall" leftIcon={<UploadIcon className="size-3.5" />} onClick={bulkExport}>{t("bulkActionsBar.export")}</Button>
       <Button variant="error" mode="stroke" className="pr-2" size="2xsmall" leftIcon={<DeleteIcon className="size-3.5" />} onClick={bulkDelete}>{t("bulkActionsBar.delete")}</Button>
       <Button variant="neutral" mode="ghost" className="pr-2" size="2xsmall" onClick={clearSelected}>{t("bulkActionsBar.clear")}</Button>

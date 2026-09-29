@@ -5,6 +5,8 @@ export const profileList = () => invoke<ProfileMeta[]>("profile_list");
 export const profileGet = (id: string) => invoke<any>("profile_get", { id });
 export const profileSave = (payload: any) => invoke<ProfileMeta>("profile_save", { payload });
 export const profileDelete = (id: string) => invoke("profile_delete", { id });
+export const profileBulkAndroidToDesktop = (ids: string[], os: string) =>
+  invoke<{ index: number; ok: boolean; id: string | null; error: string | null }[]>("profile_bulk_android_to_desktop", { ids, os });
 export const profileClone = (id: string) => invoke<ProfileMeta>("profile_clone", { id });
 export const profileSetPin = (id: string, pinned: boolean) => invoke("profile_set_pin", { id, pinned });
 export const profileSetFolder = (id: string, folder: string) => invoke("profile_set_folder", { id, folder });

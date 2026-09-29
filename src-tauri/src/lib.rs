@@ -1488,6 +1488,78 @@ fn bulk_parse_file(path: String) -> Result<Vec<BulkParseRow>, String> {
     }
 }
 
+/// The library fingerprints a bulk operation may pick from. A named OS gets
+/// exactly that platform. Blank = automatic, but among desktop systems only:
+/// the library also holds phone fingerprints (Android), which a desktop team
+/// must never end up with by chance.
+fn fingerprint_candidates<'a>(fps: &'a [fingerprints::LibraryEntry], want_os: Option<&str>) -> Vec<&'a fingerprints::LibraryEntry> {
+    match want_os {
+        Some(os) => fps.iter().filter(|f| f.platform == os).collect(),
+        None => {
+            let desktop: Vec<_> = fps.iter().filter(|f| matches!(f.platform.as_str(), "Windows" | "macOS" | "Linux")).collect();
+            if desktop.is_empty() { fps.iter().collect() } else { desktop }
+        }
+    }
+}
+
+fn random_index(name: &str, idx: usize, len: usize) -> usize {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    name.hash(&mut h);
+    idx.hash(&mut h);
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos().hash(&mut h);
+    (h.finish() as usize) % len.max(1)
+}
+
+/// Turns profiles that came out as Android phones (an old Excel import with a
+/// blank OS could pick a phone fingerprint, which a desktop machine cannot run)
+/// into desktop ones: a new fingerprint of `os` (blank = any desktop system),
+/// hardware re-rolled. Name, notes, folder, proxy, colour and everything else
+/// about the profile stay. Only profiles that really are Android are touched;
+/// anything else in `ids` is left exactly as it is.
+#[tauri::command]
+fn profile_bulk_android_to_desktop(ids: Vec<String>, os: String) -> Result<Vec<BulkCreateItem>, String> {
+    let want_os = parse_bulk_os(&os).map_err(|_| "hệ điều hành chỉ nhận Windows / macOS / Linux".to_string())?;
+    let fps = fingerprints::list_all().map_err(|e| e.to_string())?;
+    let candidates = fingerprint_candidates(&fps, want_os);
+    if candidates.is_empty() { return Err(format!("thư viện chưa có fingerprint {}", want_os.unwrap_or("nào"))); }
+    let mut out = Vec::new();
+    for (idx, id) in ids.into_iter().enumerate() {
+        let fail = |e: &str| BulkCreateItem { index: idx, ok: false, id: Some(id.clone()), error: Some(e.to_string()) };
+        let mut stored = match profile::load_raw(&id) {
+            Ok(s) => s,
+            Err(e) => { out.push(fail(&e.to_string())); continue; }
+        };
+        if !profile::claims_mobile(&stored.config) {
+            out.push(fail("không phải profile Android — giữ nguyên"));
+            continue;
+        }
+        if process::Tracker::shared().is_running(&id) {
+            out.push(fail("đang chạy — hãy đóng profile trước"));
+            continue;
+        }
+        let tpl_id = candidates[random_index(&id, idx, candidates.len())].id.clone();
+        let mut merged = match merge_library_fingerprint(&tpl_id) {
+            Ok(m) => m,
+            Err(e) => { out.push(fail(&e)); continue; }
+        };
+        merged.remove("_meta");
+        for k in ["name", "notes"] {
+            if let Some(v) = stored.config.get(k) { merged.insert(k.into(), v.clone()); }
+        }
+        enrich_new_config(None, &mut merged);
+        ensure_default_noise(&mut merged);
+        stored.config = merged;
+        stored.meta.gpu_preset_id = Some(tpl_id);
+        match profile::save_raw(&mut stored) {
+            Ok(()) => out.push(BulkCreateItem { index: idx, ok: true, id: Some(id), error: None }),
+            Err(e) => out.push(fail(&e.to_string())),
+        }
+    }
+    Ok(out)
+}
+
 #[tauri::command]
 fn profile_bulk_create(rows: Vec<BulkRow>) -> Result<Vec<BulkCreateItem>, String> {
     let fps = fingerprints::list_all().map_err(|e| e.to_string())?;
@@ -1511,16 +1583,7 @@ fn profile_bulk_create(rows: Vec<BulkRow>) -> Result<Vec<BulkCreateItem>, String
                 continue;
             }
         };
-        // Blank = automatic, but among desktop systems only: the library also
-        // holds phone fingerprints (Android), which a desktop team sheet must
-        // never turn into a mobile profile by chance.
-        let candidates: Vec<&fingerprints::LibraryEntry> = match want_os {
-            Some(os) => fps.iter().filter(|f| f.platform == os).collect(),
-            None => {
-                let desktop: Vec<_> = fps.iter().filter(|f| matches!(f.platform.as_str(), "Windows" | "macOS" | "Linux")).collect();
-                if desktop.is_empty() { fps.iter().collect() } else { desktop }
-            }
-        };
+        let candidates = fingerprint_candidates(&fps, want_os);
         if candidates.is_empty() {
             out.push(BulkCreateItem { index: idx, ok: false, id: None, error: Some(format!("thư viện chưa có fingerprint {}", want_os.unwrap_or("nào"))) });
             continue;
@@ -1542,17 +1605,7 @@ fn profile_bulk_create(rows: Vec<BulkRow>) -> Result<Vec<BulkCreateItem>, String
                 }
             }
         };
-        // pick random fingerprint
-        let pick = {
-            use std::collections::hash_map::DefaultHasher;
-            use std::hash::{Hash, Hasher};
-            let mut h = DefaultHasher::new();
-            r.name.hash(&mut h);
-            idx.hash(&mut h);
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos().hash(&mut h);
-            (h.finish() as usize) % candidates.len()
-        };
-        let tpl_id = candidates[pick].id.clone();
+        let tpl_id = candidates[random_index(&r.name, idx, candidates.len())].id.clone();
         let mut merged = match merge_library_fingerprint(&tpl_id) {
             Ok(m) => m,
             Err(e) => {
@@ -3178,6 +3231,7 @@ pub fn run() {
             proxy_last_test,
             proxy_bulk_import,
             proxy_bulk_parse,
+            profile_bulk_android_to_desktop,
             proxy_bulk_save,
             launch,
             settings_get,
@@ -3517,6 +3571,56 @@ mod bulk_file_tests {
         assert!(names.contains(&("Bulk A".into(), "Ads".into(), "#8b5cf6".into())));
         assert!(names.contains(&("Bulk B".into(), String::new(), "#22c55e".into())));
     }
+    fn make_profile(fp_id: &str, name: &str, folder: &str) -> String {
+        let mut m = merge_library_fingerprint(fp_id).unwrap();
+        m.insert("name".into(), Value::String(name.into()));
+        m.insert("notes".into(), Value::String("keep me".into()));
+        m.get_mut("_meta").and_then(|v| v.as_object_mut()).unwrap().insert("folder".into(), Value::String(folder.into()));
+        save_profile_core(None, Value::Object(m), false).unwrap().id
+    }
+
+    /// Profiles an old Excel import turned into Android phones become desktop
+    /// ones without losing what the person set; everything else is left alone.
+    #[test]
+    fn android_profiles_are_converted_to_desktop_and_nothing_else_is_touched() {
+        let _g = cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-android-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        store::set_data_root(Some(tmp.clone()));
+        let fps = fingerprints::list_all().unwrap();
+        let android = fps.iter().find(|f| f.platform == "Android").expect("library has a phone").id.clone();
+        let win = fps.iter().find(|f| f.platform == "Windows").expect("library has Windows").id.clone();
+
+        let phone = make_profile(&android, "Phone", "Ads");
+        let desktop = make_profile(&win, "Desk", "Ads");
+        assert!(profile::claims_mobile(&profile::load_raw(&phone).unwrap().config));
+        let desk_before = serde_json::to_value(profile::load_raw(&desktop).unwrap()).unwrap();
+
+        let res = profile_bulk_android_to_desktop(vec![phone.clone(), desktop.clone(), "no-such-profile".into()], "macOS".into()).unwrap();
+        let summary: Vec<String> = res.iter().map(|r| format!("{}:{}:{:?}", r.index, r.ok, r.error)).collect();
+        println!("{}", summary.join("\n"));
+        let after = profile::load_raw(&phone).unwrap();
+        let desk_after = serde_json::to_value(profile::load_raw(&desktop).unwrap()).unwrap();
+        let nav = after.config.get("navigator").cloned().unwrap_or(Value::Null);
+        // Blank OS = any desktop system, never a phone.
+        let again = profile_bulk_android_to_desktop(vec![make_profile(&android, "Phone2", "")], String::new()).unwrap();
+        let again_cfg = profile::load_raw(again[0].id.as_ref().unwrap()).unwrap().config;
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert!(res[0].ok && !res[1].ok && !res[2].ok, "{summary:?}");
+        assert!(!profile::claims_mobile(&after.config), "still a phone");
+        assert_eq!(nav.get("platform").and_then(|v| v.as_str()), Some("macOS"));
+        assert!(nav.get("hardware_concurrency").is_some() && nav.get("device_memory").is_some());
+        assert_eq!(after.config.get("name").and_then(|v| v.as_str()), Some("Phone"));
+        assert_eq!(after.config.get("notes").and_then(|v| v.as_str()), Some("keep me"));
+        assert_eq!(after.meta.folder, "Ads");
+        assert_eq!(desk_before, desk_after, "a desktop profile in the selection must not change");
+        assert!(again[0].ok && !profile::claims_mobile(&again_cfg));
+        let plat = again_cfg.get("navigator").and_then(|n| n.get("platform")).and_then(|v| v.as_str()).unwrap_or("");
+        assert!(["Windows", "macOS", "Linux"].contains(&plat), "{plat}");
+    }
+
     #[test]
     fn os_column_accepts_common_spellings_and_rejects_typos() {
         assert_eq!(parse_bulk_os(""), Ok(None));
