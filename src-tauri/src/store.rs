@@ -100,16 +100,36 @@ pub fn widevine_cache_dir() -> Result<PathBuf> {
 }
 
 pub fn proxies_path() -> Result<PathBuf> {
-    Ok(config_root()?.join("proxies.json"))
+    Ok(user_files_root()?.join("proxies.json"))
 }
 
 pub fn settings_path() -> Result<PathBuf> {
-    Ok(config_root()?.join("settings.json"))
+    Ok(user_files_root()?.join("settings.json"))
+}
+
+/// Where the user's own small files live (settings, proxies, sync state).
+/// Production: the config dir.  Test builds: never the real one — a test that
+/// enables sync or saves a proxy must not leave that behind in the developer's
+/// installed app — so they follow the data-root override, or a throw-away
+/// per-process folder.
+#[cfg(not(test))]
+pub fn user_files_root() -> Result<PathBuf> {
+    config_root()
+}
+
+#[cfg(test)]
+pub fn user_files_root() -> Result<PathBuf> {
+    let over = data_root_cell().read().ok().and_then(|g| g.clone());
+    let p = over.unwrap_or_else(|| {
+        std::env::temp_dir().join(format!("hir-login-test-files-{}", std::process::id()))
+    });
+    std::fs::create_dir_all(&p)?;
+    Ok(p)
 }
 
 /// Folder-scoped bookmarks, merged into each profile's Bookmarks on launch.
 pub fn bookmarks_path() -> Result<PathBuf> {
-    Ok(config_root()?.join("bookmarks.json"))
+    Ok(user_files_root()?.join("bookmarks.json"))
 }
 
 /// Automation projects: one JSON file holding every project's blocks.

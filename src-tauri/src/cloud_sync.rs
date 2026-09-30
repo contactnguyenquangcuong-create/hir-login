@@ -109,7 +109,7 @@ fn state_lock() -> &'static Mutex<()> {
 }
 
 fn state_path() -> Result<std::path::PathBuf> {
-    Ok(store::config_root()?.join("sync-state.json"))
+    Ok(store::user_files_root()?.join("sync-state.json"))
 }
 
 fn load_state() -> SyncState {

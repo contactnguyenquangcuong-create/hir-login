@@ -886,7 +886,7 @@ struct HistoryStore {
 }
 
 fn history_path() -> Result<PathBuf> {
-    Ok(store::config_root()?.join("proxies-history.json"))
+    Ok(store::user_files_root()?.join("proxies-history.json"))
 }
 
 fn load_history() -> Result<HistoryStore> {
