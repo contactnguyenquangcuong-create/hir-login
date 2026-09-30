@@ -56,7 +56,23 @@ pub struct ProxyEntry {
 }
 
 impl ProxyEntry {
-    /// Build `--proxy-server=<scheme>://[user:pass@]host:port` for ShardX.
+    /// `--proxy-server` value for the browser engine: `<scheme>://[user:pass@]host:port`
+    /// with the login written exactly as it is. The engine does not decode percent
+    /// escapes, so the URL form below sent a password like `ab=` as `ab%3D` — which
+    /// the proxy then rejected (SOCKS5: no network; HTTP: a sign-in prompt). Every
+    /// other character tested (`+ @ : / # ? %` and spaces) passes through as written;
+    /// `= ; ,` in an HTTP proxy's login do not, and are handled by `proxy_relay`.
+    pub fn to_engine_arg(&self) -> String {
+        let scheme = self.kind.as_str();
+        let host_port = format!("{}:{}", self.host, self.port);
+        if self.username.is_empty() && self.password.is_empty() {
+            format!("{scheme}://{host_port}")
+        } else {
+            format!("{scheme}://{}:{}@{host_port}", self.username, self.password)
+        }
+    }
+
+    /// The same as a proper URL (percent-encoded) for HTTP clients such as `reqwest`.
     pub fn to_proxy_server_arg(&self) -> String {
         let scheme = self.kind.as_str();
         let host_port = format!("{}:{}", self.host, self.port);
@@ -1026,5 +1042,27 @@ pub fn country_to_timezone(cc: &str) -> &'static str {
         "SA" => "Asia/Riyadh",
         "AE" => "Asia/Dubai",
         _ => "UTC",
+    }
+}
+
+#[cfg(test)]
+mod engine_arg_tests {
+    use super::*;
+
+    fn p(kind: ProxyKind, user: &str, pass: &str) -> ProxyEntry {
+        ProxyEntry { id: String::new(), name: String::new(), kind, host: "h.example".into(), port: 55159, username: user.into(), password: pass.into(), country: String::new(), notes: String::new() }
+    }
+
+    /// The engine reads the login out of the argument as written and does not
+    /// decode percent escapes; encoding it made a password like `x==` arrive as
+    /// `x%3D%3D` and be refused (SOCKS5 no network, HTTP a sign-in prompt).
+    #[test]
+    fn the_engine_gets_the_login_as_written_and_http_clients_get_a_proper_url() {
+        let e = p(ProxyKind::Socks5, "liam432", "mzuwntg1odg0mw==");
+        assert_eq!(e.to_engine_arg(), "socks5://liam432:mzuwntg1odg0mw==@h.example:55159");
+        assert_eq!(e.to_proxy_server_arg(), "socks5://liam432:mzuwntg1odg0mw%3D%3D@h.example:55159");
+        let odd = p(ProxyKind::Http, "u", "p+ss @:/#?%");
+        assert_eq!(odd.to_engine_arg(), "http://u:p+ss @:/#?%@h.example:55159");
+        assert_eq!(p(ProxyKind::Http, "", "").to_engine_arg(), "http://h.example:55159");
     }
 }

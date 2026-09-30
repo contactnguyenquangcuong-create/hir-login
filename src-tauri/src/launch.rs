@@ -224,7 +224,22 @@ pub async fn launch_profile_synced(
     }
 
     if let Some(p) = bound_proxy.as_ref() {
-        cmd.arg(format!("--proxy-server={}", p.to_proxy_server_arg()));
+        // Never hand the engine a proxy setting it would silently drop: that is a
+        // direct connection from this machine's real IP.
+        if crate::proxy_relay::cannot_carry(p) {
+            anyhow::bail!(
+                "proxy HTTPS {}:{} có ký tự `=`, `;` hoặc `,` trong tên/mật khẩu — trình duyệt không nhận được và sẽ bỏ qua proxy (lộ IP thật). Đổi loại proxy sang HTTP hoặc SOCKS5.",
+                p.host, p.port
+            );
+        }
+        let proxy_arg = if crate::proxy_relay::needs_relay(p) {
+            let port = crate::proxy_relay::start(profile_id, p).await?;
+            eprintln!("[launcher] proxy {}:{} has `=`/`;`/`,` in its login — forwarding through 127.0.0.1:{port}", p.host, p.port);
+            format!("http://127.0.0.1:{port}")
+        } else {
+            p.to_engine_arg()
+        };
+        cmd.arg(format!("--proxy-server={proxy_arg}"));
 
         // QUIC: enable only when proxy UDP relay verified; rely on Alt-Svc upgrade path.
         if proxy_udp_ok {

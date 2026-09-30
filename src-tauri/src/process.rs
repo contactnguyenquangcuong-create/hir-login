@@ -98,6 +98,7 @@ impl Tracker {
             if let Ok(mut g) = Self::shared().inner.lock() {
                 g.remove(&profile_id);
             }
+            crate::proxy_relay::stop(&profile_id);
             // Bump the persisted total runtime; non-temporary only (temp
             // profiles get deleted next line so their counter is moot).
             if !temporary {

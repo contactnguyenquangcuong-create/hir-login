@@ -15,6 +15,7 @@ mod migrate;
 mod process;
 mod profile;
 mod proxy;
+mod proxy_relay;
 mod psapi;
 mod runtime;
 mod settings;
@@ -3652,6 +3653,36 @@ mod bulk_file_tests {
         assert_eq!(after.config, before.config, "fingerprint untouched");
         assert_eq!((after.meta.folder.as_str(), after.meta.color.clone()), (before.meta.folder.as_str(), before.meta.color.clone()));
         assert_eq!(after.meta.rev, before.meta.rev, "no config change, no revision bump");
+    }
+
+    /// Naming an OS must never end up on a phone fingerprint, however many rows
+    /// there are (a quarter of the library is Android, so a leak would show fast).
+    #[test]
+    fn a_named_os_never_lands_on_android_across_many_rows() {
+        let _g = cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-many-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        store::set_data_root(Some(tmp.clone()));
+        let oses = ["Windows", "macOS", "Linux", "windows", "MAC", "win", ""];
+        let rows: Vec<BulkRow> = (0..210)
+            .map(|i| BulkRow { name: format!("R{i}"), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new(), os: oses[i % oses.len()].into() })
+            .collect();
+        let res = profile_bulk_create(rows).expect("create");
+        let mut bad: Vec<String> = Vec::new();
+        let mut per_os: std::collections::BTreeMap<String, usize> = Default::default();
+        for (i, r) in res.iter().enumerate() {
+            assert!(r.ok, "row {i}: {:?}", r.error);
+            let cfg = profile::load_raw(r.id.as_ref().unwrap()).unwrap().config;
+            let platform = cfg.get("navigator").and_then(|n| n.get("platform")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let want = parse_bulk_os(oses[i % oses.len()]).unwrap();
+            if profile::claims_mobile(&cfg) { bad.push(format!("row {i} ({}) is a phone", oses[i % oses.len()])); }
+            if let Some(w) = want { if platform != w { bad.push(format!("row {i} asked {w}, got {platform}")); } }
+            *per_os.entry(platform).or_default() += 1;
+        }
+        println!("platforms created: {per_os:?}");
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(bad.is_empty(), "{bad:?}");
     }
 
     #[test]
