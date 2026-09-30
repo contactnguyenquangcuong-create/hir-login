@@ -30,9 +30,14 @@ pub struct Cookie {
     pub value: String,
     #[serde(default = "default_path")]
     pub path: String,
-    /// Unix seconds; None = session cookie.
-    #[serde(default)]
+    /// Unix seconds; None = session cookie. Browser extensions (Cookie-Editor,
+    /// EditThisCookie…) export this as `expirationDate` or `expiry`; Playwright uses
+    /// -1 for a session cookie.
+    #[serde(default, alias = "expirationDate", alias = "expiry")]
     pub expires: Option<f64>,
+    /// Extension exports say `"session": true` instead of leaving the expiry out.
+    #[serde(default, skip_serializing)]
+    pub session: bool,
     #[serde(default)]
     pub secure: bool,
     #[serde(default, alias = "httpOnly")]
@@ -306,7 +311,8 @@ fn samesite_to_str(v: i64) -> &'static str {
 }
 fn samesite_from_str(s: Option<&str>) -> i64 {
     match s.map(|x| x.to_ascii_lowercase()).as_deref() {
-        Some("none") => 0,
+        // "no_restriction" is what EditThisCookie-style exports call SameSite=None.
+        Some("none") | Some("no_restriction") => 0,
         Some("lax") => 1,
         Some("strict") => 2,
         _ => -1,
@@ -366,6 +372,7 @@ pub fn export(profile_id: &str) -> Result<Vec<Cookie>> {
             } else {
                 None
             },
+            session: has_expires == 0,
             secure: is_secure != 0,
             http_only: is_httponly != 0,
             same_site: Some(samesite_to_str(samesite).to_string()),
@@ -376,6 +383,108 @@ pub fn export(profile_id: &str) -> Result<Vec<Cookie>> {
         out.push(c?);
     }
     Ok(out)
+}
+
+/// The expiry to store, or None for a session cookie: not when flagged `session`,
+/// not for the -1 / 0 some tools use for "none", and millisecond timestamps are
+/// brought back to seconds.
+fn persistent_expiry(c: &Cookie) -> Option<f64> {
+    if c.session {
+        return None;
+    }
+    c.expires.filter(|e| *e > 0.0).map(|e| if e > 1e11 { e / 1000.0 } else { e })
+}
+
+/// Reads a cookie file in any of the shapes people actually have: a JSON array or
+/// `{"cookies": [...]}` (Cookie-Editor, EditThisCookie, Playwright…), the Netscape
+/// `cookies.txt` format, or a bare `name=value; name=value` string when it is
+/// recognisably Facebook's (`c_user`, `xs`…), which carries no domain of its own.
+pub fn parse_any(text: &str) -> Result<Vec<Cookie>> {
+    let t = text.trim().trim_start_matches('\u{feff}');
+    if t.is_empty() {
+        anyhow::bail!("file is empty");
+    }
+    if t.starts_with('[') || t.starts_with('{') {
+        let v: serde_json::Value = serde_json::from_str(t).context("not valid JSON")?;
+        let arr = match v {
+            serde_json::Value::Array(a) => a,
+            serde_json::Value::Object(mut o) => match o.remove("cookies") {
+                Some(serde_json::Value::Array(a)) => a,
+                _ => anyhow::bail!("JSON object without a \"cookies\" array"),
+            },
+            _ => anyhow::bail!("unsupported JSON"),
+        };
+        let mut out = Vec::new();
+        for (i, item) in arr.into_iter().enumerate() {
+            out.push(serde_json::from_value::<Cookie>(item).with_context(|| format!("cookie #{}: needs at least domain, name and value", i + 1))?);
+        }
+        return Ok(out);
+    }
+    if t.lines().any(|l| l.split('\t').count() >= 7) {
+        return Ok(parse_netscape(t));
+    }
+    parse_cookie_string(t)
+}
+
+fn parse_netscape(text: &str) -> Vec<Cookie> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let l = line.trim_end_matches(['\r', '\n']);
+        let (l, http_only) = match l.strip_prefix("#HttpOnly_") {
+            Some(r) => (r, true),
+            None => (l, false),
+        };
+        if l.is_empty() || l.starts_with('#') {
+            continue;
+        }
+        let f: Vec<&str> = l.split('\t').collect();
+        if f.len() < 7 {
+            continue;
+        }
+        let include_sub = f[1].eq_ignore_ascii_case("TRUE");
+        let domain = if include_sub && !f[0].starts_with('.') { format!(".{}", f[0]) } else { f[0].to_string() };
+        let expiry = f[4].trim().parse::<f64>().ok().filter(|e| *e > 0.0);
+        out.push(Cookie {
+            domain,
+            name: f[5].to_string(),
+            value: f[6..].join("\t"),
+            path: f[2].to_string(),
+            expires: expiry,
+            session: expiry.is_none(),
+            secure: f[3].eq_ignore_ascii_case("TRUE"),
+            http_only,
+            same_site: None,
+        });
+    }
+    out
+}
+
+fn parse_cookie_string(t: &str) -> Result<Vec<Cookie>> {
+    let t = t.strip_prefix("Cookie:").unwrap_or(t).trim();
+    let pairs: Vec<(String, String)> = t
+        .split(';')
+        .filter_map(|p| p.trim().split_once('=').map(|(k, v)| (k.trim().to_string(), v.trim().to_string())))
+        .filter(|(k, _)| !k.is_empty())
+        .collect();
+    let looks_facebook = pairs.iter().any(|(k, _)| matches!(k.as_str(), "c_user" | "xs" | "datr" | "fr" | "sb"));
+    if pairs.is_empty() || !looks_facebook {
+        anyhow::bail!("unrecognised cookie file: expected JSON, Netscape cookies.txt, or a Facebook cookie string (c_user=…; xs=…)");
+    }
+    let expires = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0) + 365.0 * 86400.0;
+    Ok(pairs
+        .into_iter()
+        .map(|(name, value)| Cookie {
+            http_only: matches!(name.as_str(), "xs" | "datr" | "fr" | "sb"),
+            domain: ".facebook.com".into(),
+            name,
+            value,
+            path: "/".into(),
+            expires: Some(expires),
+            session: false,
+            secure: true,
+            same_site: Some("None".into()),
+        })
+        .collect())
 }
 
 /// Import cookies (v10-encrypted). Caller MUST stop the profile first.
@@ -403,8 +512,9 @@ pub fn import(profile_id: &str, cookies: &[Cookie]) -> Result<usize> {
         )?;
         for c in cookies {
             let enc = crypt.encrypt(&c.domain, &c.value);
-            let has_expires = c.expires.is_some();
-            let expires_utc = c.expires.map(unix_to_chromium).unwrap_or(0);
+            let expiry = persistent_expiry(c);
+            let has_expires = expiry.is_some();
+            let expires_utc = expiry.map(unix_to_chromium).unwrap_or(0);
             let source_scheme = if c.secure { 2 } else { 1 };
             let source_port = if c.secure { 443 } else { 80 };
             stmt.execute(rusqlite::params![
@@ -450,3 +560,51 @@ fn ensure_schema(conn: &rusqlite::Connection) -> Result<()> {
     )?;
     Ok(())
 }
+
+#[cfg(test)]
+mod import_format_tests {
+    use super::*;
+
+    #[test]
+    fn extension_exports_keep_their_expiry_and_samesite() {
+        let json = r#"[{"domain":".facebook.com","name":"xs","value":"a%3Ab","path":"/","expirationDate":1893456000.5,"secure":true,"httpOnly":true,"sameSite":"no_restriction","hostOnly":false,"session":false,"storeId":"0"},
+                       {"domain":".facebook.com","name":"tmp","value":"1","session":true,"expirationDate":1893456000,"sameSite":"lax"}]"#;
+        let c = parse_any(json).unwrap();
+        assert_eq!(persistent_expiry(&c[0]), Some(1893456000.5));
+        assert_eq!((c[0].http_only, c[0].secure), (true, true));
+        assert_eq!(samesite_from_str(c[0].same_site.as_deref()), 0, "no_restriction is SameSite=None");
+        assert_eq!(persistent_expiry(&c[1]), None, "an explicit session cookie stays a session cookie");
+        assert_eq!(samesite_from_str(c[1].same_site.as_deref()), 1);
+    }
+
+    #[test]
+    fn playwright_and_millisecond_and_wrapped_shapes() {
+        let c = parse_any(r#"{"cookies":[{"name":"a","value":"1","domain":"x.com","path":"/","expires":-1},{"name":"b","value":"2","domain":"x.com","expires":1893456000000}],"origins":[]}"#).unwrap();
+        assert_eq!(persistent_expiry(&c[0]), None, "-1 means session");
+        assert_eq!(persistent_expiry(&c[1]), Some(1893456000.0), "milliseconds are brought back to seconds");
+    }
+
+    #[test]
+    fn netscape_files_including_httponly_lines() {
+        let txt = "# Netscape HTTP Cookie File\n.facebook.com\tTRUE\t/\tTRUE\t1893456000\tc_user\t100000000000001\n#HttpOnly_.facebook.com\tTRUE\t/\tTRUE\t1893456000\txs\t43%3Aabc\nexample.com\tFALSE\t/\tFALSE\t0\tsess\tv\n";
+        let c = parse_any(txt).unwrap();
+        assert_eq!(c.len(), 3);
+        assert!(!c[0].http_only && c[1].http_only && c[1].secure);
+        assert_eq!(c[1].value, "43%3Aabc");
+        assert_eq!(persistent_expiry(&c[2]), None);
+        assert_eq!(c[2].domain, "example.com");
+    }
+
+    #[test]
+    fn a_facebook_cookie_string_becomes_facebook_cookies_and_anything_else_is_refused() {
+        let c = parse_any("sb=abc; datr=def; c_user=100000000000001; xs=43%3Ax; fr=0f").unwrap();
+        assert_eq!(c.len(), 5);
+        assert!(c.iter().all(|x| x.domain == ".facebook.com" && x.secure && persistent_expiry(x).is_some()));
+        assert!(c.iter().find(|x| x.name == "xs").unwrap().http_only);
+        assert!(!c.iter().find(|x| x.name == "c_user").unwrap().http_only);
+        assert!(parse_any("foo=bar; baz=1").is_err(), "no domain, not recognisably Facebook");
+        assert!(parse_any("").is_err());
+        assert!(parse_any("[{\"name\":\"a\"}]").is_err(), "a cookie needs a domain");
+    }
+}
+

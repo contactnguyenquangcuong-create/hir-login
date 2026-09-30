@@ -15,7 +15,7 @@ import {
   profileSetPin, profileSetFolder, profileBindProxy,
   profileExportFolder, profileImportFolder, syncActivity, syncKick,
   profileCreateFromTemplate, processList, processKill, launch, syncLaunch,
-  folderDelete, cookiesExportToFile, cookiesImport,
+  folderDelete, cookiesExportToFile, cookiesImportText,
 } from "../model/api";
 import { defaultForm, fromStored, toStored } from "../model/form";
 
@@ -404,9 +404,7 @@ export const useProfile = create<ProfileStore>((set, get) => ({
             throw new Error(t("useProfile.cookiesNeedStop"));
           }
           const text = await readTextFile(draft.cookies_file);
-          const cookies = JSON.parse(text);
-          if (!Array.isArray(cookies)) throw new Error(t("useProfile.draftCookiesNotArray"));
-          const n = await cookiesImport(saved.id, cookies);
+          const n = await cookiesImportText(saved.id, text);
           toast.ok(n === 1
             ? t("useProfile.draftCookieImportedOne")
             : t("useProfile.draftCookiesImportedMany", { n }));
@@ -494,13 +492,11 @@ export const useProfile = create<ProfileStore>((set, get) => ({
     try {
       const path = await open({
         multiple: false, directory: false, title: t("useProfile.selectCookiesDialogTitle"),
-        filters: [{ name: "JSON", extensions: ["json"] }],
+        filters: [{ name: "Cookies", extensions: ["json", "txt"] }],
       });
       if (typeof path !== "string") return;
       const text = await readTextFile(path);
-      const cookies = JSON.parse(text);
-      if (!Array.isArray(cookies)) { toast.err(t("useProfile.cookiesNotArray")); return; }
-      const n = await cookiesImport(p.id, cookies);
+      const n = await cookiesImportText(p.id, text);
       toast.ok(n === 1
         ? t("useProfile.cookieImportedOne")
         : t("useProfile.cookiesImportedMany", { n }));

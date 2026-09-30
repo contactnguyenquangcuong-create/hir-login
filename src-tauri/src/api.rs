@@ -559,7 +559,12 @@ async fn export_cookies(Path(id): Path<String>) -> ApiResult {
 
 #[derive(Deserialize)]
 struct ImportCookiesReq {
+    #[serde(default)]
     cookies: Vec<crate::cookies::Cookie>,
+    /// Alternatively the text of a cookie file in any supported shape (JSON, Netscape
+    /// cookies.txt, a Facebook cookie string) — see `cookies::parse_any`.
+    #[serde(default)]
+    text: Option<String>,
 }
 
 async fn import_cookies(Path(id): Path<String>, Json(body): Json<ImportCookiesReq>) -> ApiResult {
@@ -570,7 +575,11 @@ async fn import_cookies(Path(id): Path<String>, Json(body): Json<ImportCookiesRe
             "stop the profile before importing cookies",
         ));
     }
-    let n = crate::cookies::import(&id, &body.cookies)
+    let list = match body.text.as_deref() {
+        Some(t) => crate::cookies::parse_any(t).map_err(|e| err(StatusCode::BAD_REQUEST, format!("{e:#}")))?,
+        None => body.cookies,
+    };
+    let n = crate::cookies::import(&id, &list)
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     Ok(Json(json!({ "imported": n })))
 }

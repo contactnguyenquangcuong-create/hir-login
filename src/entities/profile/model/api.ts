@@ -52,6 +52,8 @@ export const helperDismiss = (profile: string) => invoke<void>("helper_dismiss",
 export const folderDelete = (folder: string, deleteProfiles: boolean) => invoke<number>("folder_delete", { folder, deleteProfiles });
 export const cookiesExportToFile = (profileId: string, path: string) => invoke<number>("cookies_export_to_file", { profileId, path });
 export const cookiesImport = (profileId: string, cookies: any[]) => invoke<number>("cookies_import", { profileId, cookies });
+/** The text of a cookie file: JSON (array or {cookies}), Netscape cookies.txt, or a Facebook cookie string. */
+export const cookiesImportText = (profileId: string, text: string) => invoke<number>("cookies_import_text", { profileId, text });
 export const enrichPicksForPreset = (presetId: string) => invoke<{ hardware_concurrency?: number; device_memory?: number; platform_version?: string }>("enrich_picks_for_preset", { presetId });
 export const hostPlatform = () => invoke<string>("host_platform");
 

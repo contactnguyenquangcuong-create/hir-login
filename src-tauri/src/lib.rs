@@ -2356,6 +2356,16 @@ fn cookies_import(profile_id: String, cookies: Vec<cookies::Cookie>) -> Result<u
     cookies::import(&profile_id, &cookies).map_err(|e| e.to_string())
 }
 
+/// Import from the text of a cookie file in any supported shape (see `cookies::parse_any`).
+#[tauri::command]
+fn cookies_import_text(profile_id: String, text: String) -> Result<usize, String> {
+    if is_profile_running(&profile_id) {
+        return Err("stop the profile before importing cookies".into());
+    }
+    let parsed = cookies::parse_any(&text).map_err(|e| format!("{e:#}"))?;
+    cookies::import(&profile_id, &parsed).map_err(|e| e.to_string())
+}
+
 // ---- License activation ----
 
 /// Whether this machine already has a valid local activation. Offline check.
@@ -3232,6 +3242,7 @@ pub fn run() {
             proxy_last_test,
             proxy_bulk_import,
             proxy_bulk_parse,
+            cookies_import_text,
             profile_bulk_android_to_desktop,
             proxy_bulk_save,
             launch,
