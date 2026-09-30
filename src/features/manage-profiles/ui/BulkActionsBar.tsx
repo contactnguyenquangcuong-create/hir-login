@@ -32,7 +32,7 @@ export function BulkActionsBar() {
   if (count === 0) return null;
 
   return (
-    <div className="flex items-center gap-2 rounded-8 bg-primary-alpha-10 py-1 pl-3 pr-1 text-label-xs text-primary-base ring-1 ring-inset ring-primary-alpha-24">
+    <div className="flex flex-wrap items-center gap-2 rounded-8 bg-primary-alpha-10 py-1 pl-3 pr-1 text-label-xs text-primary-base ring-1 ring-inset ring-primary-alpha-24">
       <span>{t("bulkActionsBar.selectedCount", { n: count })}</span>
       <Button variant="neutral" mode='stroke' className="pr-4" size="2xsmall" leftIcon={<PlayIcon className="size-3.5" />} onClick={bulkLaunch}>{t("bulkActionsBar.launch")}</Button>
       {/* Meaningless for a single profile, so it only appears for a group. */}
@@ -55,11 +55,13 @@ export function BulkActionsBar() {
         </span>
       )}
       <Button variant="neutral" mode="stroke" className="pr-2" size="2xsmall" leftIcon={<StopIcon className="size-3.5" />} onClick={bulkStop}>{t("bulkActionsBar.stop")}</Button>
-      {proxiedCount > 0 && canEdit(role, configured) && (
-        <Button variant="neutral" mode="stroke" className="pr-2" size="2xsmall" onClick={bulkUnbindProxy}>
-          {t("bulkActionsBar.noProxy", { n: proxiedCount })}
-        </Button>
-      )}
+      {/* Offered to everyone, staff included: the server lets someone with only "use"
+          access turn a proxy off (and nothing else). Always shown — hidden when nothing
+          selected has a proxy it looked like the feature was missing — and it explains
+          itself when there is nothing to do. */}
+      <Button variant="neutral" mode="stroke" className="pr-2" size="2xsmall" onClick={bulkUnbindProxy}>
+        {proxiedCount > 0 ? t("bulkActionsBar.noProxy", { n: proxiedCount }) : t("bulkActionsBar.noProxyAll")}
+      </Button>
       {androidCount > 0 && canEdit(role, configured) && (
         <Button variant="neutral" mode="stroke" className="pr-2" size="2xsmall" onClick={bulkAndroidToDesktop}>
           Đổi {androidCount} Android sang máy tính

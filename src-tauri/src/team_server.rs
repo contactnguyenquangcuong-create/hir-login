@@ -450,6 +450,7 @@ async fn put_bundle(
     };
     let new_folder = team_acl::folder_of(&new_profile);
     let new_sig = team_acl::protected_signature(&new_profile, &new_proxy);
+    let new_sig_np = team_acl::protected_signature_without_proxy(&new_profile);
     {
         let acl = load_acl();
         let old = meta_map().get(&id).cloned();
@@ -486,8 +487,18 @@ async fn put_bundle(
                 }
                 let changed = m.get("sig").and_then(|x| x.as_str()).map(|old_sig| old_sig != new_sig).unwrap_or(false);
                 if changed && lvl < Level::Edit {
-                    audit(&who, "edit", &id, false, "config change without edit access");
-                    return forbidden("edit");
+                    // The one thing "use" access may change: turn the proxy off. Compared
+                    // against the copy the server holds when it predates `sig_np`.
+                    let old_np = m.get("sig_np").and_then(|x| x.as_str()).map(String::from).or_else(|| {
+                        let bytes = std::fs::read(bundles_dir().ok()?.join(format!("{id}.zip"))).ok()?;
+                        let (old_profile, _) = read_bundle_meta(&bytes)?;
+                        Some(team_acl::protected_signature_without_proxy(&old_profile))
+                    });
+                    let only_proxy_turned_off = new_proxy.is_null() && old_np.as_deref() == Some(new_sig_np.as_str());
+                    if !only_proxy_turned_off {
+                        audit(&who, "edit", &id, false, "config change without edit access");
+                        return forbidden("edit");
+                    }
                 }
             }
         }
@@ -520,7 +531,7 @@ async fn put_bundle(
         let dt = time_format(secs);
         dt
     };
-    meta_map.insert(id.clone(), json!({"updatedAt": now_iso, "updatedBy": holder, "sizeBytes": body.len(), "folder": new_folder, "sig": new_sig}));
+    meta_map.insert(id.clone(), json!({"updatedAt": now_iso, "updatedBy": holder, "sizeBytes": body.len(), "folder": new_folder, "sig": new_sig, "sig_np": new_sig_np}));
     let _ = save_json_atomic(&meta_path, &meta);
     // refresh lock TTL
     if let Some(map) = locks.as_object_mut() {
@@ -1240,6 +1251,21 @@ mod permission_tests {
         buf.into_inner()
     }
 
+    fn bundle_with_proxy(folder: &str, ua: &str, proxy: Value) -> Vec<u8> {
+        let profile = json!({"_meta": {"folder": folder, "name": "p"}, "navigator": {"user_agent": ua}});
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut z = zip::ZipWriter::new(&mut buf);
+            let o = zip::write::SimpleFileOptions::default();
+            z.start_file("profile.json", o).unwrap();
+            z.write_all(profile.to_string().as_bytes()).unwrap();
+            z.start_file("proxy.json", o).unwrap();
+            z.write_all(proxy.to_string().as_bytes()).unwrap();
+            z.finish().unwrap();
+        }
+        buf.into_inner()
+    }
+
     async fn status(c: &reqwest::Client, tok: &str, method: &str, url: String, body: Option<Vec<u8>>, holder: &str) -> u16 {
         let mut r = match method { "GET" => c.get(url), "PUT" => c.put(url), _ => c.post(url) }.bearer_auth(tok).header("x-sync-holder", holder);
         if let Some(b) = body { r = r.body(b); } else if method == "POST" { r = r.json(&json!({"holder": holder})); }
@@ -1448,6 +1474,60 @@ mod permission_tests {
         assert_eq!(body["error"], "a member with this name already exists");
         // Case-insensitive: "cuongpc" is the same clash to a human reading the list.
         assert_eq!(put_json(&c, admin, format!("{base}/admin/members"), json!({"name": "cuongpc", "role": "member"})).await.0, 400);
+
+        let _ = stop();
+        crate::store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Someone with only "use" access may turn a profile's proxy off (connect
+    /// directly) and nothing else: not switch to another proxy, and not change
+    /// the configuration in the same breath.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_use_only_member_may_turn_the_proxy_off_and_nothing_else() {
+        let _g = crate::cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-acl-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        crate::store::set_data_root(Some(tmp.clone()));
+        let admin = "admin-token-123456";
+        let port = start(0, admin.to_string()).await.expect("start");
+        let base = format!("http://127.0.0.1:{port}");
+        let c = reqwest::Client::new();
+
+        let (_, r) = put_json(&c, admin, format!("{base}/admin/members"), json!({"name": "u", "role": "member"})).await;
+        let (u_tok, u_id) = (r["token"].as_str().unwrap().to_string(), r["id"].as_str().unwrap().to_string());
+        assert_eq!(put_json(&c, admin, format!("{base}/admin/folders"), json!({"name": "A"})).await.0, 200);
+        assert_eq!(put_json(&c, admin, format!("{base}/admin/folders/A/access"), json!({"memberId": u_id, "level": "use"})).await.0, 200);
+
+        let proxy = json!({"id": "px1", "name": "px", "kind": "socks5", "host": "1.2.3.4", "port": 1080, "username": "", "password": "", "country": "", "notes": ""});
+        let other = json!({"id": "px2", "name": "px2", "kind": "socks5", "host": "5.6.7.8", "port": 1080, "username": "", "password": "", "country": "", "notes": ""});
+        // One profile the server knows with sig_np, one as an older server stored it (without).
+        for id in ["pp", "legacy"] {
+            assert_eq!(status(&c, admin, "POST", format!("{base}/profiles/{id}/lock"), None, "m").await, 200);
+            assert_eq!(status(&c, admin, "PUT", format!("{base}/profiles/{id}/bundle"), Some(bundle_with_proxy("A", "ua1", proxy.clone())), "m").await, 200);
+            assert_eq!(status(&c, admin, "POST", format!("{base}/profiles/{id}/unlock"), None, "m").await, 200);
+        }
+        let meta_path = meta_path().unwrap();
+        let mut meta = load_json(&meta_path, json!({}));
+        meta["legacy"].as_object_mut().unwrap().remove("sig_np");
+        save_json_atomic(&meta_path, &meta).unwrap();
+
+        let put = |id: &'static str, body: Vec<u8>| {
+            let (c, base, t) = (c.clone(), base.clone(), u_tok.clone());
+            async move {
+                assert_eq!(status(&c, &t, "POST", format!("{base}/profiles/{id}/lock"), None, "u").await, 200);
+                let r = status(&c, &t, "PUT", format!("{base}/profiles/{id}/bundle"), Some(body), "u").await;
+                status(&c, &t, "POST", format!("{base}/profiles/{id}/unlock"), None, "u").await;
+                r
+            }
+        };
+        assert_eq!(put("pp", bundle_with_proxy("A", "ua1", other.clone())).await, 403, "another proxy is an edit");
+        assert_eq!(put("pp", bundle_with_proxy("A", "hacked", Value::Null)).await, 403, "config change hiding behind a proxy-off");
+        assert_eq!(put("pp", bundle_with_proxy("A", "ua1", Value::Null)).await, 200, "turning the proxy off is allowed");
+        assert_eq!(put("legacy", bundle_with_proxy("A", "hacked", Value::Null)).await, 403, "same check for a profile stored by an older server");
+        assert_eq!(put("legacy", bundle_with_proxy("A", "ua1", Value::Null)).await, 200, "and the proxy-off works for it too");
+        // Once off, putting a proxy back is again an edit.
+        assert_eq!(put("pp", bundle_with_proxy("A", "ua1", proxy.clone())).await, 403, "switching one on is not");
 
         let _ = stop();
         crate::store::set_data_root(None);

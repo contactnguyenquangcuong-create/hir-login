@@ -635,7 +635,7 @@ export const useProfile = create<ProfileStore>((set, get) => ({
   bulkUnbindProxy: async () => {
     const { selected, profiles } = get();
     const ids = [...selected].filter((id) => profiles.find((p) => p.id === id)?.proxy_id);
-    if (ids.length === 0) return;
+    if (ids.length === 0) { toast.info(t("useProfile.noProxyNone")); return; }
     if ((await confirmModal({
       title: t("useProfile.noProxyTitle", { n: ids.length }),
       message: t("useProfile.noProxyMessage"),

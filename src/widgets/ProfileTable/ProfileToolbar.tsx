@@ -14,7 +14,7 @@ export function ProfileToolbar() {
   const configured = useTeam((s) => s.configured);
   const edit = canEdit(role, configured);
   return (
-    <div className="flex items-center flex-none gap-2">
+    <div className="flex max-w-full flex-wrap items-center justify-end gap-2">
       <BulkActionsBar />
       <ProfileFilterBar />
       {edit && <BulkCreateButton />}

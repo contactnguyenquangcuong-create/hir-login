@@ -33,9 +33,12 @@ export function BrowsersPage() {
 
       <BrowsersMetrics />
 
-      <div className="mb-3.5 flex items-end justify-between gap-4">
-        <div className="flex min-w-0 flex-1 flex-col gap-3.5">
-          <h1 className="m-0 text-title-h5 text-text-strong-950">{t("browsers.title")}</h1>
+      {/* Wraps: with a selection the toolbar is wider than most windows, and as a
+          non-wrapping right-hand block it squeezed the title into two lines and
+          ran its own buttons off the edge of the screen. */}
+      <div className="mb-3.5 flex flex-wrap items-end justify-between gap-x-4 gap-y-3">
+        <div className="flex min-w-[16rem] flex-1 flex-col gap-3.5">
+          <h1 className="m-0 whitespace-nowrap text-title-h5 text-text-strong-950">{t("browsers.title")}</h1>
           <FolderTabs />
         </div>
         <ProfileToolbar />

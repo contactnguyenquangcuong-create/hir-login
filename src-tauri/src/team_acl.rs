@@ -291,20 +291,33 @@ fn canonical(v: &Value, out: &mut String) {
 /// Runtime bookkeeping (last launch, run time, revision, pin) is left out
 /// because opening a profile legitimately changes those.
 pub fn protected_signature(profile_json: &Value, proxy_json: &Value) -> String {
+    signature_of(profile_json, Some(proxy_json))
+}
+
+/// The same, leaving the bound proxy out. Someone with only "use" access may
+/// turn the proxy off (connect directly) — and nothing else — which shows as
+/// this staying equal while the proxy goes away.
+pub fn protected_signature_without_proxy(profile_json: &Value) -> String {
+    signature_of(profile_json, None)
+}
+
+fn signature_of(profile_json: &Value, proxy_json: Option<&Value>) -> String {
     let mut cfg = profile_json.clone();
     let meta = cfg.as_object_mut().and_then(|o| o.remove("_meta")).unwrap_or(Value::Null);
     let pick = |k: &str| meta.get(k).cloned().unwrap_or(Value::Null);
-    let mut proxy = proxy_json.clone();
-    if let Some(o) = proxy.as_object_mut() {
-        o.remove("country"); // each machine measures its own
-    }
-    let sig = serde_json::json!({
+    let mut sig = serde_json::json!({
         "config": cfg,
         "folder": pick("folder"),
         "extensions": pick("extensions"),
         "color": pick("color"),
-        "proxy": proxy,
     });
+    if let Some(p) = proxy_json {
+        let mut proxy = p.clone();
+        if let Some(o) = proxy.as_object_mut() {
+            o.remove("country"); // each machine measures its own
+        }
+        sig["proxy"] = proxy;
+    }
     let mut s = String::new();
     canonical(&sig, &mut s);
     Sha256::digest(s.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
