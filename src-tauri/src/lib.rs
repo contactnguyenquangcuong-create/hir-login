@@ -3612,6 +3612,9 @@ mod bulk_file_tests {
         assert!(!profile::claims_mobile(&after.config), "still a phone");
         assert_eq!(nav.get("platform").and_then(|v| v.as_str()), Some("macOS"));
         assert!(nav.get("hardware_concurrency").is_some() && nav.get("device_memory").is_some());
+        // The phone's window block (about 360 px wide) is gone with its fingerprint.
+        let win_w = after.config.get("window").and_then(|w| w.get("outer_width")).and_then(|v| v.as_i64()).unwrap_or(0);
+        assert!(win_w >= 800, "a desktop window, not a phone-sized one: {win_w}");
         assert_eq!(after.config.get("name").and_then(|v| v.as_str()), Some("Phone"));
         assert_eq!(after.config.get("notes").and_then(|v| v.as_str()), Some("keep me"));
         assert_eq!(after.meta.folder, "Ads");

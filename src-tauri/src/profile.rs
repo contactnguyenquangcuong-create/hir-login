@@ -516,11 +516,15 @@ fn import_one_profile_dir(dir: &Path) -> Result<()> {
             .with_context(|| format!("{}: invalid profile.json", dir.display()))?
     } else {
         let library = crate::fingerprints::list_all()?;
-        let base = if library.is_empty() {
+        // Desktop systems only: a phone fingerprint opens as a narrow phone-sized
+        // window that cannot be widened (falls back to all if there is no desktop one).
+        let desktop: Vec<_> = library.iter().filter(|f| matches!(f.platform.as_str(), "Windows" | "macOS" | "Linux")).collect();
+        let pool: Vec<_> = if desktop.is_empty() { library.iter().collect() } else { desktop };
+        let base = if pool.is_empty() {
             serde_json::json!({})
         } else {
-            let pick = uuid::Uuid::new_v4().as_bytes()[0] as usize % library.len();
-            crate::fingerprints::get(&library[pick].id)?
+            let pick = uuid::Uuid::new_v4().as_bytes()[0] as usize % pool.len();
+            crate::fingerprints::get(&pool[pick].id)?
                 .map(|e| e.payload)
                 .unwrap_or_else(|| serde_json::json!({}))
         };

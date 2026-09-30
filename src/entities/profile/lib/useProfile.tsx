@@ -200,6 +200,9 @@ export type ProfileStore = {
   bulkUnbindProxy: () => Promise<void>;
   /** Turns the Android profiles in the selection into desktop ones (asks which OS). */
   bulkAndroidToDesktop: () => Promise<void>;
+  /** Same, for every Android profile there is. */
+  androidToDesktopAll: () => Promise<void>;
+  convertAndroid: (ids: string[]) => Promise<void>;
   bulkExport: () => Promise<void>;
   /** Export the current selection (or every profile, if none selected) as a
    *  folder-per-profile bundle — carry it to another machine and import it
@@ -656,7 +659,14 @@ export const useProfile = create<ProfileStore>((set, get) => ({
 
   bulkAndroidToDesktop: async () => {
     const { selected, profiles } = get();
-    const ids = [...selected].filter((id) => profiles.find((p) => p.id === id)?.mobile);
+    await get().convertAndroid([...selected].filter((id) => profiles.find((p) => p.id === id)?.mobile));
+  },
+
+  androidToDesktopAll: async () => {
+    await get().convertAndroid(get().profiles.filter((p) => p.mobile).map((p) => p.id));
+  },
+
+  convertAndroid: async (ids) => {
     if (ids.length === 0) return;
     const os = await confirmModal({
       title: `Đổi ${ids.length} profile Android sang máy tính`,

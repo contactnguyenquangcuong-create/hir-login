@@ -401,6 +401,13 @@ fn add_dir<W: Write + std::io::Seek>(
 /// `trash::restore`, this never touches the profile's id or deletes anything
 /// local first — a partial remote bundle only overwrites what it contains.
 fn apply_bundle(id: &str, bytes: &[u8]) -> Result<()> {
+    apply_bundle_with(id, bytes, false)
+}
+
+/// `keep_local_session`: take the profile's configuration, proxy and extensions
+/// from the bundle but leave this machine's own browser data (logins, cookies,
+/// storage) untouched — for a profile whose last close never reached the server.
+fn apply_bundle_with(id: &str, bytes: &[u8], keep_local_session: bool) -> Result<()> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
     let udd = store::user_data_root()?.join(id);
     fs::create_dir_all(&udd)?;
@@ -417,6 +424,9 @@ fn apply_bundle(id: &str, bytes: &[u8]) -> Result<()> {
         if let Some(root) = synced_paths().find(|r| sub == *r || sub.starts_with(&format!("{r}/"))) {
             roots.insert(root);
         }
+    }
+    if keep_local_session {
+        roots.clear();
     }
     for root in roots {
         let p = udd.join(root);
@@ -480,6 +490,9 @@ fn apply_bundle(id: &str, bytes: &[u8]) -> Result<()> {
             continue;
         }
         let Some(sub) = rel_str.strip_prefix("user-data/") else { continue };
+        if keep_local_session {
+            continue;
+        }
         let out = udd.join(sub);
         if let Some(parent) = out.parent() {
             fs::create_dir_all(parent)?;
@@ -663,12 +676,15 @@ pub async fn checkout(profile_id: &str) -> Result<()> {
     }
     keep_lock_alive(profile_id, &holder);
 
-    // The last close never reached the server, so this machine's copy is the
-    // newer one. Pulling now would replace it — the login included — with the
-    // older copy still on the server. Keep it; the next close saves it.
-    if load_state().pending.contains(profile_id) {
-        eprintln!("[sync] {profile_id}: last close was not saved to the server — keeping this machine's copy");
-        return Ok(());
+    // The last close never reached the server, so this machine's browser data is
+    // the newer copy. Pulling it would replace it — the login included — with the
+    // older one still on the server, so the session stays; the next close saves
+    // it. The configuration still comes from the server: whoever may change it
+    // (an admin switching a phone profile to desktop, say) must reach this
+    // machine even when it cannot push its own version back.
+    let keep_session = load_state().pending.contains(profile_id);
+    if keep_session {
+        eprintln!("[sync] {profile_id}: last close was not saved to the server — keeping this machine's session");
     }
 
     let resp = c
@@ -680,7 +696,7 @@ pub async fn checkout(profile_id: &str) -> Result<()> {
 
     if resp.status().is_success() {
         let bytes = resp.bytes().await.context("read bundle body")?;
-        if let Err(e) = apply_bundle(profile_id, &bytes) {
+        if let Err(e) = apply_bundle_with(profile_id, &bytes, keep_session) {
             // Best effort: don't strand the lock on a corrupt bundle.
             let _ = unlock(&base, &token, profile_id, &holder).await;
             return Err(e.context("apply downloaded bundle"));
@@ -691,7 +707,9 @@ pub async fn checkout(profile_id: &str) -> Result<()> {
     }
     // 404 = no remote copy yet (first time this profile syncs) — fine, the
     // local copy becomes the first version on checkin.
-    mark_synced(profile_id).await;
+    if !keep_session {
+        mark_synced(profile_id).await;
+    }
 
     Ok(())
 }
@@ -1649,10 +1667,25 @@ mod tests {
             assert!(load_state().pending.contains("sess-1"));
             assert_eq!(server_cookie(&base, &token).await, "logged-out", "server still has the old copy");
 
+            // Meanwhile someone with edit rights changes the profile's configuration on
+            // the server (machine-b holds the lock, so its upload is accepted).
+            let original = crate::profile::load_raw("sess-1").unwrap();
+            let mut edited = original.clone();
+            edited.config.insert("name".into(), serde_json::json!("Renamed by admin"));
+            crate::profile::save_raw(&mut edited).unwrap();
+            let edited_bundle = build_bundle("sess-1").unwrap();
+            let mut restore = original.clone();
+            crate::profile::save_raw(&mut restore).unwrap();
+            let put = client().put(format!("{base}/profiles/sess-1/bundle")).bearer_auth(&token)
+                .header("X-Sync-Holder", "machine-b").body(edited_bundle).send().await.unwrap();
+            assert!(put.status().is_success(), "{}", put.status());
+
             // The other device lets go; this machine opens the profile again.
             unlock(&base, &token, "sess-1", "machine-b").await.unwrap();
             checkout("sess-1").await.expect("reopen again");
             assert_eq!(std::fs::read_to_string(&cookies).unwrap(), "logged-in", "the login survived the reopen");
+            let cfg_name = crate::profile::load_raw("sess-1").unwrap().config.get("name").and_then(|v| v.as_str()).map(String::from);
+            assert_eq!(cfg_name.as_deref(), Some("Renamed by admin"), "the configuration still follows the server");
 
             checkin("sess-1").await.expect("close saves now");
             assert_eq!(server_cookie(&base, &token).await, "logged-in");
