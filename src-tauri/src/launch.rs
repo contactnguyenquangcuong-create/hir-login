@@ -78,6 +78,11 @@ pub async fn launch_profile_synced(
         .as_deref()
         .and_then(|pid| proxy::get(pid).ok().flatten())
         .or_else(|| stored.meta.inline_proxy.clone());
+    // A proxy labelled HTTPS that really speaks plain HTTP is used as an HTTP proxy.
+    let bound_proxy = match bound_proxy {
+        Some(p) => Some(proxy::effective(&p).await),
+        None => None,
+    };
 
     // Live UDP probe; QUIC/WebRTC gating uses current capability not stale cache.
     let proxy_udp_ok = if let Some(p) = bound_proxy.as_ref() {

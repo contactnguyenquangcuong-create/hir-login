@@ -590,6 +590,53 @@ pub async fn geo_check(entry: &ProxyEntry, provider_override: Option<String>) ->
     geo_check_via(Some(entry), provider_override).await
 }
 
+/// The proxy as it should really be used. In a browser, `https://` for a proxy means
+/// TLS to the proxy itself, but many providers label an ordinary HTTP proxy — one
+/// that tunnels HTTPS sites through CONNECT — as "HTTPS". Used as TLS, such a proxy
+/// never answers: the page times out, and the location probe fails, leaving the
+/// profile on UTC. (The Test button could not tell either: it sends plain CONNECT
+/// for both kinds and said OK.) So an `Https` proxy that answers plain HTTP is used
+/// as `Http`; one that does not (a real TLS proxy, or unreachable) is left as it is.
+pub async fn effective(entry: &ProxyEntry) -> ProxyEntry {
+    if !matches!(entry.kind, ProxyKind::Https) {
+        return entry.clone();
+    }
+    static PLAIN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    let seen = PLAIN.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    let key = format!("{}:{}", entry.host, entry.port);
+    let known = seen.lock().map(|s| s.contains(&key)).unwrap_or(false);
+    if known || answers_plain_http(entry).await {
+        if !known {
+            if let Ok(mut s) = seen.lock() {
+                s.insert(key);
+            }
+        }
+        let mut e = entry.clone();
+        e.kind = ProxyKind::Http;
+        eprintln!("[proxy] {}:{} is labelled HTTPS but answers plain HTTP — using it as an HTTP proxy", entry.host, entry.port);
+        return e;
+    }
+    entry.clone()
+}
+
+/// Sends a CONNECT in the clear and sees whether an HTTP reply comes back. A TLS
+/// proxy gets gibberish and answers with an alert, silence or a closed connection.
+async fn answers_plain_http(entry: &ProxyEntry) -> bool {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::time::{timeout, Duration};
+    let Ok(Ok(mut s)) = timeout(Duration::from_secs(6), tokio::net::TcpStream::connect((entry.host.as_str(), entry.port))).await else {
+        return false;
+    };
+    if s.write_all(b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n").await.is_err() {
+        return false;
+    }
+    let mut buf = [0u8; 16];
+    match timeout(Duration::from_secs(6), s.read(&mut buf)).await {
+        Ok(Ok(n)) if n >= 5 => buf[..5].eq_ignore_ascii_case(b"HTTP/"),
+        _ => false,
+    }
+}
+
 /// Every provider we know, chosen provider first. ip-api is plain HTTP on the
 /// free tier, and a proxy that refuses port 80 or rewrites HTTP fails on it
 /// alone — the other two are HTTPS, so the chain gets an answer anyway.
@@ -603,6 +650,11 @@ fn provider_chain(chosen: &str) -> Vec<String> {
 /// Probe geo through `entry` if Some, else direct. Tries the chosen provider,
 /// then the others; the error carries what each one said.
 pub async fn geo_check_via(entry: Option<&ProxyEntry>, provider_override: Option<String>) -> Result<GeoInfo> {
+    let effective_entry = match entry {
+        Some(e) => Some(effective(e).await),
+        None => None,
+    };
+    let entry = effective_entry.as_ref();
     let chosen = provider_override
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| settings::load().ok().and_then(|s| s.geo_checker).unwrap_or_else(|| "ip-api.com".into()));
@@ -909,6 +961,7 @@ fn unix_now() -> String {
 /// Run TCP + UDP + geo, persist into history, auto-fill country tag.
 pub async fn full_test(entry: &ProxyEntry) -> Result<TestSnapshot> {
     let now = unix_now();
+    let entry = &effective(entry).await;
 
     let tcp_res = probe(entry).await;
     let udp_res = if matches!(entry.kind, ProxyKind::Socks5) {
@@ -1066,3 +1119,51 @@ mod engine_arg_tests {
         assert_eq!(p(ProxyKind::Http, "", "").to_engine_arg(), "http://h.example:55159");
     }
 }
+
+#[cfg(test)]
+mod effective_kind_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    fn entry(kind: ProxyKind, port: u16) -> ProxyEntry {
+        ProxyEntry { id: String::new(), name: String::new(), kind, host: "127.0.0.1".into(), port, username: "u".into(), password: "p".into(), country: String::new(), notes: String::new() }
+    }
+
+    /// A listener that answers like `what`: a plain HTTP proxy (407 to an unauthenticated
+    /// CONNECT), a TLS-only one (an alert record, then closes), or one that just hangs up.
+    async fn fake(what: &'static str) -> u16 {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut c, _)) = l.accept().await else { break };
+                tokio::spawn(async move {
+                    let mut b = [0u8; 256];
+                    let _ = c.read(&mut b).await;
+                    match what {
+                        "http" => { let _ = c.write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n").await; }
+                        "tls" => { let _ = c.write_all(&[0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x0a]).await; }
+                        _ => {}
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    /// A provider's "HTTPS proxy" that is really a plain HTTP one is used as HTTP;
+    /// a genuine TLS proxy, a dead one, and every other kind are left alone.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_https_label_on_a_plain_http_proxy_is_used_as_http() {
+        let plain = fake("http").await;
+        assert_eq!(effective(&entry(ProxyKind::Https, plain)).await.kind, ProxyKind::Http);
+        assert_eq!(effective(&entry(ProxyKind::Https, fake("tls").await)).await.kind, ProxyKind::Https, "a real TLS proxy stays HTTPS");
+        assert_eq!(effective(&entry(ProxyKind::Https, fake("silent").await)).await.kind, ProxyKind::Https);
+        let dead = { let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap(); l.local_addr().unwrap().port() };
+        assert_eq!(effective(&entry(ProxyKind::Https, dead)).await.kind, ProxyKind::Https, "unreachable: nothing to conclude");
+        assert_eq!(effective(&entry(ProxyKind::Http, plain)).await.kind, ProxyKind::Http);
+        assert_eq!(effective(&entry(ProxyKind::Socks5, plain)).await.kind, ProxyKind::Socks5);
+    }
+}
+

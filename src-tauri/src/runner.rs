@@ -1441,7 +1441,7 @@ async fn run_block(
                         .and_then(|id| proxy::get(id).ok().flatten())
                         .or(stored.meta.inline_proxy);
                     match bound_proxy {
-                        Some(pr) => Some(pr.to_proxy_server_arg()),
+                        Some(pr) => Some(proxy::effective(&pr).await.to_proxy_server_arg()),
                         None => None,
                     }
                 }
