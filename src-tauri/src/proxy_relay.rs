@@ -43,6 +43,15 @@ pub fn needs_relay(p: &ProxyEntry) -> bool {
     matches!(p.kind, ProxyKind::Http | ProxyKind::Socks5) && login_breaks_engine_arg(p)
 }
 
+/// Whether UDP (QUIC, WebRTC) can really travel through this proxy. Through the local
+/// forwarder it cannot: the browser only sees an HTTP proxy on loopback. Claiming
+/// it could made the launcher enable QUIC and let WebRTC "relay through the proxy",
+/// and measured with the real engine the page then gathered a WebRTC candidate with
+/// this machine's real public IP (and real IPv6).
+pub fn udp_path_exists(p: &ProxyEntry, udp_relay_probe_ok: bool) -> bool {
+    udp_relay_probe_ok && !needs_relay(p)
+}
+
 /// An `https://` proxy (TLS to the proxy itself) with such a login has no safe
 /// way through, and handing it over as-is would mean no proxy at all.
 pub fn cannot_carry(p: &ProxyEntry) -> bool {
@@ -327,6 +336,10 @@ mod tests {
         assert!(needs_relay(&entry(ProxyKind::Socks5, 1, "u", "a,b")));
         assert!(!needs_relay(&entry(ProxyKind::Socks5, 1, "u", "plain+pass@x:y/#?% ")));
         assert!(cannot_carry(&entry(ProxyKind::Https, 1, "u", "p==")));
+        // UDP: a probe that succeeds still does not count once the forwarder is in the path.
+        assert!(udp_path_exists(&entry(ProxyKind::Socks5, 1, "u", "plain"), true));
+        assert!(!udp_path_exists(&entry(ProxyKind::Socks5, 1, "u", "p=="), true), "forwarded: no UDP, or WebRTC leaks the real IP");
+        assert!(!udp_path_exists(&entry(ProxyKind::Socks5, 1, "u", "plain"), false));
         assert!(!cannot_carry(&entry(ProxyKind::Https, 1, "u", "plain")));
     }
 

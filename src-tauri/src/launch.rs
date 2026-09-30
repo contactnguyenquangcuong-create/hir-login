@@ -126,6 +126,12 @@ pub async fn launch_profile_synced(
     } else {
         false
     };
+    // A proxy reached through the local forwarder (see proxy_relay) has no UDP path:
+    // the browser only sees an HTTP proxy on loopback. Treating UDP as available would
+    // enable QUIC and let WebRTC "relay through the proxy", and measured with the real
+    // engine that leaks the machine's real public IP (and IPv6) as a WebRTC candidate.
+    // With UDP off, QUIC is disabled and WebRTC falls back to TCP-only.
+    let proxy_udp_ok = bound_proxy.as_ref().map(|p| crate::proxy_relay::udp_path_exists(p, proxy_udp_ok)).unwrap_or(false);
 
     // Strip `_meta` wrapper and resolve "auto" sentinels before serialising.
     let mut raw = stored.config.clone();
