@@ -3621,6 +3621,36 @@ mod bulk_file_tests {
         assert!(["Windows", "macOS", "Linux"].contains(&plat), "{plat}");
     }
 
+    /// "Turn off proxy" in bulk is the existing bind command with no proxy: the
+    /// profile keeps everything else and simply connects directly.
+    #[test]
+    fn unbinding_the_proxy_leaves_the_rest_of_the_profile_alone() {
+        let _g = cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-noproxy-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        store::set_data_root(Some(tmp.clone()));
+        let win = fingerprints::list_all().unwrap().into_iter().find(|f| f.platform == "Windows").expect("Windows fingerprint").id;
+        let ids: Vec<String> = ["P1", "P2"].iter().map(|n| make_profile(&win, n, "Ads")).collect();
+        for id in &ids {
+            profile_bind_proxy(id.clone(), Some("proxy-x".into())).unwrap();
+            assert_eq!(profile::load_raw(id).unwrap().meta.proxy_id.as_deref(), Some("proxy-x"));
+        }
+        let before = profile::load_raw(&ids[0]).unwrap();
+
+        for id in &ids {
+            profile_bind_proxy(id.clone(), None).unwrap();
+        }
+        let after = profile::load_raw(&ids[0]).unwrap();
+        let second = profile::load_raw(&ids[1]).unwrap();
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert!(after.meta.proxy_id.is_none() && second.meta.proxy_id.is_none());
+        assert_eq!(after.config, before.config, "fingerprint untouched");
+        assert_eq!((after.meta.folder.as_str(), after.meta.color.clone()), (before.meta.folder.as_str(), before.meta.color.clone()));
+        assert_eq!(after.meta.rev, before.meta.rev, "no config change, no revision bump");
+    }
+
     #[test]
     fn os_column_accepts_common_spellings_and_rejects_typos() {
         assert_eq!(parse_bulk_os(""), Ok(None));

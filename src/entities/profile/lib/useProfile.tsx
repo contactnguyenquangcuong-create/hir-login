@@ -196,6 +196,8 @@ export type ProfileStore = {
   syncGroup: string | null;
   bulkStop: () => Promise<void>;
   bulkDelete: () => Promise<void>;
+  /** Unbinds the proxy from every selected profile that has one (direct connection). */
+  bulkUnbindProxy: () => Promise<void>;
   /** Turns the Android profiles in the selection into desktop ones (asks which OS). */
   bulkAndroidToDesktop: () => Promise<void>;
   bulkExport: () => Promise<void>;
@@ -628,6 +630,28 @@ export const useProfile = create<ProfileStore>((set, get) => ({
     get().reload();
     storeBus.emit("profiles");
     toast.ok(t("useProfile.movedToTrash", { n: ids.length }));
+  },
+
+  bulkUnbindProxy: async () => {
+    const { selected, profiles } = get();
+    const ids = [...selected].filter((id) => profiles.find((p) => p.id === id)?.proxy_id);
+    if (ids.length === 0) return;
+    if ((await confirmModal({
+      title: t("useProfile.noProxyTitle", { n: ids.length }),
+      message: t("useProfile.noProxyMessage"),
+      buttons: [
+        { label: t("confirm.cancel"), value: false },
+        { label: t("useProfile.noProxyConfirm"), value: true, primary: true },
+      ],
+    })) !== true) return;
+    let done = 0;
+    for (const id of ids) {
+      try { await profileBindProxy(id, null); done++; } catch (e) { toast.err(String(e)); }
+    }
+    get().clearSelected();
+    get().reload();
+    storeBus.emit("profiles");
+    if (done > 0) toast.ok(t("useProfile.noProxyDone", { n: done }));
   },
 
   bulkAndroidToDesktop: async () => {

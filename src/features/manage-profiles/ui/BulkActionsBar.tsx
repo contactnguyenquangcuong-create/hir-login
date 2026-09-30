@@ -19,6 +19,9 @@ export function BulkActionsBar() {
   const bulkExport = useProfile((s) => s.bulkExport);
   const bulkDelete = useProfile((s) => s.bulkDelete);
   const bulkAndroidToDesktop = useProfile((s) => s.bulkAndroidToDesktop);
+  const bulkUnbindProxy = useProfile((s) => s.bulkUnbindProxy);
+  // Only offered when the selection has a profile that actually has a proxy.
+  const proxiedCount = useProfile((s) => s.profiles.filter((p) => s.selected.has(p.id) && !!p.proxy_id).length);
   // Only offered when the selection really contains a phone profile.
   const androidCount = useProfile((s) => s.profiles.filter((p) => s.selected.has(p.id) && p.mobile).length);
   const role = useTeam((s) => s.role);
@@ -52,6 +55,11 @@ export function BulkActionsBar() {
         </span>
       )}
       <Button variant="neutral" mode="stroke" className="pr-2" size="2xsmall" leftIcon={<StopIcon className="size-3.5" />} onClick={bulkStop}>{t("bulkActionsBar.stop")}</Button>
+      {proxiedCount > 0 && canEdit(role, configured) && (
+        <Button variant="neutral" mode="stroke" className="pr-2" size="2xsmall" onClick={bulkUnbindProxy}>
+          {t("bulkActionsBar.noProxy", { n: proxiedCount })}
+        </Button>
+      )}
       {androidCount > 0 && canEdit(role, configured) && (
         <Button variant="neutral" mode="stroke" className="pr-2" size="2xsmall" onClick={bulkAndroidToDesktop}>
           Đổi {androidCount} Android sang máy tính
