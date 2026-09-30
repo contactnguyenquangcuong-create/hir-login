@@ -59,9 +59,9 @@ impl ProxyEntry {
     /// `--proxy-server` value for the browser engine: `<scheme>://[user:pass@]host:port`
     /// with the login written exactly as it is. The engine does not decode percent
     /// escapes, so the URL form below sent a password like `ab=` as `ab%3D` — which
-    /// the proxy then rejected (SOCKS5: no network; HTTP: a sign-in prompt). Every
-    /// other character tested (`+ @ : / # ? %` and spaces) passes through as written;
-    /// `= ; ,` in an HTTP proxy's login do not, and are handled by `proxy_relay`.
+    /// the proxy then rejected. `+ @ : / # ? %` and spaces pass through as written;
+    /// `=`, `;` and `,` do not (for any proxy kind), and such logins are handled by
+    /// `proxy_relay` instead — see there.
     pub fn to_engine_arg(&self) -> String {
         let scheme = self.kind.as_str();
         let host_port = format!("{}:{}", self.host, self.port);
@@ -1058,9 +1058,9 @@ mod engine_arg_tests {
     /// `x%3D%3D` and be refused (SOCKS5 no network, HTTP a sign-in prompt).
     #[test]
     fn the_engine_gets_the_login_as_written_and_http_clients_get_a_proper_url() {
-        let e = p(ProxyKind::Socks5, "liam432", "mzuwntg1odg0mw==");
-        assert_eq!(e.to_engine_arg(), "socks5://liam432:mzuwntg1odg0mw==@h.example:55159");
-        assert_eq!(e.to_proxy_server_arg(), "socks5://liam432:mzuwntg1odg0mw%3D%3D@h.example:55159");
+        let e = p(ProxyKind::Socks5, "user01", "c2VjcmV0cGFzcw==");
+        assert_eq!(e.to_engine_arg(), "socks5://user01:c2VjcmV0cGFzcw==@h.example:55159");
+        assert_eq!(e.to_proxy_server_arg(), "socks5://user01:c2VjcmV0cGFzcw%3D%3D@h.example:55159");
         let odd = p(ProxyKind::Http, "u", "p+ss @:/#?%");
         assert_eq!(odd.to_engine_arg(), "http://u:p+ss @:/#?%@h.example:55159");
         assert_eq!(p(ProxyKind::Http, "", "").to_engine_arg(), "http://h.example:55159");
