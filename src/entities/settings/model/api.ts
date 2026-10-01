@@ -24,6 +24,10 @@ export const firewallStatus = () => invoke<FirewallStatus>("firewall_status");
 /** Adds the Windows firewall rules; Windows shows one admin prompt. Rejects if declined. */
 export const firewallGrant = () => invoke<void>("firewall_grant");
 export const teamServerStop = () => invoke<void>("team_server_stop");
+/** True if this machine hosts its own team *and* is separately synced to a different one. */
+export const teamServerConflict = () => invoke<boolean>("team_server_conflict");
+/** True if sync already points at a *different* team — hosting and joining stay mutually exclusive. */
+export const teamSyncedElsewhere = () => invoke<boolean>("team_synced_elsewhere");
 export const teamServerStatus = () => invoke<TeamServerStatus>("team_server_status");
 export const teamInviteGenerate = (serverUrl: string, token: string) => invoke<string>("team_invite_generate", { serverUrl, token });
 export const teamInviteGenerateWithAuth = (serverUrl: string, token: string, authKey: string) => invoke<string>("team_invite_generate_with_auth", { serverUrl, token, authKey });

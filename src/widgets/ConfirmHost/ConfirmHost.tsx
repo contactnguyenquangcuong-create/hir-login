@@ -13,7 +13,7 @@ export function ConfirmHost() {
       title={req.title ?? "Confirm"}
       maxWidthClassName="max-w-md"
       footer={
-        <div className="flex justify-end gap-2">
+        <div className="flex flex-wrap justify-end gap-2">
           {req.buttons.map((b, i) => (
             <Button
               key={i}

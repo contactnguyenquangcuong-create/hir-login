@@ -4,7 +4,7 @@ import { CopyField } from "../../shared/ui/CopyField";
 import { toast } from "../../shared/model/toast";
 import { confirmModal } from "../../shared/model/confirm";
 import { teamCall, useTeam } from "../../shared/model/teamRole";
-import { teamInviteGenerate, teamInviteGenerateWithAuth, tailscaleCreateKey } from "../../entities/settings";
+import { teamInviteGenerate, teamInviteGenerateWithAuth, tailscaleCreateKey, tailscaleListKeys, tailscaleRevokeKey } from "../../entities/settings";
 import { Section, Block, Pill, avatar } from "./ui";
 
 type Role = "admin" | "manager" | "member";
@@ -31,7 +31,7 @@ const LEGEND = [
  *  the folders themselves. `oauthReady` comes from the parent (TeamTab) rather than being checked
  *  here too — the two used to drift out of sync: this panel could still say "no Tailscale key yet"
  *  right after the admin had just configured one two sections up. */
-export function MembersPanel({ serverUrl, oauthReady, onOpenOauthSetup }: { serverUrl: string; oauthReady: boolean; onOpenOauthSetup: () => void }) {
+export function MembersPanel({ getServerUrl, oauthReady, onOpenOauthSetup }: { getServerUrl: () => Promise<string>; oauthReady: boolean; onOpenOauthSetup: () => void }) {
   const role = useTeam((s) => s.role);
   // Only whoever holds the server's own token may rank (promote/demote/disable/
   // delete) an admin — a named admin here is a full equal everywhere else, but
@@ -73,6 +73,7 @@ export function MembersPanel({ serverUrl, oauthReady, onOpenOauthSetup }: { serv
   // so it can be found and revoked on its own in Tailscale's Keys page) instead
   // of leaving the code Hir-Login-only.
   const show = async (who: string, token: string) => {
+    const serverUrl = await getServerUrl();
     let code: string;
     if (oauthReady) {
       const key = await tailscaleCreateKey(`Hir-Login - ${who}`);
@@ -101,9 +102,26 @@ export function MembersPanel({ serverUrl, oauthReady, onOpenOauthSetup }: { serv
     const r = await teamCall<{ token: string }>("PUT", "/admin/members", { id: m.id, rotate: true });
     await show(m.name, r.token);
   });
+  // Hir-Login names each Tailscale key it mints "Hir-Login - <tên>" (see `show`
+  // above), so the key(s) a deleted person holds are found by that same name —
+  // there is no key id stored against the member to look up directly. A person
+  // renamed after their key was minted keeps old key(s) under the old name;
+  // those are missed here and need revoking by hand in Tailscale's own console.
+  const revokeKeysFor = async (who: string) => {
+    if (!oauthReady) return;
+    try {
+      const mine = (await tailscaleListKeys()).filter((k) => k.description === `Hir-Login - ${who}` && !k.invalid && !k.revoked);
+      await Promise.all(mine.map((k) => tailscaleRevokeKey(k.id)));
+    } catch (e) {
+      // The person is already removed from Hir-Login either way; only the
+      // network-level cleanup is what failed, worth a separate heads-up.
+      toast.err(`Đã xoá ${who} nhưng chưa thu hồi được Auth Key của họ: ${String(e)}`);
+    }
+  };
   const remove = (m: Member) => run(async () => {
     if ((await confirmModal({ title: `Xoá ${m.name}?`, message: "Người này mất quyền ngay và mã của họ không dùng được nữa.", danger: true })) !== true) return;
     await teamCall("POST", `/admin/members/${m.id}/delete`);
+    await revokeKeysFor(m.name);
   });
 
   return (

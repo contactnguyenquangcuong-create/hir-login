@@ -2552,6 +2552,15 @@ async fn team_sync_pull() -> Result<usize, String> {
 
 #[tauri::command]
 async fn team_server_start(port: u16, token: String) -> Result<u16, String> {
+    // Hosting and being a member of someone else's team are kept mutually
+    // exclusive — a machine with one foot in each is exactly the "2 máy chủ,
+    // lẫn lộn nhau" confusion the admin hit. "Someone else's" means the sync
+    // token this machine is already using doesn't match the one it last hosted
+    // with — so resuming your *own* server (autostart, or the same token again)
+    // is never blocked, only joining a genuinely different team is.
+    if is_synced_to_other_team(&settings::load().map_err(|e| e.to_string())?) {
+        return Err("Máy này đang là thành viên của một team khác — vào Nâng cao, bấm Ngắt để rời team đó trước khi làm máy chủ.".into());
+    }
     let actual = team_server::start(port, token.clone()).await.map_err(|e| e.to_string())?;
     // Persist so setup() auto-resumes after reboot.
     if let Ok(mut s) = settings::load() {
@@ -2575,9 +2584,51 @@ fn team_server_stop() -> Result<(), String> {
     team_server::stop().map_err(|e| e.to_string())?;
     if let Ok(mut s) = settings::load() {
         s.server_host.enabled = false;
+        // "Sync" and "server host" are independent switches — a machine can host
+        // its own team *and* separately be a member of someone else's. But the
+        // common case is a host that syncs to itself (its own token in both
+        // places), and for that one, turning the server off must also turn sync
+        // off: otherwise the Nhân sự / Auth Key panels — gated on sync's role,
+        // not on hosting — keep showing a now-dead server as if it still worked,
+        // because the sync.enabled flag survives the stop untouched. A sync
+        // pointed at someone *else's* server (a different token) is left alone.
+        let self_synced = s.sync.token.is_some() && s.sync.token == s.server_host.token;
+        if self_synced {
+            s.sync.enabled = false;
+            s.sync.server_url = None;
+            s.sync.token = None;
+        }
         let _ = settings::save(&s);
     }
     Ok(())
+}
+
+/// Sync is pointed at a team that isn't this machine's own hosted one —
+/// "foreign" meaning the token differs from the one this machine last hosted
+/// with (`None` on a machine that has never hosted counts as no token of its
+/// own, so any active sync at all is foreign to it).
+fn is_synced_to_other_team(s: &settings::Settings) -> bool {
+    s.sync.enabled && s.sync.token.is_some() && s.sync.token != s.server_host.token
+}
+
+/// True when this machine both hosts its own team server AND separately
+/// syncs to a different one (a different token) at the same time — the setup
+/// that leaves two servers "lẫn lộn nhau" in the same office. Never exposes
+/// either token to the frontend, only this one yes/no. Now mostly a safety
+/// net: `team_server_start` and `team_invite_join` each refuse the action
+/// that would create this in the first place, so it should only ever be seen
+/// from a state saved by an older version.
+#[tauri::command]
+fn team_server_conflict() -> bool {
+    let Ok(s) = settings::load() else { return false };
+    s.server_host.enabled && is_synced_to_other_team(&s)
+}
+
+/// For the frontend to grey out "Bật máy chủ" before the admin even tries —
+/// see `is_synced_to_other_team`.
+#[tauri::command]
+fn team_synced_elsewhere() -> bool {
+    settings::load().map(|s| is_synced_to_other_team(&s)).unwrap_or(false)
 }
 
 #[tauri::command]
@@ -2695,6 +2746,12 @@ async fn tailscale_revoke_key(id: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn team_invite_join(code: String) -> Result<Value, String> {
+    // Symmetric to the guard in `team_server_start`: hosting your own team and
+    // joining someone else's are kept mutually exclusive, so stop the server
+    // first rather than ending up a member of both at once.
+    if settings::load().map(|s| s.server_host.enabled).unwrap_or(false) {
+        return Err("Máy này đang làm máy chủ cho team của bạn — tắt máy chủ (mục Làm máy chủ) trước khi tham gia team khác.".into());
+    }
     let (url, token, auth_key) = team_invite::parse_invite_code(&code).map_err(|e| e.to_string())?;
     // Auto-join Tailscale if auth key is embedded and not yet connected.
     // Hard failure blocks joining even though the binary path was wrong — the
@@ -3330,6 +3387,8 @@ pub fn run() {
             team_sync_pull,
             team_server_start,
             team_server_stop,
+            team_server_conflict,
+            team_synced_elsewhere,
             team_server_status,
             team_invite_generate,
             team_invite_generate_with_auth,
@@ -3573,6 +3632,134 @@ pub fn run() {
 }
 
 #[cfg(test)]
+
+#[cfg(test)]
+mod team_server_stop_tests {
+    use super::*;
+
+    fn with_root<T>(f: impl FnOnce() -> T) -> T {
+        let _g = cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-stop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        store::set_data_root(Some(tmp.clone()));
+        let r = f();
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+        r
+    }
+
+    /// Stopping a server this machine also syncs to itself (same token in both
+    /// places) must drop sync too, or the Nhân sự / Auth Key panels — gated on
+    /// sync's role, not on hosting — keep showing a server that no longer runs.
+    #[test]
+    fn stopping_a_self_hosted_server_also_turns_off_its_own_sync() {
+        with_root(|| {
+            let mut s = settings::load().unwrap();
+            s.server_host.enabled = true;
+            s.server_host.token = Some("tok-self".into());
+            s.sync.enabled = true;
+            s.sync.server_url = Some("http://127.0.0.1:8787".into());
+            s.sync.token = Some("tok-self".into());
+            settings::save(&s).unwrap();
+
+            team_server_stop().unwrap();
+
+            let after = settings::load().unwrap();
+            assert!(!after.server_host.enabled);
+            assert!(!after.sync.enabled, "self-pointing sync must drop with the server");
+            assert!(after.sync.server_url.is_none());
+            assert!(after.sync.token.is_none());
+        });
+    }
+
+    /// Starting a server while already a member of a *different* team is
+    /// refused outright — the two must stay mutually exclusive, rather than
+    /// quietly producing the "2 máy chủ, lẫn lộn nhau" mess.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn starting_a_server_is_refused_while_a_member_of_another_team() {
+        let _g = cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-stop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        store::set_data_root(Some(tmp.clone()));
+        let mut s = settings::load().unwrap();
+        s.sync.enabled = true;
+        s.sync.server_url = Some("http://100.1.2.3:8787".into());
+        s.sync.token = Some("tok-other-team".into());
+        settings::save(&s).unwrap();
+
+        let err = team_server_start(0, "tok-my-own".into()).await.unwrap_err();
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(err.contains("team khác"), "{err}");
+    }
+
+    /// Resuming your *own* server — same token as last time you hosted — is
+    /// never blocked by the guard above, including right after an autostart
+    /// where sync still points at that same self-hosted address.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn resuming_your_own_server_is_never_blocked() {
+        let _g = cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-stop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        store::set_data_root(Some(tmp.clone()));
+        let mut s = settings::load().unwrap();
+        s.server_host.token = Some("tok-self".into());
+        s.sync.enabled = true;
+        s.sync.server_url = Some("http://127.0.0.1:8787".into());
+        s.sync.token = Some("tok-self".into());
+        settings::save(&s).unwrap();
+
+        let res = team_server_start(0, "tok-self".into()).await;
+        team_server::stop().ok();
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(res.is_ok(), "{res:?}");
+    }
+
+    /// Joining another team's invite while this machine is hosting its own is
+    /// refused before any network call — the admin must stop the server first.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn joining_another_team_is_refused_while_hosting() {
+        let _g = cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-stop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        store::set_data_root(Some(tmp.clone()));
+        let mut s = settings::load().unwrap();
+        s.server_host.enabled = true;
+        settings::save(&s).unwrap();
+
+        let code = team_invite::generate_invite_code("http://100.9.9.9:8787", "tok-x");
+        let err = team_invite_join(code).await.unwrap_err();
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(err.contains("máy chủ"), "{err}");
+    }
+
+    /// A machine that hosts its own team *and* is separately a member of
+    /// someone else's (a different token) must keep that other membership when
+    /// its own hosting stops — only the self-pointing case is touched.
+    #[test]
+    fn stopping_the_server_leaves_membership_in_a_different_team_alone() {
+        with_root(|| {
+            let mut s = settings::load().unwrap();
+            s.server_host.enabled = true;
+            s.server_host.token = Some("tok-self".into());
+            s.sync.enabled = true;
+            s.sync.server_url = Some("http://100.1.2.3:8787".into());
+            s.sync.token = Some("tok-other-team".into());
+            settings::save(&s).unwrap();
+
+            team_server_stop().unwrap();
+
+            let after = settings::load().unwrap();
+            assert!(!after.server_host.enabled);
+            assert!(after.sync.enabled, "a different team's membership must survive");
+            assert_eq!(after.sync.server_url.as_deref(), Some("http://100.1.2.3:8787"));
+            assert_eq!(after.sync.token.as_deref(), Some("tok-other-team"));
+        });
+    }
+}
+
 mod bulk_file_tests {
     use super::*;
 

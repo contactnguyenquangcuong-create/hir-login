@@ -5,7 +5,7 @@ import { toast } from "../../shared/model/toast";
 import { useT } from "../../shared/i18n";
 import { startTeamRole, useTeam } from "../../shared/model/teamRole";
 import type { Settings, RemoteProfileStatus } from "../../entities/settings";
-import { teamSyncList, teamSyncPull, teamServerStart, teamServerStop, teamServerStatus, firewallStatus, firewallGrant, type FirewallStatus, teamInviteJoin, tailscaleStatus, autostartGet, autostartSet, tailscaleOauthGet, tailscaleOauthSet, tailscaleOauthClear } from "../../entities/settings";
+import { teamSyncList, teamSyncPull, teamServerStart, teamServerStop, teamServerStatus, teamServerConflict, teamSyncedElsewhere, firewallStatus, firewallGrant, type FirewallStatus, teamInviteJoin, tailscaleStatus, autostartGet, autostartSet, tailscaleOauthGet, tailscaleOauthSet, tailscaleOauthClear } from "../../entities/settings";
 import { confirmModal } from "../../shared/model/confirm";
 import { MembersPanel } from "./MembersPanel";
 import { TailscaleKeysPanel } from "./TailscaleKeysPanel";
@@ -32,6 +32,8 @@ export function TeamTab({
   const [mode, setMode] = useState<"join" | "host">("join");
   const [serverRunning, setServerRunning] = useState(false);
   const [fw, setFw] = useState<FirewallStatus | null>(null);
+  const [conflict, setConflict] = useState(false);
+  const [syncedElsewhere, setSyncedElsewhere] = useState(false);
   const [fwBusy, setFwBusy] = useState(false);
   const [serverPort, setServerPort] = useState(8787);
   const [serverIp, setServerIp] = useState<string | null>(null);
@@ -84,6 +86,16 @@ export function TeamTab({
   };
   const isConnected = !!(sync?.enabled && sync?.server_url && sync?.token);
   const serverUrl = serverRunning ? `http://${serverIp ?? "127.0.0.1"}:${serverPort}` : (sync?.server_url ?? "");
+  // Re-reads the live Tailscale IP right before minting a code — the Tailscale
+  // address can change while this page sits open (reconnect, network switch),
+  // and a code baked from a few minutes ago would send the new person to an
+  // address that no longer answers.
+  const getServerUrl = async () => {
+    if (!serverRunning) return sync?.server_url ?? "";
+    const st = await teamServerStatus().catch(() => null);
+    if (st?.running) { setServerIp(st.tailscale_ip ?? null); return `http://${st.tailscale_ip ?? "127.0.0.1"}:${serverPort}`; }
+    return serverUrl;
+  };
 
   const refreshServer = async () => {
     try {
@@ -101,7 +113,9 @@ export function TeamTab({
     catch (e) { toast.err(String(e)); }
     finally { setFwBusy(false); refreshFw(); }
   };
-  useEffect(() => { startTeamRole(); refreshServer(); refreshTs(); refreshFw(); autostartGet().then(setAutoStart).catch(() => {}); }, []);
+  const refreshConflict = () => teamServerConflict().then(setConflict).catch(() => setConflict(false));
+  const refreshSyncedElsewhere = () => teamSyncedElsewhere().then(setSyncedElsewhere).catch(() => setSyncedElsewhere(false));
+  useEffect(() => { startTeamRole(); refreshServer(); refreshTs(); refreshFw(); refreshConflict(); refreshSyncedElsewhere(); autostartGet().then(setAutoStart).catch(() => {}); }, []);
 
   const toggleServer = async () => {
     setServerBusy(true);
@@ -125,6 +139,8 @@ export function TeamTab({
         setFw(f);
         if (f?.supported && !f.granted) await grantFw();
       }
+      refreshConflict();
+      refreshSyncedElsewhere();
     } catch (e) { toast.err(String(e)); }
     finally { setServerBusy(false); }
   };
@@ -139,6 +155,8 @@ export function TeamTab({
       setJoinCode("");
       refreshTs();
       useTeam.getState().refresh();
+      refreshConflict();
+      refreshSyncedElsewhere();
     } catch (e) { toast.err(String(e)); }
     finally { setJoinBusy(false); }
   };
@@ -181,7 +199,7 @@ export function TeamTab({
             {isConnected && !serverRunning && (
               <>
                 <Button variant="neutral" mode="stroke" size="small" isLoading={pulling} onClick={pull}>Đồng bộ ngay</Button>
-                <Button variant="neutral" mode="stroke" size="small" onClick={onDisconnect}>Ngắt</Button>
+                <Button variant="neutral" mode="stroke" size="small" onClick={() => { onDisconnect(); refreshSyncedElsewhere(); refreshConflict(); }}>Ngắt</Button>
               </>
             )}
           </div>
@@ -193,14 +211,25 @@ export function TeamTab({
         )}
       </Section>
 
+      {conflict && (
+        <Section title="⚠️ Máy này đang dính 2 team cùng lúc" desc="Máy này vừa làm máy chủ cho team của bạn, vừa đang là thành viên của một team khác — rất dễ nhầm hồ sơ giữa hai bên. Nếu không cố ý, hãy tắt một trong hai: tắt máy chủ ở dưới, hoặc vào mục Nâng cao xoá kết nối tới team kia.">
+          <div />
+        </Section>
+      )}
+
       <div><Segmented value={mode} onChange={setMode} options={[{ value: "join", label: "Tham gia team" }, { value: "host", label: "Làm máy chủ" }]} /></div>
 
       {mode === "join" && (
         <Section title="Tham gia team bằng mã" desc="Dán mã quản trị gửi cho bạn (bắt đầu bằng HIR-). Mã mới sẽ thay kết nối hiện tại.">
           <Block>
+            {serverRunning && (
+              <div className="rounded-lg bg-warning-alpha-10 p-3 text-paragraph-xs text-warning-base">
+                Máy này đang làm máy chủ cho team của bạn — tắt máy chủ ở mục "Làm máy chủ" trước khi tham gia team khác.
+              </div>
+            )}
             <div className="flex gap-2">
-              <div className="flex-1"><Input inputSize="small" value={joinCode} onChange={(e) => setJoinCode(e.target.value)} placeholder="HIR-XXXX-XXXX-..." /></div>
-              <Button variant="primary" mode="filled" size="small" onClick={join} isLoading={joinBusy} disabled={!joinCode.trim()}>Kết nối</Button>
+              <div className="flex-1"><Input inputSize="small" value={joinCode} onChange={(e) => setJoinCode(e.target.value)} placeholder="HIR-XXXX-XXXX-..." disabled={serverRunning} /></div>
+              <Button variant="primary" mode="filled" size="small" onClick={join} isLoading={joinBusy} disabled={!joinCode.trim() || serverRunning}>Kết nối</Button>
             </div>
             {tsInstalled === false && !isConnected && (
               <div className="flex flex-wrap items-center gap-2 rounded-lg bg-warning-alpha-10 p-3 text-paragraph-xs">
@@ -215,9 +244,16 @@ export function TeamTab({
 
       {mode === "host" && (
         <Section title="Làm máy chủ" desc="Bật ở máy chạy 24/24. Nhân sự kết nối vào máy này để dùng chung profile.">
+          {!serverRunning && syncedElsewhere && (
+            <Block>
+              <div className="rounded-lg bg-warning-alpha-10 p-3 text-paragraph-xs text-warning-base">
+                Máy này đang là thành viên của một team khác — vào mục Nâng cao bên dưới, bấm Ngắt để rời team đó trước khi làm máy chủ.
+              </div>
+            </Block>
+          )}
           <Row label="Máy chủ" hint={serverRunning ? `Đang chạy ở cổng ${serverPort}` : "Đang tắt"}>
             <div className="sm:text-right">
-              <Button variant={serverRunning ? "neutral" : "primary"} mode={serverRunning ? "stroke" : "filled"} size="small" onClick={toggleServer} isLoading={serverBusy}>
+              <Button variant={serverRunning ? "neutral" : "primary"} mode={serverRunning ? "stroke" : "filled"} size="small" onClick={toggleServer} isLoading={serverBusy} disabled={!serverRunning && syncedElsewhere}>
                 {serverRunning ? "Tắt máy chủ" : "Bật máy chủ"}
               </Button>
             </div>
@@ -290,7 +326,7 @@ export function TeamTab({
         </Section>
       )}
 
-      <MembersPanel serverUrl={serverUrl} oauthReady={oauthReady} onOpenOauthSetup={() => setOauthOpen(true)} />
+      <MembersPanel getServerUrl={getServerUrl} oauthReady={oauthReady} onOpenOauthSetup={() => setOauthOpen(true)} />
 
       {oauthReady && <TailscaleKeysPanel />}
 
