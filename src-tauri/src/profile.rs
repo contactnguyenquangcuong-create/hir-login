@@ -171,6 +171,41 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+/// The engine saves the window's last size/position into the profile's own
+/// `Default/Preferences` (`browser.window_placement`) and restores it on every
+/// launch — including a narrow, cornered one that got saved for whatever
+/// reason (most commonly: the profile ran as a phone-shaped Android window at
+/// some point, and "Đổi sang máy tính" only swaps the fingerprint, never this
+/// leftover window state). Nothing else ever clears it, so the operator sees
+/// the same tiny window every single launch until they notice and manually
+/// resize it once Chromium does start remembering the new size — "tắt đi bật
+/// lại" alone was never going to fix it, because the file never changed.
+///
+/// Called right before every launch; a no-op (and harmless) if the saved
+/// placement is already a reasonable desktop size, or absent, or the profile
+/// is genuinely a phone (where narrow is correct, not a bug).
+pub fn sanitize_window_placement(user_data_dir: &std::path::Path, is_mobile: bool) {
+    if is_mobile {
+        return;
+    }
+    let path = user_data_dir.join("Default").join("Preferences");
+    let Ok(text) = std::fs::read_to_string(&path) else { return };
+    let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&text) else { return };
+    let Some(browser) = root.get_mut("browser").and_then(|b| b.as_object_mut()) else { return };
+    let Some(wp) = browser.get("window_placement").and_then(|w| w.as_object()) else { return };
+    let get = |k: &str| wp.get(k).and_then(|v| v.as_i64());
+    let (Some(left), Some(top), Some(right), Some(bottom)) = (get("left"), get("top"), get("right"), get("bottom")) else { return };
+    const MIN_DESKTOP_WIDTH: i64 = 600;
+    const MIN_DESKTOP_HEIGHT: i64 = 400;
+    if right - left >= MIN_DESKTOP_WIDTH && bottom - top >= MIN_DESKTOP_HEIGHT {
+        return; // already a sane size — leave the operator's own resize alone
+    }
+    browser.remove("window_placement");
+    if let Ok(out) = serde_json::to_string(&root) {
+        let _ = std::fs::write(&path, out);
+    }
+}
+
 fn path_for(id: &str) -> Result<PathBuf> {
     if id.contains(['/', '\\', '.']) {
         anyhow::bail!("invalid profile id");
@@ -757,6 +792,69 @@ fn chrono_now_iso() -> String {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     format!("@{s}")
+}
+
+#[cfg(test)]
+mod window_placement_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn prefs_with(window_placement: serde_json::Value) -> (std::path::PathBuf, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("hir-wp-{}", uuid::Uuid::new_v4()));
+        let default_dir = dir.join("Default");
+        std::fs::create_dir_all(&default_dir).unwrap();
+        let path = default_dir.join("Preferences");
+        let body = serde_json::json!({"browser": {"window_placement": window_placement, "other_setting": true}});
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(body.to_string().as_bytes()).unwrap();
+        (dir, path)
+    }
+
+    fn placement_of(path: &std::path::Path) -> Option<serde_json::Value> {
+        let text = std::fs::read_to_string(path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        v["browser"].get("window_placement").cloned()
+    }
+
+    /// A narrow, phone-shaped window (the exact Android dimensions) left over
+    /// on a desktop profile is cleared, so the engine falls back to its own
+    /// sane default on the next launch instead of restoring the old one again.
+    #[test]
+    fn a_narrow_leftover_window_is_cleared_on_a_desktop_profile() {
+        let (dir, path) = prefs_with(serde_json::json!({"left": 609, "top": 44, "right": 969, "bottom": 850, "maximized": false}));
+        sanitize_window_placement(&dir, false);
+        assert_eq!(placement_of(&path), None, "the narrow placement must be gone");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("other_setting"), "nothing else in Preferences should be touched");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A reasonably sized window — the operator's own deliberate resize — is
+    /// never second-guessed.
+    #[test]
+    fn a_normal_sized_window_is_left_alone() {
+        let (dir, path) = prefs_with(serde_json::json!({"left": 100, "top": 100, "right": 1380, "bottom": 900, "maximized": false}));
+        sanitize_window_placement(&dir, false);
+        assert!(placement_of(&path).is_some(), "a normal-sized window must survive");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The same narrow size is correct, not a bug, on a profile that really is
+    /// a phone — never touched there.
+    #[test]
+    fn a_narrow_window_is_left_alone_on_a_mobile_profile() {
+        let (dir, path) = prefs_with(serde_json::json!({"left": 609, "top": 44, "right": 969, "bottom": 850, "maximized": false}));
+        sanitize_window_placement(&dir, true);
+        assert!(placement_of(&path).is_some(), "an Android profile's phone-sized window is intentional");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// No Preferences file yet (profile never launched) — nothing to crash on.
+    #[test]
+    fn a_missing_preferences_file_is_a_quiet_no_op() {
+        let dir = std::env::temp_dir().join(format!("hir-wp-missing-{}", uuid::Uuid::new_v4()));
+        sanitize_window_placement(&dir, false); // must not panic
+    }
 }
 
 #[cfg(test)]

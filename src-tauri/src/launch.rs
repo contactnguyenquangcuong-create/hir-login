@@ -390,6 +390,12 @@ pub async fn launch_profile_synced(
         cmd.arg("about:blank");
     }
 
+    // A narrow/cornered window from a past launch (most often: this profile used
+    // to be Android and "Đổi sang máy tính" never touches engine-saved window
+    // state) would otherwise restore the same way every time — see the doc
+    // comment on `sanitize_window_placement`.
+    profile::sanitize_window_placement(&udd, profile::claims_mobile(&stored.config));
+
     cmd.stdout(Stdio::null()).stderr(Stdio::null());
     // 0x08000000 = CREATE_NO_WINDOW — suppress the brief console flash when a Tauri
     // GUI app spawns the engine binary. tokio's Command has this inherently, no

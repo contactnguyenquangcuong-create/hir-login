@@ -5,7 +5,7 @@ import { Button, DialogModal } from "@proxyshard/shardx-ui-kit";
 import { toast } from "../../../shared/lib/toast";
 import { useProfile } from "../../../entities/profile";
 
-type ParseRow = { row: number; name: string; folder: string; notes: string; proxy: string; color: string; kind: string; os: string; cookie: string; cookie_count: number; error: string | null };
+type ParseRow = { row: number; name: string; folder: string; notes: string; proxy: string; color: string; kind: string; os: string; cookie: string; cookie_count: number; ram: string; cores: string; timezone: string; language: string; resolution: string; user_agent: string; error: string | null };
 type CreateItem = { index: number; ok: boolean; id: string | null; error: string | null };
 
 async function downloadTemplate() {
@@ -56,7 +56,7 @@ function BulkCreateModal({ onClose }: { onClose: () => void }) {
 
   const create = async () => {
     if (!rows || validCount === 0) return;
-    const payload = rows.filter((r) => !r.error).map((r) => ({ name: r.name, folder: r.folder, notes: r.notes, proxy: r.proxy, color: r.color, kind: r.kind, os: r.os, cookie: r.cookie }));
+    const payload = rows.filter((r) => !r.error).map((r) => ({ name: r.name, folder: r.folder, notes: r.notes, proxy: r.proxy, color: r.color, kind: r.kind, os: r.os, cookie: r.cookie, ram: r.ram, cores: r.cores, timezone: r.timezone, language: r.language, resolution: r.resolution, user_agent: r.user_agent }));
     setCreating(true);
     try {
       const res = await invoke<CreateItem[]>("profile_bulk_create", { rows: payload });
@@ -87,7 +87,9 @@ function BulkCreateModal({ onClose }: { onClose: () => void }) {
           <div className="flex flex-col gap-1">
             <span className="text-label-sm text-text-strong-950">Bước 1: tải file mẫu và điền</span>
             <span className="text-paragraph-xs text-text-soft-400">
-              Các cột: <b>Tên</b> (bắt buộc), <b>Thư mục</b>, <b>Ghi chú</b>, <b>Proxy</b>, <b>Loại proxy</b> (http/https/socks5 — chỉ cần khi ô Proxy không có tiền tố như <code>http://</code>), <b>Màu</b> (#rrggbb), <b>Hệ điều hành</b> (Windows / macOS / Linux — để trống = tự chọn ngẫu nhiên trong 3 hệ này), <b>Cookie</b> (dán nội dung cookie vào ô — JSON xuất từ tiện ích, cookies.txt hoặc chuỗi <code>c_user=…; xs=…</code> — hoặc ghi đường dẫn tới file cookie, ví dụ <code>C:\cookie\fb01.json</code>; ô Excel chứa tối đa khoảng 32.000 ký tự nên cookie dài hãy dùng đường dẫn file). Thư mục chưa có sẽ được tạo. Ngoài hệ điều hành, mọi thông số khác (fingerprint, RAM, số nhân…) đều tự chọn ngẫu nhiên.
+              Các cột: <b>Tên</b> (bắt buộc), <b>Thư mục</b>, <b>Ghi chú</b>, <b>Proxy</b>, <b>Loại proxy</b> (http/https/socks5 — chỉ cần khi ô Proxy không có tiền tố như <code>http://</code>), <b>Màu</b> (#rrggbb), <b>Hệ điều hành</b> (Windows / macOS / Linux — để trống = tự chọn ngẫu nhiên trong 3 hệ này), <b>Cookie</b> (dán nội dung cookie vào ô — JSON xuất từ tiện ích, cookies.txt hoặc chuỗi <code>c_user=…; xs=…</code> — hoặc ghi đường dẫn tới file cookie, ví dụ <code>C:\cookie\fb01.json</code>; ô Excel chứa tối đa khoảng 32.000 ký tự nên cookie dài hãy dùng đường dẫn file), <b>RAM</b> (GB, ví dụ 16) và <b>Nhân</b> (số nhân CPU, ví dụ 8) — để trống = tự động; nếu điền một số không có thật (ví dụ 24GB) thì hệ thống tự làm tròn về số gần nhất có thật trên đúng loại máy đó, không bao giờ để profile claim phần cứng không tồn tại. Thư mục chưa có sẽ được tạo. Fingerprint (vân tay) vẫn luôn tự chọn ngẫu nhiên.
+              <br /><br />
+              Để cố định thêm (thường để trống = tự động theo proxy/vân tay): <b>Múi giờ</b> (đúng tên trong danh sách Múi giờ khi sửa 1 profile, ví dụ <code>Asia/Ho_Chi_Minh</code>), <b>Ngôn ngữ</b> (đúng mã trong danh sách Ngôn ngữ khi sửa 1 profile, ví dụ <code>vi-VN</code>), <b>Độ phân giải</b> (dạng <code>rộngxcao</code>, ví dụ <code>1920x1080</code>) và <b>User-Agent</b> (dán nguyên chuỗi User-Agent muốn dùng). Múi giờ/Ngôn ngữ gõ sai hoặc không có trong danh sách sẽ báo lỗi ngay ở dòng đó, không tự đoán.
             </span>
           </div>
           <div><Button variant="neutral" mode="stroke" size="small" onClick={downloadTemplate}>Tải file Excel mẫu (.xlsx)</Button></div>
@@ -111,7 +113,7 @@ function BulkCreateModal({ onClose }: { onClose: () => void }) {
               <table className="w-full text-left text-paragraph-xs">
                 <thead className="sticky top-0 bg-bg-weak-50">
                   <tr>
-                    <th className="px-2 py-1">#</th><th className="px-2 py-1">Tên</th><th className="px-2 py-1">Thư mục</th><th className="px-2 py-1">Proxy</th><th className="px-2 py-1">Loại</th><th className="px-2 py-1">Màu</th><th className="px-2 py-1">Hệ điều hành</th><th className="px-2 py-1">Cookie</th><th className="px-2 py-1">Kết quả</th>
+                    <th className="px-2 py-1">#</th><th className="px-2 py-1">Tên</th><th className="px-2 py-1">Thư mục</th><th className="px-2 py-1">Proxy</th><th className="px-2 py-1">Loại</th><th className="px-2 py-1">Màu</th><th className="px-2 py-1">Hệ điều hành</th><th className="px-2 py-1">RAM</th><th className="px-2 py-1">Nhân</th><th className="px-2 py-1">Múi giờ</th><th className="px-2 py-1">Ngôn ngữ</th><th className="px-2 py-1">Độ phân giải</th><th className="px-2 py-1">User-Agent</th><th className="px-2 py-1">Cookie</th><th className="px-2 py-1">Kết quả</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -126,6 +128,12 @@ function BulkCreateModal({ onClose }: { onClose: () => void }) {
                         <td className="px-2 py-1">{r.proxy ? (r.kind || "socks5") : ""}</td>
                         <td className="px-2 py-1">{r.color}</td>
                         <td className="px-2 py-1">{r.os || "Tự động"}</td>
+                        <td className="px-2 py-1">{r.ram || "Tự động"}</td>
+                        <td className="px-2 py-1">{r.cores || "Tự động"}</td>
+                        <td className="px-2 py-1">{r.timezone || "Tự động"}</td>
+                        <td className="px-2 py-1">{r.language || "Tự động"}</td>
+                        <td className="px-2 py-1">{r.resolution || "Tự động"}</td>
+                        <td className="px-2 py-1 truncate max-w-[160px]" title={r.user_agent}>{r.user_agent || "Tự động"}</td>
                         <td className="px-2 py-1">{r.cookie_count > 0 ? `${r.cookie_count} cookie` : ""}</td>
                         <td className="px-2 py-1 text-red-600">{r.error ?? res?.error ?? (res?.ok ? "OK" : "")}</td>
                       </tr>

@@ -327,6 +327,69 @@ pub(crate) fn randomize_hardware(payload: &mut serde_json::Map<String, Value>) {
     }
 }
 
+/// Every (cores, RAM) pair `randomize_hardware` could possibly have produced
+/// for this exact profile (same model/platform, same host bounds) — the
+/// candidate list a bulk-import RAM/cores request is snapped onto, so an
+/// explicit ask never claims hardware this profile couldn't otherwise have
+/// gotten honestly.
+fn hardware_candidates(model: &str, platform: &str) -> Vec<(u32, u32)> {
+    if let Some(pool) = mac_hw_configs(model) {
+        return pool.to_vec();
+    }
+    if platform != "Windows" && platform != "Linux" {
+        return Vec::new();
+    }
+    const X86_CORES: [u32; 9] = [4, 6, 8, 12, 16, 20, 24, 28, 32];
+    let host_cores = host_logical_cores();
+    let host_ram = host_ram_bucket_gb();
+    let lo = (host_cores / 3).max(4);
+    let hi = host_cores + 2;
+    let mut cand: Vec<u32> = X86_CORES.into_iter().filter(|&n| n >= lo && n <= hi).collect();
+    if cand.is_empty() {
+        cand.push(X86_CORES.into_iter().min_by_key(|&n| (n as i64 - host_cores as i64).abs()).unwrap());
+    }
+    let mut out = Vec::new();
+    for cores in cand {
+        let tier: &[u32] = if cores <= 6 { &[4, 8, 16] } else if cores <= 10 { &[8, 16, 32] } else { &[16, 32] };
+        let mem_cand: Vec<u32> = tier.iter().copied().filter(|&m| m <= host_ram).collect();
+        if mem_cand.is_empty() {
+            out.push((cores, host_ram));
+        } else {
+            out.extend(mem_cand.into_iter().map(|m| (cores, m)));
+        }
+    }
+    out
+}
+
+/// A bulk-import row's explicit RAM and/or core-count request (either may be
+/// left out): replaces whatever `randomize_hardware` just picked with the
+/// closest pair this exact profile could realistically have, rather than the
+/// literal numbers typed — "24 GB" on a profile that can only ever be 16 or 32
+/// becomes whichever of those is closer, the same way the OS column resolves
+/// "win 11" to "Windows" instead of rejecting it. A no-op if neither was asked
+/// for, or if this profile's platform has no known hardware table at all.
+fn apply_hardware_override(payload: &mut serde_json::Map<String, Value>, want_cores: Option<u32>, want_mem: Option<u32>) {
+    if want_cores.is_none() && want_mem.is_none() {
+        return;
+    }
+    let model = payload.get("_meta").and_then(|m| m.get("gpu_preset_id")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let platform = payload.get("navigator").and_then(|n| n.get("platform")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let candidates = hardware_candidates(&model, &platform);
+    let Some(&(cores, mem)) = candidates.iter().min_by_key(|&&(c, m)| {
+        let dc = want_cores.map(|w| (c as i64 - w as i64).abs()).unwrap_or(0);
+        let dm = want_mem.map(|w| (m as i64 - w as i64).abs()).unwrap_or(0);
+        // Cores weighted higher: it's the more commonly specified, more
+        // visible-sounding spec ("8 nhân"), so a tie should favour matching it.
+        dc * 10 + dm
+    }) else {
+        return; // no known table for this platform — leave randomize_hardware's result alone
+    };
+    if let Some(nav) = payload.get_mut("navigator").and_then(|v| v.as_object_mut()) {
+        nav.insert("hardware_concurrency".into(), Value::from(cores));
+        nav.insert("device_memory".into(), Value::from(mem));
+    }
+}
+
 /// Clamp profile.screen to the real display when it's smaller than the FP claim.
 /// A profile keeps the screen it declares while the real display can hold it.
 pub fn clamp_screen_to_real_display(
@@ -1090,6 +1153,29 @@ struct BulkRow {
     /// reads). Blank = none.
     #[serde(default)]
     cookie: String,
+    /// RAM in GB (e.g. "16"). Blank = automatic. Snapped to the nearest value
+    /// that's realistic for the row's OS (and, on macOS, its exact model) —
+    /// never taken as a literal, exact claim, the same way "16.5 GB" is not a
+    /// real machine's RAM.
+    #[serde(default)]
+    ram: String,
+    /// CPU core count (e.g. "8"). Blank = automatic. Snapped the same way as `ram`.
+    #[serde(default)]
+    cores: String,
+    /// One of the single-profile editor's own Timezone list (e.g.
+    /// "Asia/Ho_Chi_Minh"). Blank = automatic (resolved from the proxy at launch).
+    #[serde(default)]
+    timezone: String,
+    /// One of the single-profile editor's own Language list (e.g. "vi-VN").
+    /// Blank = automatic (resolved from the proxy at launch).
+    #[serde(default)]
+    language: String,
+    /// "WIDTHxHEIGHT", e.g. "1920x1080". Blank = whatever the fingerprint template claims.
+    #[serde(default)]
+    resolution: String,
+    /// Exact User-Agent string. Blank = whatever the fingerprint template claims.
+    #[serde(default)]
+    user_agent: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1114,7 +1200,163 @@ struct BulkParseRow {
     /// Never shown in the preview — only `cookie_count` is.
     cookie: String,
     cookie_count: usize,
+    /// Echoed back for the preview; blank means "tự động" either way.
+    ram: String,
+    cores: String,
+    timezone: String,
+    language: String,
+    resolution: String,
+    user_agent: String,
     error: Option<String>,
+}
+
+/// A "RAM" / "Nhân" cell: blank or "auto"/"tự động" is `Ok(None)`; otherwise a
+/// positive whole number, loosely — it only needs to be a believable *target*,
+/// since `apply_hardware_override` snaps it to the nearest realistic value
+/// anyway, the same way the OS column resolves a typo like "win 11" to "Windows"
+/// rather than demanding an exact match.
+fn parse_bulk_number(s: &str) -> Result<Option<u32>, ()> {
+    let t = s.trim().to_lowercase();
+    if t.is_empty() || t == "auto" || t == "tự động" || t == "tu dong" {
+        return Ok(None);
+    }
+    // Tolerate "16gb", "16 gb", "16 nhân" etc. — strip any trailing letters.
+    let digits: String = t.chars().take_while(|c| c.is_ascii_digit()).collect();
+    match digits.parse::<u32>() {
+        Ok(n) if n > 0 => Ok(Some(n)),
+        _ => Err(()),
+    }
+}
+
+/// The exact set the single-profile editor's Timezone dropdown offers
+/// (`src/shared/constants/index.ts`'s `TIMEZONES`, minus the "auto" row) —
+/// kept in lockstep so a bulk-import request and a value picked by hand always
+/// mean the same thing. Checked case-insensitively; stored in this canonical case.
+const BULK_TIMEZONES: &[&str] = &[
+    "UTC",
+    "America/Anchorage", "America/Argentina/Buenos_Aires", "America/Bogota",
+    "America/Caracas", "America/Chicago", "America/Denver", "America/Halifax",
+    "America/Lima", "America/Los_Angeles", "America/Mexico_City", "America/New_York",
+    "America/Phoenix", "America/Santiago", "America/Sao_Paulo", "America/Toronto",
+    "America/Vancouver", "Pacific/Honolulu",
+    "Europe/Amsterdam", "Europe/Athens", "Europe/Berlin", "Europe/Brussels",
+    "Europe/Bucharest", "Europe/Budapest", "Europe/Copenhagen", "Europe/Dublin",
+    "Europe/Helsinki", "Europe/Istanbul", "Europe/Kyiv", "Europe/Lisbon",
+    "Europe/London", "Europe/Madrid", "Europe/Moscow", "Europe/Oslo",
+    "Europe/Paris", "Europe/Prague", "Europe/Rome", "Europe/Stockholm",
+    "Europe/Vienna", "Europe/Warsaw", "Europe/Zurich",
+    "Africa/Cairo", "Africa/Johannesburg", "Africa/Lagos", "Africa/Nairobi",
+    "Asia/Dubai", "Asia/Jerusalem", "Asia/Riyadh", "Asia/Tehran",
+    "Asia/Bangkok", "Asia/Colombo", "Asia/Dhaka", "Asia/Ho_Chi_Minh",
+    "Asia/Hong_Kong", "Asia/Jakarta", "Asia/Karachi", "Asia/Kathmandu",
+    "Asia/Kolkata", "Asia/Kuala_Lumpur", "Asia/Manila", "Asia/Phnom_Penh",
+    "Asia/Seoul", "Asia/Shanghai", "Asia/Singapore", "Asia/Taipei", "Asia/Tashkent",
+    "Asia/Tokyo", "Asia/Yangon",
+    "Australia/Adelaide", "Australia/Brisbane", "Australia/Melbourne",
+    "Australia/Perth", "Australia/Sydney", "Pacific/Auckland",
+];
+
+/// The exact set the single-profile editor's Language dropdown offers
+/// (`LOCALES`'s codes, minus "auto"), same reasoning as `BULK_TIMEZONES`.
+const BULK_LOCALES: &[&str] = &[
+    "en-US", "en-GB", "en-CA", "en-AU", "de-DE", "es-ES", "es-MX", "fr-FR",
+    "it-IT", "nl-NL", "pl-PL", "pt-BR", "pt-PT", "ro-RO", "ru-RU", "uk-UA",
+    "tr-TR", "el-GR", "cs-CZ", "sv-SE", "fi-FI", "no-NO", "da-DK", "hu-HU",
+    "zh-CN", "zh-TW", "ja-JP", "ko-KR", "ar-SA", "he-IL", "id-ID", "vi-VN",
+    "th-TH", "hi-IN",
+];
+
+/// A "Múi giờ" cell: blank/auto is `Ok(None)`; otherwise must name one of the
+/// zones the single-profile editor's own Timezone dropdown offers (matched
+/// case-insensitively), returned in that list's canonical case.
+fn parse_bulk_timezone(s: &str) -> Result<Option<&'static str>, ()> {
+    let t = s.trim();
+    if t.is_empty() || t.eq_ignore_ascii_case("auto") || t.eq_ignore_ascii_case("tự động") || t.eq_ignore_ascii_case("tu dong") {
+        return Ok(None);
+    }
+    BULK_TIMEZONES.iter().find(|z| z.eq_ignore_ascii_case(t)).copied().map(Some).ok_or(())
+}
+
+/// A "Ngôn ngữ" cell: blank/auto is `Ok(None)`; otherwise one of the locale
+/// codes the single-profile editor's own Language dropdown offers.
+fn parse_bulk_language(s: &str) -> Result<Option<&'static str>, ()> {
+    let t = s.trim();
+    if t.is_empty() || t.eq_ignore_ascii_case("auto") || t.eq_ignore_ascii_case("tự động") || t.eq_ignore_ascii_case("tu dong") {
+        return Ok(None);
+    }
+    BULK_LOCALES.iter().find(|l| l.eq_ignore_ascii_case(t)).copied().map(Some).ok_or(())
+}
+
+/// A "Độ phân giải" cell, "WIDTHxHEIGHT" (e.g. "1920x1080"); blank/auto keeps
+/// whatever the chosen fingerprint template claims.
+fn parse_bulk_resolution(s: &str) -> Result<Option<(u32, u32)>, ()> {
+    let t = s.trim().to_lowercase();
+    if t.is_empty() || t == "auto" || t == "tự động" || t == "tu dong" {
+        return Ok(None);
+    }
+    let (w, h) = t.split_once('x').ok_or(())?;
+    let w: u32 = w.trim().parse().map_err(|_| ())?;
+    let h: u32 = h.trim().parse().map_err(|_| ())?;
+    if w < 320 || h < 320 || w > 10_000 || h > 10_000 { return Err(()); }
+    Ok(Some((w, h)))
+}
+
+/// Sets timezone/language/resolution/user-agent exactly the way the
+/// single-profile editor's "Lưu" does (`src/entities/profile/model/form.ts`),
+/// so a value fixed through Excel behaves identically to one picked by hand —
+/// same derived Accept-Language chain, same screen inset preserved when the
+/// resolution changes. Each parameter left `None` leaves that one alone.
+fn apply_fixed_fingerprint_fields(
+    payload: &mut serde_json::Map<String, Value>,
+    timezone: Option<&str>,
+    language: Option<&str>,
+    resolution: Option<(u32, u32)>,
+    user_agent: Option<&str>,
+) {
+    if let Some(tz) = timezone {
+        payload.insert("timezone".into(), Value::String(tz.to_string()));
+    }
+    if let Some(loc) = language {
+        payload.insert("icu_locale".into(), Value::String(loc.to_string()));
+        if let Some(nav) = payload.get_mut("navigator").and_then(|v| v.as_object_mut()) {
+            nav.insert("language".into(), Value::String(loc.to_string()));
+            nav.insert("accept_language".into(), Value::String(derive_accept_language(loc)));
+            nav.insert("languages".into(), Value::Array(derive_languages_array(loc).into_iter().map(Value::String).collect()));
+        }
+    }
+    if let Some(ua) = user_agent {
+        if let Some(nav) = payload.get_mut("navigator").and_then(|v| v.as_object_mut()) {
+            nav.insert("user_agent".into(), Value::String(ua.to_string()));
+        }
+    }
+    if let Some((w, h)) = resolution {
+        if let Some(screen) = payload.get_mut("screen").and_then(|v| v.as_object_mut()) {
+            let tpl_w = screen.get("width").and_then(|v| v.as_u64()).unwrap_or(w as u64);
+            let tpl_h = screen.get("height").and_then(|v| v.as_u64()).unwrap_or(h as u64);
+            let tpl_avail_w = screen.get("avail_width").and_then(|v| v.as_u64()).unwrap_or(tpl_w);
+            let tpl_avail_h = screen.get("avail_height").and_then(|v| v.as_u64()).unwrap_or(tpl_h);
+            let inset_w = tpl_w.saturating_sub(tpl_avail_w);
+            let inset_h = tpl_h.saturating_sub(tpl_avail_h);
+            screen.insert("width".into(), Value::from(w));
+            screen.insert("height".into(), Value::from(h));
+            screen.insert("avail_width".into(), Value::from((w as u64).saturating_sub(inset_w).max(1)));
+            screen.insert("avail_height".into(), Value::from((h as u64).saturating_sub(inset_h).max(1)));
+        }
+    }
+}
+
+/// Mirrors `deriveAcceptLanguage` in `src/shared/lib/utils.ts`.
+fn derive_accept_language(loc: &str) -> String {
+    if loc == "en-US" { return "en-US,en;q=0.9".into(); }
+    let base = loc.split('-').next().unwrap_or(loc);
+    format!("{loc},{base};q=0.9,en-US;q=0.8,en;q=0.7")
+}
+
+/// Mirrors `deriveLanguagesArray` in `src/shared/lib/utils.ts`.
+fn derive_languages_array(loc: &str) -> Vec<String> {
+    if loc == "en-US" { return vec!["en-US".into(), "en".into()]; }
+    let base = loc.split('-').next().unwrap_or(loc);
+    vec![loc.to_string(), base.to_string(), "en-US".into(), "en".into()]
 }
 
 /// The OS column of a bulk sheet: blank = automatic (Ok(None)); otherwise the
@@ -1431,6 +1673,12 @@ fn bulk_rows_from_table(rows: Vec<Vec<String>>) -> Vec<BulkParseRow> {
     let kind_i = ci(&["kind", "loại proxy", "loai proxy", "proxy type", "protocol", "loại", "loai"]);
     let os_i = ci(&["os", "hệ điều hành", "he dieu hanh", "hđh", "hdh", "platform", "nền tảng", "nen tang"]);
     let cookie_i = ci(&["cookie", "cookies", "ck", "cookie fb"]);
+    let ram_i = ci(&["ram", "bộ nhớ", "bo nho"]);
+    let cores_i = ci(&["nhân", "nhan", "cores", "core", "cpu", "số nhân", "so nhan"]);
+    let tz_i = ci(&["múi giờ", "mui gio", "timezone", "tz"]);
+    let lang_i = ci(&["ngôn ngữ", "ngon ngu", "language", "lang", "locale"]);
+    let res_i = ci(&["độ phân giải", "do phan giai", "resolution", "màn hình", "man hinh", "screen"]);
+    let ua_i = ci(&["user-agent", "user agent", "ua"]);
     let has_header = name_i.is_some() || proxy_i.is_some() || notes_i.is_some();
     let start = if has_header { 1 } else { 0 };
     let mut out = Vec::new();
@@ -1440,10 +1688,10 @@ fn bulk_rows_from_table(rows: Vec<Vec<String>>) -> Vec<BulkParseRow> {
         }
         let at = |i: usize| cols.get(i).map(|s| s.trim().to_string()).unwrap_or_default();
         let g = |opt: Option<usize>| opt.map(&at).unwrap_or_default();
-        let (name, folder, notes, proxy, color, kind, os, cookie_cell) = if has_header {
-            (g(name_i), g(folder_i), g(notes_i), g(proxy_i), g(color_i), g(kind_i), g(os_i), g(cookie_i))
+        let (name, folder, notes, proxy, color, kind, os, cookie_cell, ram, cores, timezone, language, resolution, user_agent) = if has_header {
+            (g(name_i), g(folder_i), g(notes_i), g(proxy_i), g(color_i), g(kind_i), g(os_i), g(cookie_i), g(ram_i), g(cores_i), g(tz_i), g(lang_i), g(res_i), g(ua_i))
         } else {
-            (at(0), at(1), at(2), at(3), at(4), at(5), at(6), at(7))
+            (at(0), at(1), at(2), at(3), at(4), at(5), at(6), at(7), at(8), at(9), at(10), at(11), at(12), at(13))
         };
         let mut err: Option<String> = None;
         // Report the kind that will actually be used, not just the raw column
@@ -1457,6 +1705,16 @@ fn bulk_rows_from_table(rows: Vec<Vec<String>>) -> Vec<BulkParseRow> {
             err = Some("color phải dạng #rrggbb".into());
         } else if parse_bulk_os(&os).is_err() {
             err = Some("hệ điều hành chỉ nhận Windows / macOS / Linux (để trống = tự động)".into());
+        } else if parse_bulk_number(&ram).is_err() {
+            err = Some("RAM phải là một số (GB), để trống = tự động".into());
+        } else if parse_bulk_number(&cores).is_err() {
+            err = Some("Nhân phải là một số, để trống = tự động".into());
+        } else if parse_bulk_timezone(&timezone).is_err() {
+            err = Some("Múi giờ không nằm trong danh sách hỗ trợ (xem danh sách Múi giờ khi sửa 1 profile), để trống = tự động".into());
+        } else if parse_bulk_language(&language).is_err() {
+            err = Some("Ngôn ngữ không nằm trong danh sách hỗ trợ (xem danh sách Ngôn ngữ khi sửa 1 profile), để trống = tự động".into());
+        } else if parse_bulk_resolution(&resolution).is_err() {
+            err = Some("Độ phân giải phải dạng rộngxcao, ví dụ 1920x1080, để trống = tự động".into());
         } else if !proxy.is_empty() {
             match proxy::parse_single_with_kind(&proxy, proxy::ProxyKind::parse(&kind)) {
                 Some(entry) => effective_kind = entry.kind.as_str().to_string(),
@@ -1478,7 +1736,7 @@ fn bulk_rows_from_table(rows: Vec<Vec<String>>) -> Vec<BulkParseRow> {
         };
         // Shown (and later sent back) as the canonical name, or blank for automatic.
         let os = parse_bulk_os(&os).ok().flatten().unwrap_or("").to_string();
-        out.push(BulkParseRow { row: idx + 1, name, folder, notes, proxy, color, kind: effective_kind, os, cookie, cookie_count, error: err });
+        out.push(BulkParseRow { row: idx + 1, name, folder, notes, proxy, color, kind: effective_kind, os, cookie, cookie_count, ram, cores, timezone, language, resolution, user_agent, error: err });
     }
     out
 }
@@ -1486,13 +1744,13 @@ fn bulk_rows_from_table(rows: Vec<Vec<String>>) -> Vec<BulkParseRow> {
 /// A ready-to-fill Excel sheet: header row (with the folder column), two example rows.
 fn build_bulk_template_xlsx() -> Result<Vec<u8>, String> {
     use std::io::Write;
-    let rows: [[&str; 8]; 3] = [
-        ["Tên", "Thư mục", "Ghi chú", "Proxy", "Loại proxy", "Màu", "Hệ điều hành", "Cookie"],
-        ["FB 01", "Shop A", "Nick chạy quảng cáo", "1.2.3.4:1080:user:pass", "socks5", "#8b5cf6", "Windows", ""],
-        ["FB 02", "Shop B", "", "1.2.3.4:8080:user:pass", "http", "#22c55e", "macOS", ""],
+    let rows: [[&str; 14]; 3] = [
+        ["Tên", "Thư mục", "Ghi chú", "Proxy", "Loại proxy", "Màu", "Hệ điều hành", "Cookie", "RAM", "Nhân", "Múi giờ", "Ngôn ngữ", "Độ phân giải", "User-Agent"],
+        ["FB 01", "Shop A", "Nick chạy quảng cáo", "1.2.3.4:1080:user:pass", "socks5", "#8b5cf6", "Windows", "", "", "", "", "", "", ""],
+        ["FB 02", "Shop B", "", "1.2.3.4:8080:user:pass", "http", "#22c55e", "macOS", "", "16", "8", "Asia/Ho_Chi_Minh", "vi-VN", "1920x1080", ""],
     ];
     let esc = |t: &str| t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
-    let mut sheet = String::from(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols><col min="1" max="1" width="18" customWidth="1"/><col min="2" max="2" width="18" customWidth="1"/><col min="3" max="3" width="28" customWidth="1"/><col min="4" max="4" width="38" customWidth="1"/><col min="5" max="5" width="14" customWidth="1"/><col min="6" max="6" width="12" customWidth="1"/><col min="7" max="7" width="16" customWidth="1"/><col min="8" max="8" width="40" customWidth="1"/></cols><sheetData>"#);
+    let mut sheet = String::from(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols><col min="1" max="1" width="18" customWidth="1"/><col min="2" max="2" width="18" customWidth="1"/><col min="3" max="3" width="28" customWidth="1"/><col min="4" max="4" width="38" customWidth="1"/><col min="5" max="5" width="14" customWidth="1"/><col min="6" max="6" width="12" customWidth="1"/><col min="7" max="7" width="16" customWidth="1"/><col min="8" max="8" width="40" customWidth="1"/><col min="9" max="9" width="10" customWidth="1"/><col min="10" max="10" width="10" customWidth="1"/><col min="11" max="11" width="18" customWidth="1"/><col min="12" max="12" width="12" customWidth="1"/><col min="13" max="13" width="14" customWidth="1"/><col min="14" max="14" width="40" customWidth="1"/></cols><sheetData>"#);
     for (r, row) in rows.iter().enumerate() {
         sheet.push_str(&format!(r#"<row r="{}">"#, r + 1));
         for (c, v) in row.iter().enumerate() {
@@ -1625,6 +1883,42 @@ fn profile_bulk_create(rows: Vec<BulkRow>) -> Result<Vec<BulkCreateItem>, String
             out.push(BulkCreateItem { index: idx, ok: false, id: None, error: Some("color phải dạng #rrggbb".into()) });
             continue;
         }
+        let want_ram = match parse_bulk_number(&r.ram) {
+            Ok(w) => w,
+            Err(()) => {
+                out.push(BulkCreateItem { index: idx, ok: false, id: None, error: Some("RAM phải là một số (GB)".into()) });
+                continue;
+            }
+        };
+        let want_cores = match parse_bulk_number(&r.cores) {
+            Ok(w) => w,
+            Err(()) => {
+                out.push(BulkCreateItem { index: idx, ok: false, id: None, error: Some("Nhân phải là một số".into()) });
+                continue;
+            }
+        };
+        let want_tz = match parse_bulk_timezone(&r.timezone) {
+            Ok(w) => w,
+            Err(()) => {
+                out.push(BulkCreateItem { index: idx, ok: false, id: None, error: Some("múi giờ không được hỗ trợ".into()) });
+                continue;
+            }
+        };
+        let want_lang = match parse_bulk_language(&r.language) {
+            Ok(w) => w,
+            Err(()) => {
+                out.push(BulkCreateItem { index: idx, ok: false, id: None, error: Some("ngôn ngữ không được hỗ trợ".into()) });
+                continue;
+            }
+        };
+        let want_resolution = match parse_bulk_resolution(&r.resolution) {
+            Ok(w) => w,
+            Err(()) => {
+                out.push(BulkCreateItem { index: idx, ok: false, id: None, error: Some("độ phân giải phải dạng rộngxcao".into()) });
+                continue;
+            }
+        };
+        let want_ua = Some(r.user_agent.trim()).filter(|s| !s.is_empty());
         // Resolved before the proxy is saved so a row that can't be built never
         // leaves a stray proxy behind.
         let want_os = match parse_bulk_os(&r.os) {
@@ -1683,6 +1977,8 @@ fn profile_bulk_create(rows: Vec<BulkRow>) -> Result<Vec<BulkCreateItem>, String
         }
         // enrich picks random platform/hw/noise seed
         enrich_new_config(None, &mut merged);
+        apply_hardware_override(&mut merged, want_cores, want_ram);
+        apply_fixed_fingerprint_fields(&mut merged, want_tz, want_lang, want_resolution, want_ua);
         ensure_default_noise(&mut merged);
         match save_profile_core(None, Value::Object(merged), false) {
             Ok(meta) => {
@@ -3852,6 +4148,7 @@ mod team_server_stop_tests {
     }
 }
 
+#[cfg(test)]
 mod bulk_file_tests {
     use super::*;
 
@@ -3901,6 +4198,10 @@ mod bulk_file_tests {
         assert_eq!(rows[1].proxy, "1.2.3.4:8080:user:pass");
         assert_eq!(rows[1].kind, "http");
         assert_eq!((rows[0].os.as_str(), rows[1].os.as_str()), ("Windows", "macOS"));
+        assert_eq!((rows[0].ram.as_str(), rows[0].cores.as_str()), ("", ""));
+        assert_eq!((rows[1].ram.as_str(), rows[1].cores.as_str()), ("16", "8"));
+        assert_eq!((rows[0].timezone.as_str(), rows[0].language.as_str(), rows[0].resolution.as_str()), ("", "", ""));
+        assert_eq!((rows[1].timezone.as_str(), rows[1].language.as_str(), rows[1].resolution.as_str()), ("Asia/Ho_Chi_Minh", "vi-VN", "1920x1080"));
         assert!(rows.iter().all(|r| r.error.is_none()), "{:?}", rows.iter().map(|r| &r.error).collect::<Vec<_>>());
     }
 
@@ -3912,6 +4213,108 @@ mod bulk_file_tests {
         println!("{}\n", dump(&rows));
     }
 
+    /// 50 rows with everything *except* OS randomised by hand (names with
+    /// Vietnamese diacritics and emoji, odd-but-valid colors, varied notes and
+    /// folders) — the real shape of what someone pastes into the Excel sheet,
+    /// not the clean synthetic rows the other stress tests use. Every row must
+    /// both succeed and actually land on the OS it asked for; hardware must
+    /// show real variety (the point of leaving it to "auto"), never one value
+    /// repeated every time.
+    #[test]
+    fn fifty_rows_of_realistic_random_input_all_create_cleanly() {
+        let _g = cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-fifty-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        store::set_data_root(Some(tmp.clone()));
+
+        let names = ["Lan - Sale 1", "Nguyễn Văn Cường 🚀", "FB_02 (ads)", "Phở Bò 123", "  Khách lẻ  ", "测试", "test😀emoji", "A".repeat(80).leak() as &str];
+        let oses = ["", "Windows", "macOS", "Linux", "win", "MAC", "linux ", "  ", "Window"]; // last one is a typo, must still work (falls back to auto)
+        let colors = ["", "#ff0000", "00ff00", "#ABCDEF", "123abc"]; // a mix of valid shapes, with/without '#'
+        let folders = ["", "Ads", "Khách VIP", "A/B? test"];
+        let rams = ["", "16", "24gb", "8 GB", "100"]; // "24"/"100" don't exist as a tier — must snap, not fail
+        let cores = ["", "8", "6 nhân", "40"]; // "40" is unrealistic on any host — must snap down
+        let timezones = ["", "Asia/Ho_Chi_Minh", "asia/tokyo", "UTC"]; // mixed case, must still match
+        let languages = ["", "vi-VN", "EN-us", "ja-JP"];
+        let resolutions = ["", "1920x1080", "1366X768"]; // mixed case 'x'
+
+        let rows: Vec<BulkRow> = (0..50)
+            .map(|i| BulkRow {
+                name: format!("{} {i}", names[i % names.len()]),
+                folder: folders[i % folders.len()].into(),
+                notes: format!("ghi chú dòng {i}, có dấu tiếng Việt và ký tự lạ !@#$%"),
+                proxy: String::new(), // a real proxy per-row is covered by the proxy-specific tests
+                color: colors[i % colors.len()].into(),
+                kind: String::new(),
+                os: oses[i % oses.len()].into(),
+                cookie: String::new(),
+                ram: rams[i % rams.len()].into(),
+                cores: cores[i % cores.len()].into(),
+                timezone: timezones[i % timezones.len()].into(),
+                language: languages[i % languages.len()].into(),
+                resolution: resolutions[i % resolutions.len()].into(),
+                user_agent: String::new(),
+            })
+            .collect();
+
+        let res = profile_bulk_create(rows).expect("create must not itself error");
+        let failures: Vec<String> = res.iter().filter(|r| !r.ok).map(|r| format!("{}: {:?}", r.index, r.error)).collect();
+        assert!(failures.is_empty(), "every row has a name and no proxy, so none should fail: {failures:?}");
+
+        let mut cores_seen: std::collections::BTreeSet<u64> = Default::default();
+        let mut mem_seen: std::collections::BTreeSet<u64> = Default::default();
+        for (i, r) in res.iter().enumerate() {
+            let stored = profile::load_raw(r.id.as_ref().unwrap()).unwrap();
+            assert!(!profile::claims_mobile(&stored.config), "row {i}: bulk-create must never land on a phone");
+            let nav = stored.config.get("navigator").cloned().unwrap_or(Value::Null);
+            let platform = nav.get("platform").and_then(|v| v.as_str()).unwrap_or("");
+            let want = parse_bulk_os(oses[i % oses.len()]).ok().flatten();
+            if let Some(w) = want {
+                assert_eq!(platform, w, "row {i} asked {w}, got {platform}");
+            } else {
+                assert!(matches!(platform, "Windows" | "macOS" | "Linux"), "row {i}: auto landed on {platform:?}");
+            }
+            if let Some(c) = nav.get("hardware_concurrency").and_then(|v| v.as_u64()) { cores_seen.insert(c); }
+            if let Some(m) = nav.get("device_memory").and_then(|v| v.as_u64()) { mem_seen.insert(m); }
+
+            if let Some(want_tz) = parse_bulk_timezone(timezones[i % timezones.len()]).unwrap() {
+                assert_eq!(stored.config.get("timezone").and_then(|v| v.as_str()), Some(want_tz), "row {i}");
+            }
+            if let Some(want_lang) = parse_bulk_language(languages[i % languages.len()]).unwrap() {
+                assert_eq!(nav.get("language").and_then(|v| v.as_str()), Some(want_lang), "row {i}");
+                assert!(nav.get("accept_language").and_then(|v| v.as_str()).is_some(), "row {i}: accept_language must be derived");
+                assert!(nav.get("languages").and_then(|v| v.as_array()).is_some(), "row {i}: languages must be derived");
+            }
+            if let Some((want_w, want_h)) = parse_bulk_resolution(resolutions[i % resolutions.len()]).unwrap() {
+                let screen = stored.config.get("screen").cloned().unwrap_or(Value::Null);
+                assert_eq!(screen.get("width").and_then(|v| v.as_u64()), Some(want_w as u64), "row {i}");
+                assert_eq!(screen.get("height").and_then(|v| v.as_u64()), Some(want_h as u64), "row {i}");
+                assert!(screen.get("avail_width").and_then(|v| v.as_u64()).unwrap_or(0) >= 1, "row {i}");
+            }
+        }
+        println!("cores seen: {cores_seen:?}, memory seen: {mem_seen:?}");
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert!(cores_seen.len() > 1, "hardware must vary across 50 'auto' rows, not repeat one value: {cores_seen:?}");
+        assert!(mem_seen.len() > 1, "{mem_seen:?}");
+    }
+
+    /// A malformed color is a clean, named row failure — matching the preview
+    /// table's own validation — not a crash and not a silently-ignored field.
+    #[test]
+    fn an_invalid_color_fails_its_own_row_cleanly() {
+        let _g = cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-badcolor-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        store::set_data_root(Some(tmp.clone()));
+        let row = BulkRow { name: "Bad Color".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: "notacolor".into(), kind: String::new(), os: String::new(), cookie: String::new(), ram: String::new(), cores: String::new(), timezone: String::new(), language: String::new(), resolution: String::new(), user_agent: String::new() };
+        let res = profile_bulk_create(vec![row]).expect("create must not itself error");
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(!res[0].ok, "{res:?}");
+        assert!(res[0].error.as_deref().unwrap_or("").contains("color"), "{res:?}");
+    }
+
     /// Creates profiles from parsed rows inside a throwaway data root (no proxy
     /// rows: those would write the real proxies.json).
     #[test]
@@ -3921,10 +4324,10 @@ mod bulk_file_tests {
         std::fs::create_dir_all(&tmp).unwrap();
         store::set_data_root(Some(tmp.clone()));
         let rows = vec![
-            BulkRow { name: "Bulk A".into(), folder: "Ads".into(), notes: "n1".into(), proxy: String::new(), color: "#8b5cf6".into(), kind: String::new(), os: String::new(), cookie: String::new() },
-            BulkRow { name: "Bulk B".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: "22c55e".into(), kind: String::new(), os: String::new(), cookie: String::new() },
-            BulkRow { name: "Bulk C".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: "zzz".into(), kind: String::new(), os: String::new(), cookie: String::new() },
-            BulkRow { name: "  ".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new(), os: String::new(), cookie: String::new() },
+            BulkRow { name: "Bulk A".into(), folder: "Ads".into(), notes: "n1".into(), proxy: String::new(), color: "#8b5cf6".into(), kind: String::new(), os: String::new(), cookie: String::new(), ram: String::new(), cores: String::new(), timezone: String::new(), language: String::new(), resolution: String::new(), user_agent: String::new() },
+            BulkRow { name: "Bulk B".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: "22c55e".into(), kind: String::new(), os: String::new(), cookie: String::new(), ram: String::new(), cores: String::new(), timezone: String::new(), language: String::new(), resolution: String::new(), user_agent: String::new() },
+            BulkRow { name: "Bulk C".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: "zzz".into(), kind: String::new(), os: String::new(), cookie: String::new(), ram: String::new(), cores: String::new(), timezone: String::new(), language: String::new(), resolution: String::new(), user_agent: String::new() },
+            BulkRow { name: "  ".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new(), os: String::new(), cookie: String::new(), ram: String::new(), cores: String::new(), timezone: String::new(), language: String::new(), resolution: String::new(), user_agent: String::new() },
         ];
         let res = profile_bulk_create(rows).expect("create");
         let summary: Vec<String> = res.iter().map(|r| format!("{}:{}:{:?}", r.index, r.ok, r.error)).collect();
@@ -3974,7 +4377,7 @@ mod bulk_file_tests {
         let tmp = std::env::temp_dir().join(format!("hir-bulk-ck-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&tmp).unwrap();
         store::set_data_root(Some(tmp.clone()));
-        let row = |n: &str, ck: &str| BulkRow { name: n.into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new(), os: String::new(), cookie: ck.into() };
+        let row = |n: &str, ck: &str| BulkRow { name: n.into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new(), os: String::new(), cookie: ck.into(), ram: String::new(), cores: String::new(), timezone: String::new(), language: String::new(), resolution: String::new(), user_agent: String::new() };
         let res = profile_bulk_create(vec![
             row("With", "c_user=100000000000001; xs=43%3Aabc"),
             row("Without", ""),
@@ -4084,7 +4487,7 @@ mod bulk_file_tests {
         store::set_data_root(Some(tmp.clone()));
         let oses = ["Windows", "macOS", "Linux", "windows", "MAC", "win", ""];
         let rows: Vec<BulkRow> = (0..210)
-            .map(|i| BulkRow { name: format!("R{i}"), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new(), os: oses[i % oses.len()].into(), cookie: String::new() })
+            .map(|i| BulkRow { name: format!("R{i}"), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new(), os: oses[i % oses.len()].into(), cookie: String::new(), ram: String::new(), cores: String::new(), timezone: String::new(), language: String::new(), resolution: String::new(), user_agent: String::new() })
             .collect();
         let res = profile_bulk_create(rows).expect("create");
         let mut bad: Vec<String> = Vec::new();
@@ -4143,10 +4546,10 @@ mod bulk_file_tests {
         println!("library platforms: {available:?}");
         let mut rows = Vec::new();
         for (i, os) in ["Windows", "macOS", "Windows", "macOS"].iter().enumerate() {
-            rows.push(BulkRow { name: format!("OS {i}"), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new(), os: (*os).into(), cookie: String::new() });
+            rows.push(BulkRow { name: format!("OS {i}"), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new(), os: (*os).into(), cookie: String::new(), ram: String::new(), cores: String::new(), timezone: String::new(), language: String::new(), resolution: String::new(), user_agent: String::new() });
         }
-        rows.push(BulkRow { name: "OS auto".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new(), os: String::new(), cookie: String::new() });
-        rows.push(BulkRow { name: "OS bad".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new(), os: "beos".into(), cookie: String::new() });
+        rows.push(BulkRow { name: "OS auto".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new(), os: String::new(), cookie: String::new(), ram: String::new(), cores: String::new(), timezone: String::new(), language: String::new(), resolution: String::new(), user_agent: String::new() });
+        rows.push(BulkRow { name: "OS bad".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new(), os: "beos".into(), cookie: String::new(), ram: String::new(), cores: String::new(), timezone: String::new(), language: String::new(), resolution: String::new(), user_agent: String::new() });
         let res = profile_bulk_create(rows).expect("create");
         let summary: Vec<String> = res.iter().map(|r| format!("{}:{}:{:?}", r.index, r.ok, r.error)).collect();
         println!("{}", summary.join("\n"));
@@ -4232,5 +4635,217 @@ mod hardware_variety_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod bulk_hardware_override_tests {
+    use super::*;
+
+    #[test]
+    fn the_ram_cores_cell_is_lenient_about_units_and_still_rejects_nonsense() {
+        assert_eq!(parse_bulk_number(""), Ok(None));
+        assert_eq!(parse_bulk_number("  Tự động "), Ok(None));
+        assert_eq!(parse_bulk_number("auto"), Ok(None));
+        assert_eq!(parse_bulk_number("16"), Ok(Some(16)));
+        assert_eq!(parse_bulk_number("16gb"), Ok(Some(16)));
+        assert_eq!(parse_bulk_number("8 GB"), Ok(Some(8)));
+        assert_eq!(parse_bulk_number("6 nhân"), Ok(Some(6)));
+        assert_eq!(parse_bulk_number("0"), Err(()), "zero is not a real spec");
+        assert_eq!(parse_bulk_number("nhiều"), Err(()));
+        assert_eq!(parse_bulk_number("-4"), Err(()));
+    }
+
+    /// A request for more than any real machine of this kind could have is
+    /// snapped down to the largest honest value this *host* could actually
+    /// back — never taken literally, and never left at whatever
+    /// `randomize_hardware` happened to roll. The expected answer is computed
+    /// from `hardware_candidates` itself rather than a hardcoded "32", since
+    /// how far "too much" goes depends on the machine running the test.
+    #[test]
+    fn an_unrealistic_request_is_snapped_to_the_nearest_real_value() {
+        let candidates = hardware_candidates("", "Windows");
+        let want_cores = candidates.iter().map(|&(c, _)| c).max().unwrap();
+        let mut cfg = serde_json::Map::new();
+        cfg.insert("_meta".into(), serde_json::json!({"gpu_preset_id": "win-hd530-v4"}));
+        cfg.insert("navigator".into(), serde_json::json!({"platform": "Windows", "hardware_concurrency": 4, "device_memory": 4}));
+        apply_hardware_override(&mut cfg, Some(200), Some(1000));
+        let nav = cfg["navigator"].clone();
+        let cores = nav["hardware_concurrency"].as_u64().unwrap() as u32;
+        let mem = nav["device_memory"].as_u64().unwrap() as u32;
+        assert_eq!(cores, want_cores, "must pick the most this host can honestly back, {candidates:?}");
+        assert!(candidates.contains(&(cores, mem)), "{cores}/{mem} not in {candidates:?}");
+    }
+
+    /// A value that's already realistic is honoured exactly, not nudged
+    /// sideways to some other equally-valid neighbour.
+    #[test]
+    fn a_realistic_request_lands_exactly() {
+        // Picked from this host's own candidate list, not hardcoded — a weak
+        // test runner may not have (8, 16) among its honest options at all.
+        let candidates = hardware_candidates("", "Windows");
+        let &(want_cores, want_mem) = candidates.first().expect("host must have at least one candidate");
+        let mut cfg = serde_json::Map::new();
+        cfg.insert("_meta".into(), serde_json::json!({"gpu_preset_id": "win-hd530-v4"}));
+        cfg.insert("navigator".into(), serde_json::json!({"platform": "Windows", "hardware_concurrency": 4, "device_memory": 4}));
+        apply_hardware_override(&mut cfg, Some(want_cores), Some(want_mem));
+        let nav = cfg["navigator"].clone();
+        assert_eq!(nav["hardware_concurrency"].as_u64(), Some(want_cores as u64));
+        assert_eq!(nav["device_memory"].as_u64(), Some(want_mem as u64));
+    }
+
+    /// Asking for only one of the two leaves the other wherever it lands
+    /// closest to the requested one, rather than forcing some arbitrary
+    /// default — asks for whatever this host's *own* candidate list has
+    /// closest to 16 cores, since 16 itself may not be available on a weaker
+    /// test runner, and checks the pairing came from that same list (so the
+    /// two numbers always describe one real, coherent machine).
+    #[test]
+    fn asking_for_only_cores_still_picks_a_coherent_ram_tier() {
+        let candidates = hardware_candidates("", "Windows");
+        let want_cores = candidates.iter().map(|&(c, _)| c).min_by_key(|&c| (c as i64 - 16).abs()).unwrap();
+        let mut cfg = serde_json::Map::new();
+        cfg.insert("_meta".into(), serde_json::json!({"gpu_preset_id": "win-hd530-v4"}));
+        cfg.insert("navigator".into(), serde_json::json!({"platform": "Windows", "hardware_concurrency": 4, "device_memory": 4}));
+        apply_hardware_override(&mut cfg, Some(16), None);
+        let nav = cfg["navigator"].clone();
+        let cores = nav["hardware_concurrency"].as_u64().unwrap() as u32;
+        let mem = nav["device_memory"].as_u64().unwrap() as u32;
+        assert_eq!(cores, want_cores);
+        assert!(candidates.contains(&(cores, mem)), "{cores}/{mem} not a coherent pairing in {candidates:?}");
+    }
+
+    /// A Mac profile is snapped onto its own model's real table (e.g. an M1 Air
+    /// is never 32 GB in real life), not the x86 tiers.
+    #[test]
+    fn a_mac_profile_only_ever_lands_on_its_own_models_real_configuration() {
+        let mut cfg = serde_json::Map::new();
+        cfg.insert("_meta".into(), serde_json::json!({"gpu_preset_id": "mac-m1-air13"}));
+        cfg.insert("navigator".into(), serde_json::json!({"platform": "macOS", "hardware_concurrency": 8, "device_memory": 8}));
+        apply_hardware_override(&mut cfg, None, Some(32)); // the M1 Air never ships with 32 GB
+        let nav = cfg["navigator"].clone();
+        let mem = nav["device_memory"].as_u64().unwrap();
+        assert!(mem == 8 || mem == 16, "an M1 Air must stay on its real options, got {mem}");
+    }
+
+    /// Neither asked for — must not touch what `randomize_hardware` already set.
+    #[test]
+    fn nothing_requested_is_a_true_no_op() {
+        let mut cfg = serde_json::Map::new();
+        cfg.insert("_meta".into(), serde_json::json!({"gpu_preset_id": "win-hd530-v4"}));
+        cfg.insert("navigator".into(), serde_json::json!({"platform": "Windows", "hardware_concurrency": 6, "device_memory": 8}));
+        apply_hardware_override(&mut cfg, None, None);
+        let nav = cfg["navigator"].clone();
+        assert_eq!(nav["hardware_concurrency"].as_u64(), Some(6));
+        assert_eq!(nav["device_memory"].as_u64(), Some(8));
+    }
+}
+
+#[cfg(test)]
+mod bulk_fixed_fields_tests {
+    use super::*;
+
+    #[test]
+    fn timezone_cell_matches_the_editors_own_list_case_insensitively() {
+        assert_eq!(parse_bulk_timezone(""), Ok(None));
+        assert_eq!(parse_bulk_timezone("auto"), Ok(None));
+        assert_eq!(parse_bulk_timezone("Tự động"), Ok(None));
+        assert_eq!(parse_bulk_timezone("Asia/Ho_Chi_Minh"), Ok(Some("Asia/Ho_Chi_Minh")));
+        assert_eq!(parse_bulk_timezone("asia/ho_chi_minh"), Ok(Some("Asia/Ho_Chi_Minh")), "case-insensitive");
+        assert_eq!(parse_bulk_timezone("utc"), Ok(Some("UTC")));
+        assert_eq!(parse_bulk_timezone("Hanoi"), Err(()), "not an IANA zone the editor offers");
+        assert_eq!(parse_bulk_timezone("GMT+7"), Err(()));
+    }
+
+    #[test]
+    fn language_cell_matches_the_editors_own_list_case_insensitively() {
+        assert_eq!(parse_bulk_language(""), Ok(None));
+        assert_eq!(parse_bulk_language("auto"), Ok(None));
+        assert_eq!(parse_bulk_language("vi-VN"), Ok(Some("vi-VN")));
+        assert_eq!(parse_bulk_language("VI-vn"), Ok(Some("vi-VN")), "case-insensitive");
+        assert_eq!(parse_bulk_language("vi"), Err(()), "must be the full code, not just the base language");
+        assert_eq!(parse_bulk_language("klingon"), Err(()));
+    }
+
+    #[test]
+    fn resolution_cell_parses_widthxheight_and_rejects_nonsense() {
+        assert_eq!(parse_bulk_resolution(""), Ok(None));
+        assert_eq!(parse_bulk_resolution("auto"), Ok(None));
+        assert_eq!(parse_bulk_resolution("1920x1080"), Ok(Some((1920, 1080))));
+        assert_eq!(parse_bulk_resolution("1366X768"), Ok(Some((1366, 768))), "uppercase X");
+        assert_eq!(parse_bulk_resolution(" 2560 x 1440 "), Ok(Some((2560, 1440))), "tolerates spaces");
+        assert_eq!(parse_bulk_resolution("1920"), Err(()), "missing height");
+        assert_eq!(parse_bulk_resolution("1920x1080x60"), Err(()));
+        assert_eq!(parse_bulk_resolution("10x10"), Err(()), "too small to be real");
+        assert_eq!(parse_bulk_resolution("abcxdef"), Err(()));
+    }
+
+    /// Accept-Language and the `languages` array are derived exactly like the
+    /// single-profile editor's own save path, so a value fixed via Excel reads
+    /// identically to one picked by hand in the UI.
+    #[test]
+    fn derived_accept_language_and_languages_array_match_the_editor() {
+        assert_eq!(derive_accept_language("vi-VN"), "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7");
+        assert_eq!(derive_accept_language("en-US"), "en-US,en;q=0.9");
+        assert_eq!(derive_languages_array("vi-VN"), vec!["vi-VN", "vi", "en-US", "en"]);
+        assert_eq!(derive_languages_array("en-US"), vec!["en-US", "en"]);
+    }
+
+    fn sample_config() -> serde_json::Map<String, Value> {
+        let mut cfg = serde_json::Map::new();
+        cfg.insert("timezone".into(), Value::String("auto".into()));
+        cfg.insert("navigator".into(), serde_json::json!({"language": "auto", "user_agent": "template-ua"}));
+        cfg.insert("screen".into(), serde_json::json!({"width": 1440, "height": 900, "avail_width": 1440, "avail_height": 875}));
+        cfg
+    }
+
+    #[test]
+    fn nothing_fixed_leaves_the_template_untouched() {
+        let mut cfg = sample_config();
+        apply_fixed_fingerprint_fields(&mut cfg, None, None, None, None);
+        assert_eq!(cfg["timezone"].as_str(), Some("auto"));
+        assert_eq!(cfg["navigator"]["language"].as_str(), Some("auto"));
+        assert_eq!(cfg["navigator"]["user_agent"].as_str(), Some("template-ua"));
+        assert_eq!(cfg["screen"]["width"].as_u64(), Some(1440));
+    }
+
+    #[test]
+    fn a_fixed_timezone_replaces_the_auto_sentinel() {
+        let mut cfg = sample_config();
+        apply_fixed_fingerprint_fields(&mut cfg, Some("Asia/Tokyo"), None, None, None);
+        assert_eq!(cfg["timezone"].as_str(), Some("Asia/Tokyo"));
+        assert_eq!(cfg["navigator"]["language"].as_str(), Some("auto"), "language untouched");
+    }
+
+    #[test]
+    fn a_fixed_language_sets_locale_and_both_derived_fields() {
+        let mut cfg = sample_config();
+        apply_fixed_fingerprint_fields(&mut cfg, None, Some("vi-VN"), None, None);
+        assert_eq!(cfg["icu_locale"].as_str(), Some("vi-VN"));
+        assert_eq!(cfg["navigator"]["language"].as_str(), Some("vi-VN"));
+        assert_eq!(cfg["navigator"]["accept_language"].as_str(), Some("vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7"));
+        assert_eq!(cfg["navigator"]["languages"], serde_json::json!(["vi-VN", "vi", "en-US", "en"]));
+    }
+
+    #[test]
+    fn a_fixed_user_agent_overwrites_the_templates() {
+        let mut cfg = sample_config();
+        apply_fixed_fingerprint_fields(&mut cfg, None, None, None, Some("MyCustomUA/1.0"));
+        assert_eq!(cfg["navigator"]["user_agent"].as_str(), Some("MyCustomUA/1.0"));
+    }
+
+    /// The template's own system-chrome inset (taskbar/menu bar strip) is kept
+    /// proportionally, not invented — a screen whose avail equals its full
+    /// height looks like a screen with no OS chrome at all, which is itself a
+    /// tell. Here the template had a 25px inset (900 - 875); the new height
+    /// must keep that same 25px taken off its own avail_height.
+    #[test]
+    fn a_fixed_resolution_keeps_the_templates_own_inset() {
+        let mut cfg = sample_config();
+        apply_fixed_fingerprint_fields(&mut cfg, None, None, Some((1920, 1080)), None);
+        assert_eq!(cfg["screen"]["width"].as_u64(), Some(1920));
+        assert_eq!(cfg["screen"]["height"].as_u64(), Some(1080));
+        assert_eq!(cfg["screen"]["avail_width"].as_u64(), Some(1920), "template had no horizontal inset");
+        assert_eq!(cfg["screen"]["avail_height"].as_u64(), Some(1055), "1080 - the template's 25px inset");
     }
 }
