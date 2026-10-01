@@ -121,8 +121,12 @@ export function TeamTab({
     setServerBusy(true);
     try {
       if (serverRunning) {
-        await teamServerStop();
+        const synCleared = await teamServerStop();
         setServerRunning(false);
+        // The file just changed under us — `sync` here is the Settings page's
+        // own loaded-once copy, so nothing else tells it that.
+        if (synCleared) onSyncChange({ enabled: false, server_url: null, token: null });
+        useTeam.getState().refresh();
       } else {
         const token = (sync?.token ?? "").trim();
         if (token.length < 8) { toast.err("Nhập Token quản trị (từ 8 ký tự) trước khi bật server."); return; }
@@ -199,7 +203,7 @@ export function TeamTab({
             {isConnected && !serverRunning && (
               <>
                 <Button variant="neutral" mode="stroke" size="small" isLoading={pulling} onClick={pull}>Đồng bộ ngay</Button>
-                <Button variant="neutral" mode="stroke" size="small" onClick={() => { onDisconnect(); refreshSyncedElsewhere(); refreshConflict(); }}>Ngắt</Button>
+                <Button variant="neutral" mode="stroke" size="small" onClick={async () => { await onDisconnect(); refreshSyncedElsewhere(); refreshConflict(); }}>Ngắt</Button>
               </>
             )}
           </div>
@@ -326,9 +330,17 @@ export function TeamTab({
         </Section>
       )}
 
-      <MembersPanel getServerUrl={getServerUrl} oauthReady={oauthReady} onOpenOauthSetup={() => setOauthOpen(true)} />
-
-      {oauthReady && <TailscaleKeysPanel />}
+      {/* Nhân sự/Auth Key belong to whichever team this tab is actually showing —
+          hiding them when the tab doesn't match keeps the page from implying you
+          can manage a team's people while a banner just above says you can't
+          touch that team from here right now (hosting while on "Tham gia", or
+          vice versa). */}
+      {mode === (serverRunning ? "host" : "join") && (
+        <>
+          <MembersPanel getServerUrl={getServerUrl} oauthReady={oauthReady} onOpenOauthSetup={() => setOauthOpen(true)} />
+          {oauthReady && <TailscaleKeysPanel />}
+        </>
+      )}
 
       <button type="button" onClick={() => setAdvancedOpen((v) => !v)} className="self-start border-0 bg-transparent p-0 text-label-xs text-text-sub-600 hover:text-text-strong-950">
         {advancedOpen ? "▾ Ẩn cấu hình nâng cao" : "▸ Cấu hình nâng cao"}

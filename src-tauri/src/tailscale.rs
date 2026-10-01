@@ -1,4 +1,5 @@
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
 
 /// `Command::new`, but on Windows it won't flash a console window — every one of
 /// these is a console-subsystem binary (tailscale.exe), and a GUI app spawning
@@ -14,7 +15,31 @@ fn cmd(program: &str) -> Command {
     c
 }
 
+fn tailscale_bin_cache() -> &'static Mutex<Option<String>> {
+    static CELL: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(None))
+}
+
+/// Resolving this spawns a `tailscale version` (or, missing from PATH, several
+/// candidate paths each probed the same way) just to find the binary — and
+/// every one of `is_installed`/`is_connected`/`tailscale_ip` used to do that
+/// resolution over again on its own, so one visit to the "Đồng bộ nhóm" tab
+/// fired it half a dozen times back to back, each a real process spawn. The
+/// path doesn't move during a run, so once found it's kept; "not found" isn't
+/// cached, so installing Tailscale while the app is open is still picked up on
+/// the next check instead of needing a restart.
 fn tailscale_bin() -> Option<String> {
+    if let Some(p) = tailscale_bin_cache().lock().unwrap_or_else(|e| e.into_inner()).clone() {
+        return Some(p);
+    }
+    let found = tailscale_bin_uncached();
+    if let Some(p) = &found {
+        *tailscale_bin_cache().lock().unwrap_or_else(|e| e.into_inner()) = Some(p.clone());
+    }
+    found
+}
+
+fn tailscale_bin_uncached() -> Option<String> {
     // Try PATH first
     if cmd("tailscale").arg("version").output().map(|o| o.status.success()).unwrap_or(false) {
         return Some("tailscale".into());
@@ -47,35 +72,46 @@ fn has_100_ip() -> bool {
     false
 }
 
+/// The one subprocess call `is_connected`/`tailscale_ip` both need — doing it
+/// once and deriving both from the result, instead of each running its own
+/// `tailscale ip -4`, is the other half of the "Đồng bộ nhóm tab thấy lag" fix
+/// (the cached binary path above is the first half).
+fn probe_ip() -> Option<String> {
+    let bin = tailscale_bin()?;
+    let out = cmd(&bin).args(["ip", "-4"]).output().ok()?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.starts_with("100.") { Some(s) } else { None }
+}
+
 pub fn is_installed() -> bool {
     tailscale_bin().is_some() || has_100_ip()
 }
 
 pub fn is_connected() -> bool {
-    if let Some(bin) = tailscale_bin() {
-        if let Ok(out) = cmd(&bin).args(["ip", "-4"]).output() {
-            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if s.starts_with("100.") { return true; }
-        }
-    }
-    has_100_ip()
+    probe_ip().is_some() || has_100_ip()
 }
 
 pub fn tailscale_ip() -> Option<String> {
-    if let Some(bin) = tailscale_bin() {
-        if let Ok(out) = cmd(&bin).args(["ip", "-4"]).output() {
-            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if s.starts_with("100.") { return Some(s); }
+    probe_ip().or_else(|| {
+        #[cfg(unix)]
+        {
+            if let Ok(out) = Command::new("sh").arg("-c").arg("ifconfig 2>/dev/null | grep -o '100\\.[0-9]*\\.[0-9]*\\.[0-9]*' | head -1").output() {
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !s.is_empty() { return Some(s); }
+            }
         }
-    }
-    #[cfg(unix)]
-    {
-        if let Ok(out) = Command::new("sh").arg("-c").arg("ifconfig 2>/dev/null | grep -o '100\\.[0-9]*\\.[0-9]*\\.[0-9]*' | head -1").output() {
-            let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !s.is_empty() { return Some(s); }
-        }
-    }
-    None
+        None
+    })
+}
+
+/// Everything the "Đồng bộ nhóm" tab's status check needs, from a single probe
+/// instead of `is_installed`+`is_connected`+`tailscale_ip` each resolving the
+/// binary and shelling out on their own.
+pub fn status() -> (bool, bool, Option<String>) {
+    let ip = tailscale_ip();
+    let installed = ip.is_some() || tailscale_bin().is_some() || has_100_ip();
+    let connected = ip.is_some();
+    (installed, connected, ip)
 }
 
 /// Try to join tailnet using a reusable auth key. Returns Ok(()) on success or already connected.
@@ -294,6 +330,37 @@ pub async fn revoke_key(client_id: &str, client_secret: &str, key_id: &str) -> a
         .map_err(|e| anyhow::anyhow!("không thu hồi được key: {e}"))?;
     ok_body(resp).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod bin_cache_tests {
+    use super::*;
+
+    /// The getter must return a cached path without re-probing — tested by
+    /// seeding the cache directly rather than depending on this machine (or a
+    /// CI runner, which never has it) actually having Tailscale installed.
+    #[test]
+    fn a_resolved_binary_path_is_cached_and_reused() {
+        let cell = tailscale_bin_cache();
+        let original = cell.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        *cell.lock().unwrap_or_else(|e| e.into_inner()) = Some("/fake/tailscale".into());
+
+        assert_eq!(tailscale_bin().as_deref(), Some("/fake/tailscale"), "a cached hit must come back as-is, with no real probe");
+
+        *cell.lock().unwrap_or_else(|e| e.into_inner()) = original;
+    }
+
+    /// `connected` and `ip` must agree, and a connected result must always
+    /// imply `installed` — holds on any machine, Tailscale or not, since it's
+    /// a property of how `status()` derives its three fields from one probe.
+    #[test]
+    fn status_fields_are_internally_consistent() {
+        let (installed, connected, ip) = status();
+        assert_eq!(connected, ip.is_some(), "connected must come straight from whether the probe found an IP");
+        if connected {
+            assert!(installed, "a live 100.x IP means Tailscale is obviously installed");
+        }
+    }
 }
 
 #[cfg(test)]

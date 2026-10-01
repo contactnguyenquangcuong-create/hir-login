@@ -2565,23 +2565,17 @@ async fn team_server_start(port: u16, token: String) -> Result<u16, String> {
     // Persist so setup() auto-resumes after reboot.
     if let Ok(mut s) = settings::load() {
         s.server_host.enabled = true;
-        s.server_host.port = actual;
         s.server_host.token = Some(token.clone());
-        s.sync.token = Some(token.clone());
-        // keep existing sync url sane if possible
-        if s.sync.server_url.is_none() {
-            let ip = team_server::tailscale_ip().unwrap_or_else(|| "127.0.0.1".into());
-            s.sync.server_url = Some(format!("http://{ip}:{actual}"));
-            s.sync.enabled = true;
-        }
+        set_self_sync(&mut s, actual, &token);
         let _ = settings::save(&s);
     }
     Ok(actual)
 }
 
 #[tauri::command]
-fn team_server_stop() -> Result<(), String> {
+fn team_server_stop() -> Result<bool, String> {
     team_server::stop().map_err(|e| e.to_string())?;
+    let mut cleared = false;
     if let Ok(mut s) = settings::load() {
         s.server_host.enabled = false;
         // "Sync" and "server host" are independent switches — a machine can host
@@ -2592,23 +2586,51 @@ fn team_server_stop() -> Result<(), String> {
         // not on hosting — keep showing a now-dead server as if it still worked,
         // because the sync.enabled flag survives the stop untouched. A sync
         // pointed at someone *else's* server (a different token) is left alone.
-        let self_synced = s.sync.token.is_some() && s.sync.token == s.server_host.token;
+        // Returned to the frontend so it updates its own copy of `sync` right
+        // away too — that state lives in the Settings page, loaded once at
+        // mount, and nothing else here tells it this file just changed.
+        let self_synced = has_token(&s.sync.token) && s.sync.token == s.server_host.token;
         if self_synced {
             s.sync.enabled = false;
             s.sync.server_url = None;
             s.sync.token = None;
+            cleared = true;
         }
         let _ = settings::save(&s);
     }
-    Ok(())
+    Ok(cleared)
 }
 
 /// Sync is pointed at a team that isn't this machine's own hosted one —
 /// "foreign" meaning the token differs from the one this machine last hosted
 /// with (`None` on a machine that has never hosted counts as no token of its
 /// own, so any active sync at all is foreign to it).
+/// A blank string is stored, not `None`, whenever one of the "Nâng cao" text
+/// fields was cleared without its pair going blank too (each only flips
+/// `enabled` off when *that one* field is empty). The frontend treats that the
+/// same as "no token" because JS reads "" as falsy, so every check here must
+/// too, or the two sides disagree about whether this machine is synced to
+/// anything at all.
+fn has_token(t: &Option<String>) -> bool {
+    t.as_deref().is_some_and(|v| !v.trim().is_empty())
+}
+
 fn is_synced_to_other_team(s: &settings::Settings) -> bool {
-    s.sync.enabled && s.sync.token.is_some() && s.sync.token != s.server_host.token
+    s.sync.enabled && has_token(&s.sync.token) && s.sync.token != s.server_host.token
+}
+
+/// Points this machine's own sync at the team server it just (re)started —
+/// used both right after a manual "Bật máy chủ" and after an autostart resume,
+/// the one place nothing else was going to refresh `sync.server_url` on its
+/// own (that path never runs the frontend's `onSyncCommit`). Always
+/// overwrites: by the time either caller reaches this, `is_synced_to_other_team`
+/// has already ruled out clobbering a genuine other-team membership.
+fn set_self_sync(s: &mut settings::Settings, actual_port: u16, token: &str) {
+    let ip = team_server::tailscale_ip().unwrap_or_else(|| "127.0.0.1".into());
+    s.server_host.port = actual_port;
+    s.sync.enabled = true;
+    s.sync.server_url = Some(format!("http://{ip}:{actual_port}"));
+    s.sync.token = Some(token.to_string());
 }
 
 /// True when this machine both hosts its own team server AND separately
@@ -2632,13 +2654,14 @@ fn team_synced_elsewhere() -> bool {
 }
 
 #[tauri::command]
-fn team_server_status() -> Value {
-    if let Some((port, _)) = team_server::running_info() {
-        let ip = team_server::tailscale_ip();
-        serde_json::json!({"running": true, "port": port, "tailscale_ip": ip})
-    } else {
-        serde_json::json!({"running": false})
-    }
+async fn team_server_status() -> Value {
+    let Some((port, _)) = team_server::running_info() else {
+        return serde_json::json!({"running": false});
+    };
+    // `tailscale_ip()` shells out; off the async runtime for the same reason as
+    // `tailscale_status` above.
+    let ip = tokio::task::spawn_blocking(team_server::tailscale_ip).await.unwrap_or(None);
+    serde_json::json!({"running": true, "port": port, "tailscale_ip": ip})
 }
 
 #[tauri::command]
@@ -2684,12 +2707,14 @@ fn autostart_get() -> bool { autostart::is_enabled() }
 fn autostart_set(enabled: bool) -> Result<(), String> { autostart::set_enabled(enabled).map_err(|e| e.to_string()) }
 
 #[tauri::command]
-fn tailscale_status() -> Value {
-    serde_json::json!({
-        "installed": tailscale::is_installed(),
-        "connected": tailscale::is_connected(),
-        "ip": tailscale::tailscale_ip(),
-    })
+async fn tailscale_status() -> Value {
+    // One probe instead of three (each of is_installed/is_connected/tailscale_ip
+    // used to resolve the binary and shell out on its own) — see `tailscale::status`.
+    // Off the async runtime: this shells out to `tailscale`, and several of these
+    // firing at once (every mount of "Đồng bộ nhóm") must not tie up its worker
+    // threads while they wait on that.
+    let (installed, connected, ip) = tokio::task::spawn_blocking(tailscale::status).await.unwrap_or((false, false, None));
+    serde_json::json!({ "installed": installed, "connected": connected, "ip": ip })
 }
 
 #[tauri::command]
@@ -3547,6 +3572,19 @@ pub fn run() {
                                 match team_server::start(port, token.clone()).await {
                                     Ok(actual) => {
                                         eprintln!("[launcher] team server auto-resumed :{actual}");
+                                        // This path never goes through the
+                                        // `team_server_start` command (and so never
+                                        // through the frontend's own `onSyncCommit`
+                                        // either), so nothing else refreshes
+                                        // `sync.server_url` here — left stale, it's
+                                        // exactly the "mã mời dẫn tới IP cũ" bug,
+                                        // except happening to *this* machine's own
+                                        // self-check after a reboot that changed its
+                                        // Tailscale IP, not just to an invite code.
+                                        if let Ok(mut s) = settings::load() {
+                                            set_self_sync(&mut s, actual, &token);
+                                            let _ = settings::save(&s);
+                                        }
                                         return;
                                     }
                                     Err(e) if team_server::is_running() => {
@@ -3662,7 +3700,8 @@ mod team_server_stop_tests {
             s.sync.token = Some("tok-self".into());
             settings::save(&s).unwrap();
 
-            team_server_stop().unwrap();
+            let cleared = team_server_stop().unwrap();
+            assert!(cleared, "return value must say sync was cleared, so the frontend updates its own copy");
 
             let after = settings::load().unwrap();
             assert!(!after.server_host.enabled);
@@ -3735,6 +3774,58 @@ mod team_server_stop_tests {
         assert!(err.contains("máy chủ"), "{err}");
     }
 
+    /// `sync.enabled=true` with a blank (not null) token — what the "Nâng cao"
+    /// fields leave behind when one of the pair was cleared without the other
+    /// — must read as "not really synced to anyone", matching the frontend's
+    /// own falsy check, not as membership in some team with an empty name.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_blank_stored_token_is_not_treated_as_membership_in_another_team() {
+        let _g = cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-stop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        store::set_data_root(Some(tmp.clone()));
+        let mut s = settings::load().unwrap();
+        s.server_host.token = Some("tok-self".into());
+        s.sync.enabled = true;
+        s.sync.server_url = Some("http://100.1.2.3:8787".into());
+        s.sync.token = Some("".into());
+        settings::save(&s).unwrap();
+
+        assert!(!is_synced_to_other_team(&settings::load().unwrap()));
+        let res = team_server_start(0, "tok-self".into()).await;
+        team_server::stop().ok();
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(res.is_ok(), "{res:?}");
+    }
+
+    /// Resuming your own server must refresh `sync.server_url` to the port it
+    /// actually bound this time, not leave a stale address from before a
+    /// restart sitting there untouched — that staleness is exactly what sent
+    /// an invite to a Tailscale IP this machine no longer has.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn restarting_your_own_server_refreshes_the_stale_self_url() {
+        let _g = cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-stop-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        store::set_data_root(Some(tmp.clone()));
+        let mut s = settings::load().unwrap();
+        s.server_host.token = Some("tok-self".into());
+        s.sync.enabled = true;
+        s.sync.server_url = Some("http://100.9.9.9:9999".into()); // stale, from before a restart
+        s.sync.token = Some("tok-self".into());
+        settings::save(&s).unwrap();
+
+        let actual = team_server_start(0, "tok-self".into()).await.unwrap();
+        let after = settings::load().unwrap();
+        team_server::stop().ok();
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        assert_ne!(after.sync.server_url.as_deref(), Some("http://100.9.9.9:9999"), "the stale address must not survive");
+        assert!(after.sync.server_url.as_deref().unwrap().ends_with(&format!(":{actual}")), "{:?}", after.sync.server_url);
+    }
+
     /// A machine that hosts its own team *and* is separately a member of
     /// someone else's (a different token) must keep that other membership when
     /// its own hosting stops — only the self-pointing case is touched.
@@ -3749,7 +3840,8 @@ mod team_server_stop_tests {
             s.sync.token = Some("tok-other-team".into());
             settings::save(&s).unwrap();
 
-            team_server_stop().unwrap();
+            let cleared = team_server_stop().unwrap();
+            assert!(!cleared, "a different team's membership was not touched, so nothing to report");
 
             let after = settings::load().unwrap();
             assert!(!after.server_host.enabled);

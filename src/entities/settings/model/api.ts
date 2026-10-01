@@ -23,7 +23,8 @@ export type FirewallStatus = { supported: boolean; granted: boolean };
 export const firewallStatus = () => invoke<FirewallStatus>("firewall_status");
 /** Adds the Windows firewall rules; Windows shows one admin prompt. Rejects if declined. */
 export const firewallGrant = () => invoke<void>("firewall_grant");
-export const teamServerStop = () => invoke<void>("team_server_stop");
+/** Returns true if stopping also cleared this machine's own (self-pointing) sync config. */
+export const teamServerStop = () => invoke<boolean>("team_server_stop");
 /** True if this machine hosts its own team *and* is separately synced to a different one. */
 export const teamServerConflict = () => invoke<boolean>("team_server_conflict");
 /** True if sync already points at a *different* team — hosting and joining stay mutually exclusive. */
