@@ -5,7 +5,7 @@ import { toast } from "../../shared/model/toast";
 import { useT } from "../../shared/i18n";
 import { startTeamRole, useTeam } from "../../shared/model/teamRole";
 import type { Settings, RemoteProfileStatus } from "../../entities/settings";
-import { teamSyncList, teamSyncPull, teamServerStart, teamServerStop, teamServerStatus, teamInviteJoin, tailscaleStatus, autostartGet, autostartSet, tailscaleOauthGet, tailscaleOauthSet, tailscaleOauthClear } from "../../entities/settings";
+import { teamSyncList, teamSyncPull, teamServerStart, teamServerStop, teamServerStatus, firewallStatus, firewallGrant, type FirewallStatus, teamInviteJoin, tailscaleStatus, autostartGet, autostartSet, tailscaleOauthGet, tailscaleOauthSet, tailscaleOauthClear } from "../../entities/settings";
 import { confirmModal } from "../../shared/model/confirm";
 import { MembersPanel } from "./MembersPanel";
 import { TailscaleKeysPanel } from "./TailscaleKeysPanel";
@@ -31,6 +31,8 @@ export function TeamTab({
   const role = useTeam((s) => s.role);
   const [mode, setMode] = useState<"join" | "host">("join");
   const [serverRunning, setServerRunning] = useState(false);
+  const [fw, setFw] = useState<FirewallStatus | null>(null);
+  const [fwBusy, setFwBusy] = useState(false);
   const [serverPort, setServerPort] = useState(8787);
   const [serverIp, setServerIp] = useState<string | null>(null);
   const [serverBusy, setServerBusy] = useState(false);
@@ -91,7 +93,15 @@ export function TeamTab({
     } catch { /* ignore */ }
   };
   const refreshTs = () => tailscaleStatus().then((s) => setTsInstalled(s.installed)).catch(() => setTsInstalled(false));
-  useEffect(() => { startTeamRole(); refreshServer(); refreshTs(); autostartGet().then(setAutoStart).catch(() => {}); }, []);
+  const refreshFw = () => firewallStatus().then(setFw).catch(() => setFw(null));
+  // One admin prompt adds a rule for the app itself, so every port it uses is open.
+  const grantFw = async () => {
+    setFwBusy(true);
+    try { await firewallGrant(); toast.ok("Đã cấp quyền mạng cho Hir-Login"); }
+    catch (e) { toast.err(String(e)); }
+    finally { setFwBusy(false); refreshFw(); }
+  };
+  useEffect(() => { startTeamRole(); refreshServer(); refreshTs(); refreshFw(); autostartGet().then(setAutoStart).catch(() => {}); }, []);
 
   const toggleServer = async () => {
     setServerBusy(true);
@@ -110,6 +120,10 @@ export function TeamTab({
         const url = `http://${st.tailscale_ip ?? "127.0.0.1"}:${actualPort}`;
         await onSyncCommit({ enabled: true, server_url: url, token, device_name: sync?.device_name ?? null, slim_local: sync?.slim_local ?? true });
         useTeam.getState().refresh();
+        // Other machines can only reach this one if the firewall lets the app in.
+        const f = await firewallStatus().catch(() => null);
+        setFw(f);
+        if (f?.supported && !f.granted) await grantFw();
       }
     } catch (e) { toast.err(String(e)); }
     finally { setServerBusy(false); }
@@ -261,6 +275,18 @@ export function TeamTab({
               )}
             </Block>
           )}
+        </Section>
+      )}
+
+      {fw?.supported && (
+        <Section title="Quyền mạng (tường lửa Windows)" desc="Cho phép Hir-Login và trình duyệt của nó đi qua tường lửa, mọi cổng — hết các hộp hỏi quyền và lỗi không kết nối được. Chỉ cần làm một lần trên mỗi máy.">
+          <Row label="Trạng thái" hint={fw.granted ? "Đã cho phép." : "Chưa cho phép. Bấm nút, Windows sẽ hỏi quyền quản trị một lần."}>
+            <div className="sm:flex sm:justify-end">
+              {fw.granted
+                ? <Pill tone="success"><Dot on />Đã cấp</Pill>
+                : <Button variant="primary" mode="stroke" size="small" onClick={grantFw} isLoading={fwBusy}>Cấp quyền mạng</Button>}
+            </div>
+          </Row>
         </Section>
       )}
 

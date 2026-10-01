@@ -32,12 +32,14 @@ export function FoldersPage() {
   useEffect(() => { startTeamRole(); }, []);
 
   const load = useCallback(async () => {
-    if (!canShare(role, configured)) return;
+    // No team on this machine: nothing to ask the server (canShare is "open" for a
+    // local install, which must not turn into a call that can only fail).
+    if (configured !== true || !canShare(role, configured)) return;
     try {
       setServer((await teamCall<{ folders: ServerFolder[] }>("GET", "/admin/folders")).folders);
       setMembers((await teamCall<{ members: Member[] }>("GET", "/admin/members")).members);
       setTrash((await teamCall<{ items: TrashedFolder[] }>("GET", "/admin/folders/trash").catch(() => ({ items: [] as TrashedFolder[] }))).items);
-    } catch (e) { toast.err(String(e)); }
+    } catch (e) { if (!/sync is not enabled/i.test(String(e))) toast.err(String(e)); }
   }, [role, configured]);
   useEffect(() => { load(); }, [load, sharing]);
 
@@ -64,7 +66,7 @@ export function FoldersPage() {
   const create = async () => {
     const n = name.trim();
     if (!n) return;
-    try { await teamCall("PUT", "/admin/folders", { name: n }); rememberFolder(n); setName(""); toast.ok(`Đã tạo thư mục "${n}"`); await load(); }
+    try { if (configured === true) await teamCall("PUT", "/admin/folders", { name: n }); rememberFolder(n); setName(""); toast.ok(`Đã tạo thư mục "${n}"`); await load(); }
     catch (e) { toast.err(/409|exists/i.test(String(e)) ? "Thư mục này đã tồn tại." : String(e)); }
   };
   const remove = async (f: string, onServer: boolean) => {

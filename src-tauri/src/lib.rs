@@ -34,6 +34,7 @@ mod team_acl;
 mod team_server;
 mod team_invite;
 mod tailscale;
+mod firewall;
 
 use serde_json::Value;
 
@@ -1085,6 +1086,10 @@ struct BulkRow {
     /// "Windows" | "macOS" | "Linux" — blank means "pick any".
     #[serde(default)]
     os: String,
+    /// Cookies to load into the new profile (any shape `cookies::parse_any`
+    /// reads). Blank = none.
+    #[serde(default)]
+    cookie: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1105,6 +1110,10 @@ struct BulkParseRow {
     color: String,
     kind: String,
     os: String,
+    /// The cookie text to import (the cell itself, or the file it points to).
+    /// Never shown in the preview — only `cookie_count` is.
+    cookie: String,
+    cookie_count: usize,
     error: Option<String>,
 }
 
@@ -1379,6 +1388,33 @@ fn parse_xlsx_rows(path: &std::path::Path) -> Result<Vec<BulkParseRow>, String> 
     Ok(bulk_rows_from_table(rows))
 }
 
+/// A cookie cell is the cookies themselves, or the path of a file holding them.
+/// Returns the text to import and how many cookies it holds.
+fn read_cookie_cell(cell: &str) -> Result<(String, usize), String> {
+    const MAX_FILE: u64 = 8 * 1024 * 1024;
+    let t = cell.trim().trim_matches('"');
+    let text = match std::path::Path::new(t) {
+        p if !t.contains('\n') && !t.starts_with('[') && !t.starts_with('{') && p.is_file() => {
+            let len = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            if len > MAX_FILE { return Err("file cookie quá lớn".into()); }
+            std::fs::read_to_string(p).map_err(|e| format!("không đọc được file cookie: {e}"))?
+        }
+        _ if looks_like_path(t) => return Err(format!("không thấy file cookie «{t}»")),
+        _ => cell.to_string(),
+    };
+    let list = cookies::parse_any(&text).map_err(|e| format!("không đọc được: {e:#}"))?;
+    if list.is_empty() { return Err("không có cookie nào".into()); }
+    Ok((text, list.len()))
+}
+
+/// Something typed like a file path rather than cookie data.
+fn looks_like_path(t: &str) -> bool {
+    let lower = t.to_lowercase();
+    !t.contains('\n') && !t.contains('=') && !t.contains('\t')
+        && (lower.ends_with(".json") || lower.ends_with(".txt") || lower.ends_with(".csv")
+            || t.starts_with('/') || t.starts_with('~') || t.get(1..3) == Some(":\\") || t.get(1..3) == Some(":/"))
+}
+
 /// Shared by CSV and XLSX: a header row (name/folder/notes/proxy/color, in any
 /// order and language) or, without one, the columns in that fixed order.
 fn bulk_rows_from_table(rows: Vec<Vec<String>>) -> Vec<BulkParseRow> {
@@ -1394,6 +1430,7 @@ fn bulk_rows_from_table(rows: Vec<Vec<String>>) -> Vec<BulkParseRow> {
     let color_i = ci(&["color", "màu", "mau"]);
     let kind_i = ci(&["kind", "loại proxy", "loai proxy", "proxy type", "protocol", "loại", "loai"]);
     let os_i = ci(&["os", "hệ điều hành", "he dieu hanh", "hđh", "hdh", "platform", "nền tảng", "nen tang"]);
+    let cookie_i = ci(&["cookie", "cookies", "ck", "cookie fb"]);
     let has_header = name_i.is_some() || proxy_i.is_some() || notes_i.is_some();
     let start = if has_header { 1 } else { 0 };
     let mut out = Vec::new();
@@ -1403,10 +1440,10 @@ fn bulk_rows_from_table(rows: Vec<Vec<String>>) -> Vec<BulkParseRow> {
         }
         let at = |i: usize| cols.get(i).map(|s| s.trim().to_string()).unwrap_or_default();
         let g = |opt: Option<usize>| opt.map(&at).unwrap_or_default();
-        let (name, folder, notes, proxy, color, kind, os) = if has_header {
-            (g(name_i), g(folder_i), g(notes_i), g(proxy_i), g(color_i), g(kind_i), g(os_i))
+        let (name, folder, notes, proxy, color, kind, os, cookie_cell) = if has_header {
+            (g(name_i), g(folder_i), g(notes_i), g(proxy_i), g(color_i), g(kind_i), g(os_i), g(cookie_i))
         } else {
-            (at(0), at(1), at(2), at(3), at(4), at(5), at(6))
+            (at(0), at(1), at(2), at(3), at(4), at(5), at(6), at(7))
         };
         let mut err: Option<String> = None;
         // Report the kind that will actually be used, not just the raw column
@@ -1426,9 +1463,22 @@ fn bulk_rows_from_table(rows: Vec<Vec<String>>) -> Vec<BulkParseRow> {
                 None => err = Some("proxy không hợp lệ".into()),
             }
         }
+        // The cell holds the cookies themselves or the path of a file that does
+        // (an export is often longer than a spreadsheet cell may be).
+        let (cookie, cookie_count) = if cookie_cell.is_empty() {
+            (String::new(), 0)
+        } else {
+            match read_cookie_cell(&cookie_cell) {
+                Ok((text, n)) => (text, n),
+                Err(e) => {
+                    if err.is_none() { err = Some(format!("cookie: {e}")); }
+                    (String::new(), 0)
+                }
+            }
+        };
         // Shown (and later sent back) as the canonical name, or blank for automatic.
         let os = parse_bulk_os(&os).ok().flatten().unwrap_or("").to_string();
-        out.push(BulkParseRow { row: idx + 1, name, folder, notes, proxy, color, kind: effective_kind, os, error: err });
+        out.push(BulkParseRow { row: idx + 1, name, folder, notes, proxy, color, kind: effective_kind, os, cookie, cookie_count, error: err });
     }
     out
 }
@@ -1436,13 +1486,13 @@ fn bulk_rows_from_table(rows: Vec<Vec<String>>) -> Vec<BulkParseRow> {
 /// A ready-to-fill Excel sheet: header row (with the folder column), two example rows.
 fn build_bulk_template_xlsx() -> Result<Vec<u8>, String> {
     use std::io::Write;
-    let rows: [[&str; 7]; 3] = [
-        ["Tên", "Thư mục", "Ghi chú", "Proxy", "Loại proxy", "Màu", "Hệ điều hành"],
-        ["FB 01", "Shop A", "Nick chạy quảng cáo", "1.2.3.4:1080:user:pass", "socks5", "#8b5cf6", "Windows"],
-        ["FB 02", "Shop B", "", "1.2.3.4:8080:user:pass", "http", "#22c55e", "macOS"],
+    let rows: [[&str; 8]; 3] = [
+        ["Tên", "Thư mục", "Ghi chú", "Proxy", "Loại proxy", "Màu", "Hệ điều hành", "Cookie"],
+        ["FB 01", "Shop A", "Nick chạy quảng cáo", "1.2.3.4:1080:user:pass", "socks5", "#8b5cf6", "Windows", ""],
+        ["FB 02", "Shop B", "", "1.2.3.4:8080:user:pass", "http", "#22c55e", "macOS", ""],
     ];
     let esc = |t: &str| t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
-    let mut sheet = String::from(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols><col min="1" max="1" width="18" customWidth="1"/><col min="2" max="2" width="18" customWidth="1"/><col min="3" max="3" width="28" customWidth="1"/><col min="4" max="4" width="38" customWidth="1"/><col min="5" max="5" width="14" customWidth="1"/><col min="6" max="6" width="12" customWidth="1"/><col min="7" max="7" width="16" customWidth="1"/></cols><sheetData>"#);
+    let mut sheet = String::from(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cols><col min="1" max="1" width="18" customWidth="1"/><col min="2" max="2" width="18" customWidth="1"/><col min="3" max="3" width="28" customWidth="1"/><col min="4" max="4" width="38" customWidth="1"/><col min="5" max="5" width="14" customWidth="1"/><col min="6" max="6" width="12" customWidth="1"/><col min="7" max="7" width="16" customWidth="1"/><col min="8" max="8" width="40" customWidth="1"/></cols><sheetData>"#);
     for (r, row) in rows.iter().enumerate() {
         sheet.push_str(&format!(r#"<row r="{}">"#, r + 1));
         for (c, v) in row.iter().enumerate() {
@@ -1635,7 +1685,19 @@ fn profile_bulk_create(rows: Vec<BulkRow>) -> Result<Vec<BulkCreateItem>, String
         enrich_new_config(None, &mut merged);
         ensure_default_noise(&mut merged);
         match save_profile_core(None, Value::Object(merged), false) {
-            Ok(meta) => out.push(BulkCreateItem { index: idx, ok: true, id: Some(meta.id), error: None }),
+            Ok(meta) => {
+                // The profile exists either way; a cookie problem is reported
+                // on the row without undoing it.
+                let note = if r.cookie.trim().is_empty() {
+                    None
+                } else {
+                    cookies::parse_any(&r.cookie)
+                        .and_then(|list| cookies::import(&meta.id, &list))
+                        .err()
+                        .map(|e| format!("đã tạo profile nhưng chưa nạp được cookie: {e:#}"))
+                };
+                out.push(BulkCreateItem { index: idx, ok: true, id: Some(meta.id), error: note });
+            }
             Err(e) => out.push(BulkCreateItem { index: idx, ok: false, id: None, error: Some(e) }),
         }
     }
@@ -2345,6 +2407,20 @@ fn cookies_export_to_file(profile_id: String, path: String) -> Result<usize, Str
     let json = serde_json::to_string_pretty(&cookies).map_err(|e| e.to_string())?;
     std::fs::write(&path, json).map_err(|e| e.to_string())?;
     Ok(cookies.len())
+}
+
+/// Whether the app is already allowed through the Windows firewall.
+#[tauri::command]
+async fn firewall_status() -> Result<firewall::FirewallStatus, String> {
+    tokio::task::spawn_blocking(firewall::status).await.map_err(|e| e.to_string())
+}
+
+/// Adds the firewall rules (one UAC prompt on Windows).
+#[tauri::command]
+async fn firewall_grant() -> Result<(), String> {
+    tokio::task::spawn_blocking(|| firewall::grant().map_err(|e| format!("{e:#}")))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -3207,6 +3283,8 @@ pub fn run() {
             profile_clone,
             profile_import,
             bulk_parse_file,
+            firewall_status,
+            firewall_grant,
             bulk_template_save,
             profile_bulk_create,
             profile_export_folder,
@@ -3564,10 +3642,10 @@ mod bulk_file_tests {
         std::fs::create_dir_all(&tmp).unwrap();
         store::set_data_root(Some(tmp.clone()));
         let rows = vec![
-            BulkRow { name: "Bulk A".into(), folder: "Ads".into(), notes: "n1".into(), proxy: String::new(), color: "#8b5cf6".into(), kind: String::new(), os: String::new() },
-            BulkRow { name: "Bulk B".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: "22c55e".into(), kind: String::new(), os: String::new() },
-            BulkRow { name: "Bulk C".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: "zzz".into(), kind: String::new(), os: String::new() },
-            BulkRow { name: "  ".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new(), os: String::new() },
+            BulkRow { name: "Bulk A".into(), folder: "Ads".into(), notes: "n1".into(), proxy: String::new(), color: "#8b5cf6".into(), kind: String::new(), os: String::new(), cookie: String::new() },
+            BulkRow { name: "Bulk B".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: "22c55e".into(), kind: String::new(), os: String::new(), cookie: String::new() },
+            BulkRow { name: "Bulk C".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: "zzz".into(), kind: String::new(), os: String::new(), cookie: String::new() },
+            BulkRow { name: "  ".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new(), os: String::new(), cookie: String::new() },
         ];
         let res = profile_bulk_create(rows).expect("create");
         let summary: Vec<String> = res.iter().map(|r| format!("{}:{}:{:?}", r.index, r.ok, r.error)).collect();
@@ -3582,6 +3660,57 @@ mod bulk_file_tests {
         assert_eq!(list.len(), 2);
         assert!(names.contains(&("Bulk A".into(), "Ads".into(), "#8b5cf6".into())));
         assert!(names.contains(&("Bulk B".into(), String::new(), "#22c55e".into())));
+    }
+
+    /// A Cookie column: inline JSON, a cookie string, or the path of a file; a
+    /// bad one fails only its own row, and never shows up in the preview.
+    #[test]
+    fn the_cookie_column_reads_text_and_files_and_flags_bad_rows() {
+        let file = std::env::temp_dir().join(format!("hir-ck-{}.json", uuid::Uuid::new_v4()));
+        std::fs::write(&file, r#"[{"domain":".example.com","name":"a","value":"1","path":"/"},{"domain":".example.com","name":"b","value":"2"}]"#).unwrap();
+        let rows = bulk_rows_from_table(vec![
+            vec!["Tên".into(), "Cookie".into()],
+            vec!["inline".into(), r#"[{"domain":".example.com","name":"a","value":"1"}]"#.into()],
+            vec!["fb string".into(), "c_user=100000000000001; xs=43%3Aabc; datr=zzz".into()],
+            vec!["from file".into(), file.display().to_string()],
+            vec!["missing file".into(), "/no/such/dir/ck.json".into()],
+            vec!["garbage".into(), "hello world".into()],
+            vec!["none".into(), "".into()],
+        ]);
+        let _ = std::fs::remove_file(&file);
+        assert_eq!(rows.len(), 6, "{}", dump(&rows));
+        assert_eq!((rows[0].cookie_count, rows[0].error.clone()), (1, None));
+        assert_eq!((rows[1].cookie_count, rows[1].error.clone()), (3, None));
+        assert_eq!((rows[2].cookie_count, rows[2].error.clone()), (2, None));
+        assert!(rows[2].cookie.contains("example.com"), "the file's content is what gets imported");
+        assert!(rows[3].error.as_deref().unwrap_or("").starts_with("cookie:"), "{:?}", rows[3].error);
+        assert!(rows[4].error.as_deref().unwrap_or("").starts_with("cookie:"), "{:?}", rows[4].error);
+        assert_eq!((rows[5].cookie_count, rows[5].error.clone()), (0, None));
+    }
+
+    /// The cookies of a row really land in that profile's cookie jar — and only there.
+    #[test]
+    fn bulk_create_loads_the_cookie_column_into_each_profile() {
+        let _g = cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-bulk-ck-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        store::set_data_root(Some(tmp.clone()));
+        let row = |n: &str, ck: &str| BulkRow { name: n.into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new(), os: String::new(), cookie: ck.into() };
+        let res = profile_bulk_create(vec![
+            row("With", "c_user=100000000000001; xs=43%3Aabc"),
+            row("Without", ""),
+            row("Broken", "this is not a cookie"),
+        ]).expect("create");
+        let with = cookies::export(res[0].id.as_ref().unwrap());
+        let without = cookies::export(res[1].id.as_ref().unwrap()).map(|c| c.len()).unwrap_or(0);
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+        let with = with.expect("cookie jar readable");
+        assert!(res.iter().all(|r| r.ok), "{res:?}");
+        assert_eq!(with.len(), 2);
+        assert!(with.iter().any(|c| c.name == "xs" && c.value == "43%3Aabc"), "{with:?}");
+        assert_eq!(without, 0);
+        assert!(res[2].error.as_deref().unwrap_or("").contains("cookie"), "a bad cookie is reported on its row: {:?}", res[2].error);
     }
     fn make_profile(fp_id: &str, name: &str, folder: &str) -> String {
         let mut m = merge_library_fingerprint(fp_id).unwrap();
@@ -3676,7 +3805,7 @@ mod bulk_file_tests {
         store::set_data_root(Some(tmp.clone()));
         let oses = ["Windows", "macOS", "Linux", "windows", "MAC", "win", ""];
         let rows: Vec<BulkRow> = (0..210)
-            .map(|i| BulkRow { name: format!("R{i}"), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new(), os: oses[i % oses.len()].into() })
+            .map(|i| BulkRow { name: format!("R{i}"), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new(), os: oses[i % oses.len()].into(), cookie: String::new() })
             .collect();
         let res = profile_bulk_create(rows).expect("create");
         let mut bad: Vec<String> = Vec::new();
@@ -3735,10 +3864,10 @@ mod bulk_file_tests {
         println!("library platforms: {available:?}");
         let mut rows = Vec::new();
         for (i, os) in ["Windows", "macOS", "Windows", "macOS"].iter().enumerate() {
-            rows.push(BulkRow { name: format!("OS {i}"), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new(), os: (*os).into() });
+            rows.push(BulkRow { name: format!("OS {i}"), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new(), os: (*os).into(), cookie: String::new() });
         }
-        rows.push(BulkRow { name: "OS auto".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new(), os: String::new() });
-        rows.push(BulkRow { name: "OS bad".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new(), os: "beos".into() });
+        rows.push(BulkRow { name: "OS auto".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new(), os: String::new(), cookie: String::new() });
+        rows.push(BulkRow { name: "OS bad".into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new(), os: "beos".into(), cookie: String::new() });
         let res = profile_bulk_create(rows).expect("create");
         let summary: Vec<String> = res.iter().map(|r| format!("{}:{}:{:?}", r.index, r.ok, r.error)).collect();
         println!("{}", summary.join("\n"));

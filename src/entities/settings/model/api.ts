@@ -19,6 +19,10 @@ export const teamSyncList = () => invoke<RemoteProfileStatus[]>("team_sync_list"
 
 export type TeamServerStatus = { running: boolean; port?: number; tailscale_ip?: string | null };
 export const teamServerStart = (port: number, token: string) => invoke<number>("team_server_start", { port, token });
+export type FirewallStatus = { supported: boolean; granted: boolean };
+export const firewallStatus = () => invoke<FirewallStatus>("firewall_status");
+/** Adds the Windows firewall rules; Windows shows one admin prompt. Rejects if declined. */
+export const firewallGrant = () => invoke<void>("firewall_grant");
 export const teamServerStop = () => invoke<void>("team_server_stop");
 export const teamServerStatus = () => invoke<TeamServerStatus>("team_server_status");
 export const teamInviteGenerate = (serverUrl: string, token: string) => invoke<string>("team_invite_generate", { serverUrl, token });
