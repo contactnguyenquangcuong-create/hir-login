@@ -208,7 +208,6 @@ pub async fn launch_profile_synced(
         .collect();
     if !ext_paths.is_empty() {
         let joined = ext_paths.join(",");
-        cmd.arg(format!("--disable-extensions-except={joined}"));
         cmd.arg(format!("--load-extension={joined}"));
     }
 

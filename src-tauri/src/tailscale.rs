@@ -277,6 +277,38 @@ pub async fn create_auth_key(
     Ok(key.key)
 }
 
+/// Whether this OAuth Client's tailnet is the one this machine is actually on
+/// — `None` when this machine isn't connected to any tailnet right now, so
+/// there's nothing to compare against. A client from a *different* tailnet
+/// still mints real, working keys; they just join whoever uses them to that
+/// other network, unreachable from this one — exactly the "mã mời không kết
+/// nối được" confusion a mismatched OAuth Client causes, caught here at the
+/// moment it's pasted in rather than days later when a new hire's join fails.
+pub async fn oauth_matches_this_host(client_id: &str, client_secret: &str) -> anyhow::Result<Option<bool>> {
+    let Some(my_ip) = tailscale_ip() else { return Ok(None) };
+    let client = http_client()?;
+    let access_token = oauth_token(&client, client_id, client_secret).await?;
+    #[derive(serde::Deserialize)]
+    struct Device {
+        #[serde(default)]
+        addresses: Vec<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct DevicesResp {
+        #[serde(default)]
+        devices: Vec<Device>,
+    }
+    let resp = client
+        .get("https://api.tailscale.com/api/v2/tailnet/-/devices")
+        .bearer_auth(&access_token)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("không lấy được danh sách máy trong mạng: {e}"))?;
+    let resp = ok_body(resp).await?;
+    let resp: DevicesResp = resp.json().await.map_err(|e| anyhow::anyhow!("phản hồi danh sách máy không đọc được: {e}"))?;
+    Ok(Some(resp.devices.iter().any(|d| d.addresses.iter().any(|a| a == &my_ip))))
+}
+
 /// Every key in the tailnet, newest first. The bulk list endpoint sometimes
 /// answers with only an id per entry, so a key missing its description is
 /// backfilled with one extra call — the team is small, this stays cheap.
@@ -366,6 +398,21 @@ mod bin_cache_tests {
 #[cfg(test)]
 mod oauth_tests {
     use super::*;
+
+    /// With no live Tailscale connection on this machine, there's nothing to
+    /// compare the OAuth Client's tailnet against — answered `None` without
+    /// even spending a network call on the (possibly bogus) credentials, not
+    /// misread as "mismatch". True on any CI runner (never has Tailscale) and,
+    /// right now, true on a dev machine mid-way through testing a join too.
+    #[tokio::test]
+    async fn no_local_tailscale_connection_is_unknown_not_a_mismatch() {
+        if tailscale_ip().is_some() {
+            eprintln!("skipped: this machine is currently connected to Tailscale");
+            return;
+        }
+        let got = oauth_matches_this_host("whatever-id", "whatever-secret").await.unwrap();
+        assert_eq!(got, None);
+    }
 
     /// Missing credentials are refused before any network call, with a message
     /// pointing at what to fill in rather than a raw network error.

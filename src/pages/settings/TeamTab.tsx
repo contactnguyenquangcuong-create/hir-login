@@ -5,10 +5,9 @@ import { toast } from "../../shared/model/toast";
 import { useT } from "../../shared/i18n";
 import { startTeamRole, useTeam } from "../../shared/model/teamRole";
 import type { Settings, RemoteProfileStatus } from "../../entities/settings";
-import { teamSyncList, teamSyncPull, teamServerStart, teamServerStop, teamServerStatus, teamServerConflict, teamSyncedElsewhere, firewallStatus, firewallGrant, type FirewallStatus, teamInviteJoin, tailscaleStatus, autostartGet, autostartSet, tailscaleOauthGet, tailscaleOauthSet, tailscaleOauthClear } from "../../entities/settings";
+import { teamSyncList, teamSyncPull, teamServerStart, teamServerStop, teamServerStatus, teamServerConflict, teamSyncedElsewhere, firewallStatus, firewallGrant, type FirewallStatus, teamInviteJoin, tailscaleStatus, autostartGet, autostartSet, tailscaleOauthGet, tailscaleOauthSet, tailscaleOauthVerify, tailscaleOauthClear } from "../../entities/settings";
 import { confirmModal } from "../../shared/model/confirm";
 import { MembersPanel } from "./MembersPanel";
-import { TailscaleKeysPanel } from "./TailscaleKeysPanel";
 import { Section, Row, Block, Pill, Dot, Segmented } from "./ui";
 
 const ROLE_LABEL = { admin: "Quản trị", manager: "Quản lý nhóm", member: "Thành viên" } as const;
@@ -66,6 +65,16 @@ export function TeamTab({
       setOauthEdit((e) => ({ ...e, clientSecret: "" }));
       setOauthOpen(false);
       toast.ok("Đã lưu OAuth Client. Từ giờ tạo Auth Key ngay trong app.");
+      // Catches exactly today's mistake: a valid Client ID/Secret from a
+      // *different* Tailscale account than this one — it still mints real
+      // keys, they just join whoever uses them to a network this machine
+      // can't reach, which otherwise only shows up when someone's join fails.
+      try {
+        const matches = await tailscaleOauthVerify();
+        if (matches === false) {
+          toast.err("OAuth Client này thuộc một tài khoản Tailscale khác với máy này — mã mời tạo ra sẽ đưa nhân sự vào nhầm mạng, không tới được máy chủ. Vào console.tailscale.com bằng đúng tài khoản máy này đang dùng để tạo OAuth Client khác.");
+        }
+      } catch { /* couldn't check (e.g. offline) — not worth blocking the save over */ }
     } catch (e) { toast.err(String(e)); }
     finally { setOauthSaving(false); }
   };
@@ -330,16 +339,17 @@ export function TeamTab({
         </Section>
       )}
 
-      {/* Nhân sự/Auth Key belong to whichever team this tab is actually showing —
-          hiding them when the tab doesn't match keeps the page from implying you
-          can manage a team's people while a banner just above says you can't
-          touch that team from here right now (hosting while on "Tham gia", or
-          vice versa). */}
+      {/* Nhân sự belongs to whichever team this tab is actually showing — hiding
+          it when the tab doesn't match keeps the page from implying you can
+          manage a team's people while a banner just above says you can't touch
+          that team from here right now (hosting while on "Tham gia", or vice
+          versa).
+          No separate Auth Key panel: deleting a member already revokes their
+          key (MembersPanel's `revokeKeysFor`), so there is nothing routine left
+          to manage by hand — only an edge case (a member renamed after their
+          key was minted) would need Tailscale's own console instead. */}
       {mode === (serverRunning ? "host" : "join") && (
-        <>
-          <MembersPanel getServerUrl={getServerUrl} oauthReady={oauthReady} onOpenOauthSetup={() => setOauthOpen(true)} />
-          {oauthReady && <TailscaleKeysPanel />}
-        </>
+        <MembersPanel getServerUrl={getServerUrl} oauthReady={oauthReady} onOpenOauthSetup={() => setOauthOpen(true)} />
       )}
 
       <button type="button" onClick={() => setAdvancedOpen((v) => !v)} className="self-start border-0 bg-transparent p-0 text-label-xs text-text-sub-600 hover:text-text-strong-950">

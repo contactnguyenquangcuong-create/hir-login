@@ -3153,4 +3153,90 @@ mod tests {
         run_block(&mut bound, &call, &mut vars, &run, &mut ctx).await.unwrap();
         assert_eq!(vars.get("added").map(String::as_str), Some("hi!"));
     }
+    /// Real end-to-end check of the automation + extensions path with an actual
+    /// engine and an actual Chrome Web Store download — not gated by default
+    /// (needs network and a real browser launch; too slow/flaky for the regular
+    /// suite), run on demand with `HIR_RUN_AUTOMATION_E2E=1 cargo test
+    /// --no-default-features --features automation --lib real_automation_run_opens_a_browser_navigates_and_loads_an_extension -- --ignored --nocapture`.
+    #[cfg(test)]
+    mod e2e {
+        use super::*;
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        #[ignore]
+        async fn real_automation_run_opens_a_browser_navigates_and_loads_an_extension() {
+            if std::env::var("HIR_RUN_AUTOMATION_E2E").as_deref() != Ok("1") {
+                eprintln!("skipped: set HIR_RUN_AUTOMATION_E2E=1");
+                return;
+            }
+            let _g = crate::cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let tmp = std::env::temp_dir().join(format!("hir-automation-e2e-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&tmp).unwrap();
+            crate::store::set_data_root(Some(tmp.clone()));
+
+            // React Developer Tools — small, stable, well-known id; only used
+            // as a real extension to prove --load-extension actually takes effect.
+            let ext = crate::extensions::import_url("fmkadmapgofadopljbjfkapdkoienihi")
+                .await
+                .expect("downloads and unpacks from the real Web Store");
+            println!("extension imported: {} v{}", ext.name, ext.version);
+
+            let run = a_run(vec![]);
+            let mut ctx = CallCtx::new();
+            let mut bound = Bound::default();
+            let mut vars: HashMap<String, String> = HashMap::new();
+
+            let make = block("profile.temp", json!({ "name": "e2e-check", "platform": "macOS" }));
+            let flow = run_block(&mut bound, &make, &mut vars, &run, &mut ctx).await.expect("profile.temp");
+            assert!(matches!(flow, Flow::Next));
+            assert!(!bound.id.is_empty(), "a profile must now be bound");
+
+            // Attach the extension to the profile *after* creating it (the block
+            // only takes name/folder/platform/proxy) — same as the editor would.
+            {
+                let mut stored = crate::profile::load_raw(&bound.id).unwrap();
+                stored.meta.extensions = vec![ext.id.clone()];
+                crate::profile::save_raw(&mut stored).unwrap();
+            }
+
+            let go = block("goto", json!({ "url": "https://example.com/" }));
+            let flow = run_block(&mut bound, &go, &mut vars, &run, &mut ctx).await.expect("goto reaches a real page");
+            assert!(matches!(flow, Flow::Next));
+
+            // The page actually loaded, over a real browser driven by this run.
+            let title = cdp::page_call(&bound.id, "Runtime.evaluate", json!({ "expression": "document.title" }))
+                .await
+                .expect("CDP round-trip");
+            let title = title["result"]["value"].as_str().unwrap_or("").to_string();
+            println!("page title: {title:?}");
+
+            assert!(title.to_lowercase().contains("example"), "{title:?}");
+
+            // The real test of "did the extension load": React DevTools
+            // injects this hook into every page's `window` whenever it is
+            // actually active, independent of its devtools panel being open.
+            // Deliberately not checked via Target.getTargets or chrome://
+            // extensions: this anti-detect engine does not surface either
+            // truthfully (no extension target, nothing listed on that page)
+            // even when the extension is demonstrably running — consistent
+            // with its whole purpose of hiding automation/extension signals
+            // from introspection. The page-side effect is what a real user of
+            // the feature actually gets, so it is what this checks.
+            let hook = cdp::page_call(&bound.id, "Runtime.evaluate", json!({
+                "expression": "typeof window.__REACT_DEVTOOLS_GLOBAL_HOOK__",
+                "returnByValue": true,
+            })).await.expect("CDP round-trip");
+            let hook_present = hook["result"]["value"].as_str() == Some("object");
+            println!("extension actually active on the page: {hook_present}");
+
+            // Cleanup: kill the browser, drop the temp profile, forget the override.
+            let _ = crate::process::Tracker::shared().kill(&bound.id).await;
+            cdp::detach(&bound.id);
+            let _ = crate::profile::delete(&bound.id);
+            crate::store::set_data_root(None);
+            let _ = std::fs::remove_dir_all(&tmp);
+
+            assert!(hook_present, "the extension must actually run on the page, not just sit unpacked on disk");
+        }
+    }
 }

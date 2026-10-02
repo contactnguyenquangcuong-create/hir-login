@@ -3029,6 +3029,18 @@ fn tailscale_oauth_set(client_id: String, client_secret: String, tag: String) ->
     settings::save(&s).map_err(|e| e.to_string())
 }
 
+/// Checked right after saving the OAuth Client, not before: a Client ID/Secret
+/// that doesn't even authenticate should surface as "lưu thất bại", not this.
+/// `Some(false)` means the keys it mints will join people to a tailnet this
+/// machine itself isn't on — unreachable, not just slow. `None` means this
+/// machine has no Tailscale connection of its own right now to compare against.
+#[tauri::command]
+async fn tailscale_oauth_verify() -> Result<Option<bool>, String> {
+    let s = settings::load().map_err(|e| e.to_string())?;
+    let o = s.server_host.tailscale_oauth.ok_or_else(|| "chưa cấu hình OAuth Client".to_string())?;
+    tailscale::oauth_matches_this_host(&o.client_id, &o.client_secret).await.map_err(|e| e.to_string())
+}
+
 /// Forget the saved OAuth Client entirely — e.g. before pasting a replacement one.
 /// This only clears what Hir-Login stored locally; it does not touch anything on
 /// Tailscale's side (the client itself, or any key already minted, keeps working).
@@ -3718,6 +3730,7 @@ pub fn run() {
             tailscale_status,
             tailscale_oauth_get,
             tailscale_oauth_set,
+            tailscale_oauth_verify,
             tailscale_oauth_clear,
             tailscale_create_key,
             tailscale_list_keys,

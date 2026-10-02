@@ -44,6 +44,10 @@ export const tailscaleOauthGet = () => invoke<{ client_id: string; has_secret: b
 export const tailscaleOauthSet = (clientId: string, clientSecret: string, tag: string) =>
   invoke<void>("tailscale_oauth_set", { clientId, clientSecret, tag });
 export const tailscaleOauthClear = () => invoke<void>("tailscale_oauth_clear");
+/** true = this OAuth Client's tailnet matches this machine's own; false = a
+ *  mismatch (keys it mints join people to a network unreachable from here);
+ *  null = this machine isn't on any tailnet right now to compare against. */
+export const tailscaleOauthVerify = () => invoke<boolean | null>("tailscale_oauth_verify");
 export const tailscaleCreateKey = (description: string) => invoke<string>("tailscale_create_key", { description });
 
 export type TailscaleKey = { id: string; description: string; created: string; expires: string; revoked: string; invalid: boolean };
