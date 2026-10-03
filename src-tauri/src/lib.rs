@@ -2024,8 +2024,14 @@ fn profile_import(payloads: Vec<Value>) -> Result<usize, String> {
 /// Export profiles as a folder-per-profile bundle under `dest` — carry the
 /// whole folder to another machine and import it back with `profile_import_folder`.
 #[tauri::command]
-fn profile_export_folder(ids: Vec<String>, dest: String) -> Result<usize, String> {
-    profile::export_bundle(&ids, std::path::Path::new(&dest)).map_err(|e| e.to_string())
+async fn profile_export_folder(ids: Vec<String>, dest: String) -> Result<profile::ExportReport, String> {
+    // Hundreds of profiles is minutes of file copying at worst: off the async
+    // runtime so the window and every other command stay responsive meanwhile.
+    tokio::task::spawn_blocking(move || {
+        profile::export_bundle(&ids, std::path::Path::new(&dest)).map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Import every subfolder of `src` as a profile: a folder written by
@@ -2033,8 +2039,12 @@ fn profile_export_folder(ids: Vec<String>, dest: String) -> Result<usize, String
 /// folder of raw browser data (from another install) is adopted as-is and
 /// given a random library fingerprint.
 #[tauri::command]
-fn profile_import_folder(src: String) -> Result<usize, String> {
-    profile::import_bundle(std::path::Path::new(&src)).map_err(|e| e.to_string())
+async fn profile_import_folder(src: String) -> Result<profile::ImportReport, String> {
+    tokio::task::spawn_blocking(move || {
+        profile::import_bundle(std::path::Path::new(&src)).map_err(|e| format!("{e:#}"))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ---- Clipboard (via tauri-plugin-clipboard-manager; webview navigator.clipboard throws) ----

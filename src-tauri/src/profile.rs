@@ -457,69 +457,174 @@ fn save_raw_locked(stored: &mut StoredProfile) -> Result<()> {
     Ok(())
 }
 
-fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
+/// Copies one file, tolerating what a *running* browser does to it: Windows'
+/// `CopyFileEx` refuses a file another process holds open, while a plain read
+/// (std opens with every share flag) usually gets through.
+fn copy_file_tolerant(src: &Path, dst: &Path) -> Result<()> {
+    if fs::copy(src, dst).is_ok() {
+        return Ok(());
+    }
+    let mut from = fs::File::open(src).with_context(|| format!("read {}", src.display()))?;
+    let mut to = fs::File::create(dst).with_context(|| format!("write {}", dst.display()))?;
+    std::io::copy(&mut from, &mut to).with_context(|| format!("copy {}", src.display()))?;
+    Ok(())
+}
+
+/// Recursive copy of regular files and folders only. A Chromium user-data dir
+/// also holds sockets and symlinks (`SingletonLock`/`SingletonSocket`/
+/// `SingletonCookie`, left dangling by a crash or force-quit) that cannot be
+/// copied and carry nothing worth keeping — they are skipped, not fatal, and so
+/// are the `LOCK` files LevelDB holds while a profile runs (re-created on
+/// open). Anything else that fails *is* an error: a bundle silently missing
+/// half a database is worse than one reported as failed.
+fn copy_tree_tolerant(src: &Path, dst: &Path) -> Result<()> {
     fs::create_dir_all(dst)?;
     for entry in fs::read_dir(src)? {
         let entry = entry?;
+        let ft = entry.file_type()?;
         let to = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir_all(&entry.path(), &to)?;
-        } else {
-            fs::copy(entry.path(), &to)?;
+        if ft.is_dir() {
+            copy_tree_tolerant(&entry.path(), &to)?;
+        } else if ft.is_file() {
+            if entry.file_name() == "LOCK" {
+                continue;
+            }
+            copy_file_tolerant(&entry.path(), &to)?;
         }
     }
     Ok(())
 }
 
-/// Turn a profile name into a filesystem-safe folder name, deduped against
-/// what the caller has already used in this batch.
+/// Folder name for one exported profile: the profile's own name where the
+/// filesystem allows it (Vietnamese letters stay readable instead of turning
+/// into underscores), made safe for Windows, capped in length (a long name
+/// plus Chromium's deep cache paths is how a copy hits the 260-character limit)
+/// and deduped against what this batch already used.
 fn dedup_folder_name(name: &str, used: &mut std::collections::HashSet<String>) -> String {
     let base: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ' ' { c } else { '_' })
+        .map(|c| {
+            if c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') { '_' } else { c }
+        })
+        .take(60)
         .collect();
-    let base = base.trim().to_string();
-    let base = if base.is_empty() { "profile".to_string() } else { base };
+    // Windows silently drops trailing dots and spaces, which would make two
+    // names collide on disk while looking distinct here.
+    let base = base.trim().trim_end_matches('.').trim().to_string();
+    let reserved = ["CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "LPT1", "LPT2", "LPT3"];
+    let base = if base.is_empty() || reserved.contains(&base.to_ascii_uppercase().as_str()) {
+        "profile".to_string()
+    } else {
+        base
+    };
     let mut candidate = base.clone();
     let mut n = 2;
-    while used.contains(&candidate) {
+    while used.contains(&candidate.to_lowercase()) {
         candidate = format!("{base} ({n})");
         n += 1;
     }
-    used.insert(candidate.clone());
+    used.insert(candidate.to_lowercase());
     candidate
 }
 
+/// One profile a bundle operation could not do, and why.
+#[derive(Debug, Clone, Serialize)]
+pub struct BundleFailure {
+    pub name: String,
+    pub error: String,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct ExportReport {
+    pub exported: usize,
+    pub failed: Vec<BundleFailure>,
+    /// Exported, but worth a look (e.g. the profile was running at the time).
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Default, Serialize)]
+pub struct ImportReport {
+    pub imported: usize,
+    pub failed: Vec<BundleFailure>,
+    pub warnings: Vec<String>,
+}
+
+/// Export one profile into `out_dir`: `profile.json`, `proxy.json` (the bound
+/// proxy travels with it, or the profile would arrive on another machine
+/// pointing at a proxy id that machine has never heard of) and `userdata/`
+/// holding only the account-carrying files — the same set the trash and team
+/// sync keep, never the cache.
+fn export_one(id: &str, stored: &StoredProfile, out_dir: &Path) -> Result<()> {
+    fs::create_dir_all(out_dir)?;
+    fs::write(out_dir.join("profile.json"), serde_json::to_string_pretty(stored)?)?;
+    let proxy = stored
+        .meta
+        .proxy_id
+        .as_deref()
+        .and_then(|pid| crate::proxy::get(pid).ok().flatten());
+    fs::write(out_dir.join("proxy.json"), serde_json::to_string(&proxy)?)?;
+    let udd = store::user_data_root()?.join(id);
+    if udd.exists() {
+        let dst = out_dir.join("userdata");
+        for rel in crate::cloud_sync::synced_paths() {
+            let src = udd.join(rel);
+            let to = dst.join(rel);
+            if let Some(parent) = to.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            if src.is_dir() {
+                copy_tree_tolerant(&src, &to)?;
+            } else if src.is_file() {
+                copy_file_tolerant(&src, &to)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Export profiles as a portable bundle: one subfolder per profile under
-/// `dest`, each holding `profile.json` (the on-disk StoredProfile) plus a
-/// `userdata/` copy of that profile's browser data — the pair `import_bundle`
-/// expects back, so a folder of these can be carried to another machine and
-/// re-imported whole.
-pub fn export_bundle(ids: &[String], dest: &Path) -> Result<usize> {
+/// `dest`, each holding what `import_bundle` expects back, so a folder of
+/// these can be carried to another machine and re-imported whole.
+///
+/// One profile that cannot be exported — a broken file, something locked by a
+/// running browser — is reported and skipped, never allowed to stop the rest:
+/// exporting 72 used to end at the first bad one with a bare error.
+pub fn export_bundle(ids: &[String], dest: &Path) -> Result<ExportReport> {
     fs::create_dir_all(dest)?;
     let mut used = std::collections::HashSet::new();
-    let mut n = 0;
+    let mut report = ExportReport::default();
     for id in ids {
-        let stored = load_raw(id)?;
+        let stored = match load_raw(id) {
+            Ok(s) => s,
+            Err(e) => {
+                report.failed.push(BundleFailure { name: id.clone(), error: format!("{e:#}") });
+                continue;
+            }
+        };
         let name = stored
             .config
             .get("name")
             .and_then(|v| v.as_str())
-            .unwrap_or(id.as_str());
-        let folder = dedup_folder_name(name, &mut used);
-        let out_dir = dest.join(&folder);
-        fs::create_dir_all(&out_dir)?;
-        fs::write(
-            out_dir.join("profile.json"),
-            serde_json::to_string_pretty(&stored)?,
-        )?;
-        let udd = store::user_data_root()?.join(id);
-        if udd.exists() {
-            copy_dir_all(&udd, &out_dir.join("userdata"))?;
+            .unwrap_or(id.as_str())
+            .to_string();
+        let out_dir = dest.join(dedup_folder_name(&name, &mut used));
+        match export_one(id, &stored, &out_dir) {
+            Ok(()) => {
+                report.exported += 1;
+                if crate::process::Tracker::shared().is_running(id) {
+                    report.warnings.push(format!(
+                        "{name}: đang chạy lúc xuất — phiên đăng nhập có thể chưa lưu hết, nên tắt profile rồi xuất lại"
+                    ));
+                }
+            }
+            Err(e) => {
+                // No half-written folder left behind for an import to trip over.
+                let _ = fs::remove_dir_all(&out_dir);
+                report.failed.push(BundleFailure { name, error: format!("{e:#}") });
+            }
         }
-        n += 1;
     }
-    Ok(n)
+    Ok(report)
 }
 
 /// True if `path` is itself the top of one Chromium profile's data (a
@@ -538,7 +643,11 @@ fn looks_like_browser_profile_dir(path: &Path) -> bool {
 /// `export_bundle`) round-trips its config and `dir/userdata/` verbatim; a
 /// bare browser-profile folder is adopted as the user-data itself and given
 /// a random fingerprint from the library, named after the folder.
-fn import_one_profile_dir(dir: &Path) -> Result<()> {
+///
+/// All or nothing: if the browser data cannot be copied the profile that was
+/// just created for it is removed again, instead of leaving a profile that
+/// opens empty and logged out.
+fn import_one_profile_dir(dir: &Path, warnings: &mut Vec<String>) -> Result<()> {
     let folder_name = dir
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
@@ -564,9 +673,38 @@ fn import_one_profile_dir(dir: &Path) -> Result<()> {
                 .unwrap_or_else(|| serde_json::json!({}))
         };
         let mut config = base.as_object().cloned().unwrap_or_default();
-        config.insert("name".into(), serde_json::Value::String(folder_name));
+        config.insert("name".into(), serde_json::Value::String(folder_name.clone()));
         StoredProfile { meta: StoredMeta::default(), config }
     };
+    let name = stored
+        .config
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or(folder_name.as_str())
+        .to_string();
+
+    // The proxy: bring it across when the bundle carries it (deduped, so 72
+    // profiles sharing one proxy make one entry, not 72); with none in the
+    // bundle (older export), a binding to an id this machine does not know
+    // would launch the profile *direct* without a word — better shown as
+    // "no proxy" so it is noticed.
+    let bundled = fs::read_to_string(dir.join("proxy.json"))
+        .ok()
+        .and_then(|b| serde_json::from_str::<Option<crate::proxy::ProxyEntry>>(&b).ok());
+    match bundled {
+        Some(Some(entry)) => {
+            stored.meta.proxy_id = Some(crate::proxy::upsert_dedup(entry)?.id);
+        }
+        Some(None) => stored.meta.proxy_id = None,
+        None => {
+            if let Some(pid) = stored.meta.proxy_id.clone() {
+                if crate::proxy::get(&pid).ok().flatten().is_none() {
+                    stored.meta.proxy_id = None;
+                    warnings.push(format!("{name}: dùng proxy chưa có trên máy này — hãy gán lại proxy trước khi mở"));
+                }
+            }
+        }
+    }
 
     let _guard = file_lock();
     let new_id = uuid::Uuid::new_v4().to_string();
@@ -580,8 +718,11 @@ fn import_one_profile_dir(dir: &Path) -> Result<()> {
 
     let src_userdata = if profile_json.exists() { dir.join("userdata") } else { dir.to_path_buf() };
     if src_userdata.exists() {
-        let dst = user_data_dir(&new_id)?;
-        copy_dir_all(&src_userdata, &dst)?;
+        let copied = user_data_dir(&new_id).and_then(|dst| copy_tree_tolerant(&src_userdata, &dst));
+        if let Err(e) = copied {
+            let _ = delete(&new_id);
+            return Err(e);
+        }
     }
     Ok(())
 }
@@ -590,25 +731,36 @@ fn import_one_profile_dir(dir: &Path) -> Result<()> {
 /// (a bundle with `profile.json`, or a real Chromium profile folder), it is
 /// imported as that single profile. Otherwise every immediate subfolder of
 /// `src` is imported as one profile each — see `import_one_profile_dir`.
-pub fn import_bundle(src: &Path) -> Result<usize> {
+/// One that fails is reported and skipped; the rest still come in.
+pub fn import_bundle(src: &Path) -> Result<ImportReport> {
+    let mut report = ImportReport::default();
     if src.join("profile.json").exists() || looks_like_browser_profile_dir(src) {
-        import_one_profile_dir(src)?;
-        return Ok(1);
+        let name = src.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        match import_one_profile_dir(src, &mut report.warnings) {
+            Ok(()) => report.imported = 1,
+            Err(e) => report.failed.push(BundleFailure { name, error: format!("{e:#}") }),
+        }
+        return Ok(report);
     }
-    let mut n = 0;
+    let mut dirs: Vec<PathBuf> = Vec::new();
     for entry in fs::read_dir(src)? {
         let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
+        if entry.file_type()?.is_dir() {
+            dirs.push(entry.path());
         }
-        let subdir = entry.path();
+    }
+    dirs.sort();
+    for subdir in dirs {
         if !subdir.join("profile.json").exists() && !looks_like_browser_profile_dir(&subdir) {
             continue;
         }
-        import_one_profile_dir(&subdir)?;
-        n += 1;
+        let name = subdir.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        match import_one_profile_dir(&subdir, &mut report.warnings) {
+            Ok(()) => report.imported += 1,
+            Err(e) => report.failed.push(BundleFailure { name, error: format!("{e:#}") }),
+        }
     }
-    Ok(n)
+    Ok(report)
 }
 
 pub fn delete(id: &str) -> Result<()> {
@@ -895,5 +1047,298 @@ mod tests {
         // navigator.platform is the field that lies: Chrome for Android says
         // "Linux armv8l" there, and a desktop Linux profile says "Linux x86_64".
         assert!(!m(r#"{"navigator":{"platform":"Linux armv8l"}}"#));
+    }
+}
+
+#[cfg(test)]
+mod bundle_tests {
+    use super::*;
+
+    /// A throwaway data root for one test (and the lock that keeps tests that
+    /// share the process-wide root from interleaving).
+    struct Root {
+        dir: PathBuf,
+        _g: MutexGuard<'static, ()>,
+    }
+    impl Root {
+        fn new(tag: &str) -> Root {
+            let g = crate::cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let dir = std::env::temp_dir().join(format!("hir-{tag}-{}", uuid::Uuid::new_v4()));
+            fs::create_dir_all(&dir).unwrap();
+            crate::store::set_data_root(Some(dir.clone()));
+            Root { dir, _g: g }
+        }
+        /// Point at a second machine's data (the bundle stays where it is).
+        fn switch_to(&self, other: &str) {
+            let d = self.dir.join(other);
+            fs::create_dir_all(&d).unwrap();
+            crate::store::set_data_root(Some(d));
+        }
+    }
+    impl Drop for Root {
+        fn drop(&mut self) {
+            crate::store::set_data_root(None);
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// A profile with the usual account files plus the cache a real browser
+    /// leaves, returning its id.
+    fn make(name: &str, proxy: Option<&crate::proxy::ProxyEntry>) -> String {
+        let mut cfg = serde_json::Map::new();
+        cfg.insert("name".into(), serde_json::Value::String(name.into()));
+        let mut sp = StoredProfile { meta: StoredMeta::default(), config: cfg };
+        sp.meta.proxy_id = proxy.map(|p| p.id.clone());
+        save_raw(&mut sp).unwrap();
+        let udd = user_data_dir(&sp.meta.id).unwrap();
+        fs::create_dir_all(udd.join("Default/Local Storage/leveldb")).unwrap();
+        fs::write(udd.join("Default/Cookies"), format!("cookies-of-{name}")).unwrap();
+        fs::write(udd.join("Local State"), b"{}").unwrap();
+        fs::write(udd.join("Default/Local Storage/leveldb/000003.log"), b"ls").unwrap();
+        fs::write(udd.join("Default/Local Storage/leveldb/LOCK"), b"").unwrap();
+        // The bulk of a real profile — must not travel.
+        fs::create_dir_all(udd.join("Default/Cache/Cache_Data")).unwrap();
+        fs::write(udd.join("Default/Cache/Cache_Data/f_000001"), vec![0u8; 4096]).unwrap();
+        fs::create_dir_all(udd.join("GrShaderCache")).unwrap();
+        fs::write(udd.join("GrShaderCache/data_0"), vec![0u8; 4096]).unwrap();
+        sp.meta.id.clone()
+    }
+
+    fn a_proxy() -> crate::proxy::ProxyEntry {
+        let e = crate::proxy::parse_single_with_kind("1.2.3.4:1080:user01:c2VjcmV0", crate::proxy::ProxyKind::Socks5).unwrap();
+        crate::proxy::upsert_dedup(e).unwrap()
+    }
+
+    fn name_of(id: &str) -> String {
+        load_raw(id).unwrap().config.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string()
+    }
+
+    /// The reported failure: 72 selected, 2 exported. One profile whose browser
+    /// folder holds something that cannot be copied (here the dangling
+    /// `SingletonLock` a crashed Chromium leaves) used to end the whole export
+    /// with an error at that point. Now that entry is not even looked at
+    /// (it is cache), and a profile that genuinely cannot be read is reported
+    /// by name while the rest still come out.
+    #[cfg(unix)]
+    #[test]
+    fn export_carries_on_past_a_bad_profile_and_says_which() {
+        let root = Root::new("exp-bad");
+        let mut ids = Vec::new();
+        for i in 0..6 {
+            let id = make(&format!("P{i}"), None);
+            if i == 2 {
+                let udd = user_data_dir(&id).unwrap();
+                std::os::unix::fs::symlink("nowhere-1234", udd.join("SingletonLock")).unwrap();
+            }
+            ids.push(id);
+        }
+        // Profile #4's file is gone entirely (listed, but unreadable).
+        fs::remove_file(path_for(&ids[3]).unwrap()).unwrap();
+
+        let dest = root.dir.join("out");
+        let rep = export_bundle(&ids, &dest).unwrap();
+        assert_eq!(rep.exported, 5, "{rep:?}");
+        assert_eq!(rep.failed.len(), 1, "{rep:?}");
+        assert_eq!(rep.failed[0].name, ids[3]);
+        assert_eq!(fs::read_dir(&dest).unwrap().count(), 5, "no half-written folder for the failure");
+    }
+
+    /// What goes into a bundle is the account, not the cache.
+    #[test]
+    fn a_bundle_holds_the_login_and_none_of_the_cache() {
+        let root = Root::new("exp-slim");
+        let id = make("Slim", None);
+        let dest = root.dir.join("out");
+        let rep = export_bundle(&[id], &dest).unwrap();
+        assert_eq!(rep.exported, 1);
+        let b = dest.join("Slim");
+        assert!(b.join("profile.json").is_file());
+        assert!(b.join("proxy.json").is_file());
+        assert_eq!(fs::read_to_string(b.join("userdata/Default/Cookies")).unwrap(), "cookies-of-Slim");
+        assert!(b.join("userdata/Local State").is_file());
+        assert!(b.join("userdata/Default/Local Storage/leveldb/000003.log").is_file());
+        assert!(!b.join("userdata/Default/Cache").exists(), "cache must not travel");
+        assert!(!b.join("userdata/GrShaderCache").exists(), "cache must not travel");
+        assert!(!b.join("userdata/Default/Local Storage/leveldb/LOCK").exists(), "a held lock file is skipped");
+    }
+
+    /// Machine to machine, the real use: the profile arrives with its login and
+    /// with its proxy, and 40 profiles sharing one proxy do not make 40 proxies.
+    #[test]
+    fn a_bundle_round_trips_to_another_machine_with_login_and_proxy() {
+        let root = Root::new("round");
+        let px = a_proxy();
+        let ids: Vec<String> = (0..40).map(|i| make(&format!("Shop {i}"), Some(&px))).collect();
+        let dest = root.dir.join("bundle");
+        let rep = export_bundle(&ids, &dest).unwrap();
+        assert_eq!((rep.exported, rep.failed.len()), (40, 0), "{rep:?}");
+
+        root.switch_to("machine-b");
+        assert!(crate::proxy::load().unwrap().proxies.is_empty(), "machine B starts with no proxies");
+        let imp = import_bundle(&dest).unwrap();
+        assert_eq!((imp.imported, imp.failed.len()), (40, 0), "{imp:?}");
+        assert!(imp.warnings.is_empty(), "{imp:?}");
+
+        let listed = list_all().unwrap();
+        assert_eq!(listed.len(), 40);
+        let proxies = crate::proxy::load().unwrap().proxies;
+        assert_eq!(proxies.len(), 1, "one shared proxy, not one per profile");
+        for p in &listed {
+            assert_eq!(p.proxy_id.as_deref(), Some(proxies[0].id.as_str()), "{} lost its proxy", p.name);
+            let udd = user_data_dir(&p.id).unwrap();
+            assert_eq!(fs::read_to_string(udd.join("Default/Cookies")).unwrap(), format!("cookies-of-{}", p.name), "{} lost its login", p.name);
+        }
+    }
+
+    /// "Số lượng lớn": a few hundred profiles in one go, none lost, and quick —
+    /// the cache that used to be copied is where the time and the failures were.
+    #[test]
+    fn a_few_hundred_profiles_export_and_import_in_one_go() {
+        let root = Root::new("bulk");
+        let ids: Vec<String> = (0..300).map(|i| make(&format!("Acc {i:03}"), None)).collect();
+        let dest = root.dir.join("bundle");
+        let t = std::time::Instant::now();
+        let rep = export_bundle(&ids, &dest).unwrap();
+        assert_eq!((rep.exported, rep.failed.len()), (300, 0), "{rep:?}");
+        root.switch_to("machine-b");
+        let imp = import_bundle(&dest).unwrap();
+        assert_eq!((imp.imported, imp.failed.len()), (300, 0), "{imp:?}");
+        assert_eq!(list_all().unwrap().len(), 300);
+        println!("300 profiles out and back in: {:?}", t.elapsed());
+    }
+
+    /// One unreadable bundle among good ones: the others still import, the bad
+    /// one is named, and nothing half-made is left in the list.
+    #[test]
+    fn import_carries_on_past_a_bad_bundle() {
+        let root = Root::new("imp-bad");
+        let ids: Vec<String> = (0..5).map(|i| make(&format!("G{i}"), None)).collect();
+        let dest = root.dir.join("bundle");
+        export_bundle(&ids, &dest).unwrap();
+        fs::write(dest.join("G2/profile.json"), b"{ not json").unwrap();
+
+        root.switch_to("machine-b");
+        let imp = import_bundle(&dest).unwrap();
+        assert_eq!(imp.imported, 4, "{imp:?}");
+        assert_eq!(imp.failed.len(), 1, "{imp:?}");
+        assert_eq!(imp.failed[0].name, "G2");
+        assert_eq!(list_all().unwrap().len(), 4);
+    }
+
+    /// If a profile's browser data cannot be copied in, the profile made for it
+    /// is taken out again, not left behind to open empty and logged out.
+    #[cfg(unix)]
+    #[test]
+    fn a_profile_whose_data_will_not_copy_is_not_left_half_imported() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = Root::new("imp-half");
+        let ids: Vec<String> = (0..3).map(|i| make(&format!("H{i}"), None)).collect();
+        let dest = root.dir.join("bundle");
+        export_bundle(&ids, &dest).unwrap();
+        let locked = dest.join("H1/userdata/Default/Cookies");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        // Running as root would read it anyway; nothing to prove then.
+        if fs::read(&locked).is_ok() {
+            return;
+        }
+
+        root.switch_to("machine-b");
+        let imp = import_bundle(&dest).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(imp.imported, 2, "{imp:?}");
+        assert_eq!(imp.failed.len(), 1, "{imp:?}");
+        assert_eq!(imp.failed[0].name, "H1");
+        let names: Vec<String> = list_all().unwrap().into_iter().map(|p| p.name).collect();
+        assert!(!names.contains(&"H1".to_string()), "{names:?}");
+        assert_eq!(list_all().unwrap().len(), 2);
+    }
+
+    /// A bundle from before proxies travelled in it: the profile names a proxy
+    /// this machine has never seen. Left bound it would launch direct without a
+    /// word; it is cleared and the person is told.
+    #[test]
+    fn an_old_bundle_pointing_at_an_unknown_proxy_is_unbound_and_flagged() {
+        let root = Root::new("imp-legacy");
+        let px = a_proxy();
+        let id = make("Legacy", Some(&px));
+        let dest = root.dir.join("bundle");
+        export_bundle(&[id], &dest).unwrap();
+        fs::remove_file(dest.join("Legacy/proxy.json")).unwrap();
+
+        root.switch_to("machine-b");
+        let imp = import_bundle(&dest).unwrap();
+        assert_eq!(imp.imported, 1, "{imp:?}");
+        assert_eq!(imp.warnings.len(), 1, "{imp:?}");
+        assert!(imp.warnings[0].contains("Legacy"));
+        let p = &list_all().unwrap()[0];
+        assert_eq!(p.proxy_id, None);
+    }
+
+    #[test]
+    fn folder_names_keep_vietnamese_stay_safe_and_never_collide() {
+        let mut used = std::collections::HashSet::new();
+        assert_eq!(dedup_folder_name("Nguyễn Văn Cường", &mut used), "Nguyễn Văn Cường");
+        assert_eq!(dedup_folder_name("nguyễn văn cường", &mut used), "nguyễn văn cường (2)", "case-insensitive disks collide on this");
+        assert_eq!(dedup_folder_name("a/b:c*d?", &mut used), "a_b_c_d_");
+        assert_eq!(dedup_folder_name("CON", &mut used), "profile", "reserved on Windows");
+        assert_eq!(dedup_folder_name("   ", &mut used), "profile (2)");
+        assert_eq!(dedup_folder_name("name...", &mut used), "name");
+        let long = "x".repeat(200);
+        assert_eq!(dedup_folder_name(&long, &mut used).chars().count(), 60);
+    }
+
+    /// Real engine, real running profile: exported while open, it still comes
+    /// out with its login files, and is flagged so the person knows to close it
+    /// first. Opt-in (needs the browser installed):
+    /// `HIR_RUN_BUNDLE_E2E=1 cargo test --no-default-features --features automation --lib export_of_a_running -- --ignored --nocapture`
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore]
+    async fn export_of_a_running_profile_works_and_is_flagged() {
+        if std::env::var("HIR_RUN_BUNDLE_E2E").as_deref() != Ok("1") {
+            return;
+        }
+        let root = Root::new("exp-live");
+        let fps = crate::fingerprints::list_all().unwrap();
+        let tpl = fps.iter().find(|f| f.platform == "macOS" || f.platform == "Windows").unwrap().id.clone();
+        let mut merged = crate::merge_library_fingerprint(&tpl).unwrap();
+        merged.insert("name".into(), serde_json::Value::String("Live".into()));
+        crate::enrich_new_config(None, &mut merged);
+        let meta = crate::save_profile_core(None, serde_json::Value::Object(merged), false).unwrap();
+        crate::launch::launch_profile(&meta.id, true, false).await.expect("launch");
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+        let dest = root.dir.join("out");
+        let rep = export_bundle(&[meta.id.clone()], &dest).unwrap();
+        println!("report: {rep:?}");
+        let files: Vec<String> = walk(&dest.join("Live/userdata"));
+        println!("exported files: {files:?}");
+        let _ = crate::process::Tracker::shared().kill(&meta.id).await;
+        assert_eq!((rep.exported, rep.failed.len()), (1, 0), "{rep:?}");
+        assert_eq!(rep.warnings.len(), 1, "a running profile must be flagged: {rep:?}");
+        assert!(files.iter().any(|f| f.ends_with("Local State")), "{files:?}");
+    }
+
+    fn walk(dir: &Path) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Ok(rd) = fs::read_dir(dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() { out.extend(walk(&p)); } else { out.push(p.display().to_string()); }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn names_with_vietnamese_survive_an_export() {
+        let root = Root::new("exp-vi");
+        let a = make("Lan - Sale 1 🚀", None);
+        let b = make("Lan - Sale 1 🚀", None);
+        let dest = root.dir.join("out");
+        let rep = export_bundle(&[a.clone(), b.clone()], &dest).unwrap();
+        assert_eq!(rep.exported, 2, "{rep:?}");
+        let n = fs::read_dir(&dest).unwrap().count();
+        assert_eq!(n, 2, "same name twice still gives two folders");
+        assert_eq!(name_of(&a), "Lan - Sale 1 🚀");
     }
 }

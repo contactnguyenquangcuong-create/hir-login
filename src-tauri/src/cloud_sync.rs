@@ -300,7 +300,7 @@ const SYNC_EXTRA: &[&str] = &[
     "Default/Local App Settings",
 ];
 
-fn synced_paths() -> impl Iterator<Item = &'static str> {
+pub(crate) fn synced_paths() -> impl Iterator<Item = &'static str> {
     trash::KEEP.iter().copied().chain(SYNC_EXTRA.iter().copied())
 }
 

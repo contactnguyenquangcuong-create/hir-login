@@ -709,8 +709,8 @@ export const useProfile = create<ProfileStore>((set, get) => ({
     try {
       const dest = await open({ directory: true, title: t("useProfile.exportPickFolderTitle") });
       if (!dest || Array.isArray(dest)) return;
-      const n = await profileExportFolder(ids, dest);
-      toast.ok(t("useProfile.profilesExportedMany", { n }));
+      const r = await profileExportFolder(ids, dest);
+      reportBundle("export", r.exported, ids.length, r.failed, r.warnings);
     } catch (e) { toast.err(t("useProfile.exportFailed", { e: String(e) })); }
   },
 
@@ -719,14 +719,32 @@ export const useProfile = create<ProfileStore>((set, get) => ({
     try {
       const src = await open({ directory: true, title: t("useProfile.importPickFolderTitle") });
       if (!src || Array.isArray(src)) return;
-      const n = await profileImportFolder(src);
+      const r = await profileImportFolder(src);
       get().reload();
-      toast.ok(n === 1
-        ? t("useProfile.profileImportedOne")
-        : t("useProfile.profilesImportedMany", { n }));
+      reportBundle("import", r.imported, r.imported + r.failed.length, r.failed, r.warnings);
     } catch (e) { toast.err(t("useProfile.importFailed", { e: String(e) })); }
   },
 }));
+
+/// One message for a bulk export/import that says what actually happened: all
+/// done, or X of Y with the names and reasons of the rest — never a bare
+/// "failed" that leaves 72 selected and 2 done unexplained.
+function reportBundle(kind: "export" | "import", done: number, total: number, failed: { name: string; error: string }[], warnings: string[]) {
+  if (failed.length === 0) {
+    if (kind === "import" && done === 1) toast.ok(t("useProfile.profileImportedOne"));
+    else if (kind === "export") toast.ok(t("useProfile.profilesExportedMany", { n: done }));
+    else toast.ok(t("useProfile.profilesImportedMany", { n: done }));
+  } else {
+    const detail = failed.slice(0, 5).map((f) => `${f.name}: ${f.error}`).join("; ") + (failed.length > 5 ? ` … (+${failed.length - 5})` : "");
+    const vars = { ok: done, total, bad: failed.length, detail };
+    if (kind === "export") toast.err(t("useProfile.exportPartial", vars));
+    else toast.err(t("useProfile.importPartial", vars));
+  }
+  if (warnings.length > 0) {
+    const w = warnings.slice(0, 3).join("; ") + (warnings.length > 3 ? ` … (+${warnings.length - 3})` : "");
+    toast.err(t("useProfile.bundleWarnings", { n: warnings.length, detail: w }));
+  }
+}
 
 /// The ids in the order the table paints them — a range covers what is visible.
 function visibleIds(s: ProfileStore): string[] {
