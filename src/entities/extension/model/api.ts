@@ -9,3 +9,5 @@ export const extensionImport = (paths: string[]) =>
 export const extensionImportUrl = (url: string) =>
   invoke<ExtensionEntry>("extension_import_url", { url });
 export const extensionDelete = (id: string) => invoke("extension_delete", { id });
+/** Turns the extension on for every profile; resolves to how many changed. */
+export const extensionApplyAll = (id: string) => invoke<number>("extension_apply_all", { id });

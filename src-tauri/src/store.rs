@@ -134,7 +134,7 @@ pub fn bookmarks_path() -> Result<PathBuf> {
 
 /// Automation projects: one JSON file holding every project's blocks.
 pub fn automation_path() -> Result<PathBuf> {
-    Ok(config_root()?.join("automation.json"))
+    Ok(user_files_root()?.join("automation.json"))
 }
 
 /// ProxyShard billing-API config (Bearer key). Kept in its own file so the

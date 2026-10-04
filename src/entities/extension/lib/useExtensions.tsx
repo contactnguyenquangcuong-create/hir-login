@@ -4,7 +4,7 @@ import { toast } from "../../../shared/lib/toast";
 import { confirmModal } from "../../../shared/lib/confirm";
 import { storeBus } from "../../../shared/lib/storeBus";
 import { t } from "../../../shared/i18n";
-import { extensionDelete, extensionImport, extensionImportUrl, extensionList } from "../model/api";
+import { extensionApplyAll, extensionDelete, extensionImport, extensionImportUrl, extensionList } from "../model/api";
 import type { ExtensionEntry } from "../model/types";
 
 export type ExtensionStore = {
@@ -19,13 +19,27 @@ export type ExtensionStore = {
   reload: () => Promise<void>;
   setSearch: (q: string) => void;
   setLinkOpen: (open: boolean) => void;
+  /// "Sync to every profile" switch shared by all three ways of adding.
+  everywhere: boolean;
+  setEverywhere: (on: boolean) => void;
   importUrl: (url: string) => Promise<void>;
+  applyAll: (e: ExtensionEntry) => Promise<void>;
   importFiles: () => Promise<void>;
   importFolder: () => Promise<void>;
   remove: (e: ExtensionEntry) => Promise<void>;
 };
 
+const EVERYWHERE_KEY = "hir.extensions.everywhere";
+const readEverywhere = () => {
+  try { return localStorage.getItem(EVERYWHERE_KEY) !== "0"; } catch { return true; }
+};
+
 export const useExtensions = create<ExtensionStore>((set, get) => ({
+  everywhere: readEverywhere(),
+  setEverywhere: (on) => {
+    set({ everywhere: on });
+    try { localStorage.setItem(EVERYWHERE_KEY, on ? "1" : "0"); } catch { /* per-viewer convenience only */ }
+  },
   status: "idle",
   items: [],
   busy: false,
@@ -59,8 +73,19 @@ export const useExtensions = create<ExtensionStore>((set, get) => ({
       await get().reload();
       set({ linkOpen: false });
       toast.ok(t("useExtensions.addedNamed", { name: added.name }));
+      if (get().everywhere) await get().applyAll(added);
     } catch (e) { toast.err(t("useExtensions.downloadFailed", { error: String(e) })); }
     finally { set({ busy: false }); }
+  },
+
+  applyAll: async (e) => {
+    try {
+      const n = await extensionApplyAll(e.id);
+      storeBus.emit("profiles");
+      toast.ok(n > 0
+        ? t("useExtensions.appliedAll", { n, name: e.name })
+        : t("useExtensions.appliedAllNone", { name: e.name }));
+    } catch (err) { toast.err(String(err)); }
   },
 
   importFiles: async () => {
@@ -75,6 +100,7 @@ export const useExtensions = create<ExtensionStore>((set, get) => ({
     try {
       const added = await extensionImport(paths as string[]);
       await get().reload();
+      if (get().everywhere) for (const e of added) await get().applyAll(e);
       toast.ok(added.length === 1
         ? t("useExtensions.addedCountOne", { n: added.length })
         : t("useExtensions.addedCountMany", { n: added.length }));
@@ -89,6 +115,7 @@ export const useExtensions = create<ExtensionStore>((set, get) => ({
     try {
       const added = await extensionImport([dir]);
       await get().reload();
+      if (get().everywhere) for (const e of added) await get().applyAll(e);
       toast.ok(added.length > 0
         ? t("useExtensions.addedFolderNamed", { name: added[0].name })
         : t("useExtensions.nothingAdded"));

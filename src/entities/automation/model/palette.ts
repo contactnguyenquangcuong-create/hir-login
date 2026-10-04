@@ -529,6 +529,12 @@ export const PALETTE: Category[] = [
         ],
       },
       { kind: "stop", label: "palette.stop.label", about: "palette.stop.about", params: [] },
+      {
+        kind: "fail",
+        label: "palette.fail.label",
+        about: "palette.fail.about",
+        params: [{ name: "text", label: "palette.fail.text.label", kind: "text", hint: "palette.fail.text.hint" }],
+      },
     ],
   },
   {
@@ -818,6 +824,17 @@ export const PALETTE: Category[] = [
             options: ["remove the line", "keep"],
             default: "remove the line",
           },
+        ],
+      },
+      {
+        kind: "sheet.next",
+        label: "palette.sheetNext.label",
+        about: "palette.sheetNext.about",
+        params: [
+          { name: "path", label: "palette.sheetNext.path.label", kind: "text", hint: "palette.sheetNext.path.hint" },
+          { name: "column", label: "palette.sheetNext.column.label", kind: "text", hint: "palette.sheetNext.column.hint" },
+          { name: "mode", label: "palette.sheetNext.mode.label", kind: "select", options: ["next", "random"], default: "next" },
+          { name: "into", label: "palette.sheetNext.into.label", kind: "text", hint: "palette.sheetNext.into.hint" },
         ],
       },
       {

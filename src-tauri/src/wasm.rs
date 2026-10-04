@@ -50,7 +50,7 @@ pub struct ModuleInfo {
 }
 
 pub fn modules_dir() -> Result<PathBuf> {
-    let d = store::config_root()?.join("automation-modules");
+    let d = store::user_files_root()?.join("automation-modules");
     fs::create_dir_all(&d)?;
     Ok(d)
 }

@@ -72,8 +72,10 @@ pub fn check(
             }
         }
 
-        // Reading a line REMOVES it, so both of these are writes.
-        "file.readLine" | "file.append" => {
+        // Reading a line REMOVES it, so both of these are writes. `sheet.next` takes
+        // any path too, reads a spreadsheet from it and writes `<path>.used.txt`
+        // beside it, so it is held to the same folder.
+        "file.readLine" | "file.append" | "sheet.next" => {
             confine(module, &get("path"), data_dir, "file")?;
         }
 
@@ -246,6 +248,19 @@ mod tests {
         vars.insert("target".into(), "file:///etc/passwd".into());
         let err = check("m", "goto", &json!({ "url": "{{target}}" }), &vars, &dir()).unwrap_err();
         assert!(err.to_string().contains("http"), "{err}");
+    }
+
+    #[test]
+    fn a_spreadsheet_read_is_confined_like_any_other_file() {
+        let d = dir();
+        std::fs::create_dir_all(&d).ok();
+        let inside = d.join("links.xlsx");
+        assert!(check("m", "sheet.next",
+                      &json!({ "path": inside.to_string_lossy(), "into": "v" }),
+                      &no_vars(), &d).is_ok());
+        let err = check("m", "sheet.next",
+                        &json!({ "path": "/etc/hosts", "into": "v" }), &no_vars(), &d).unwrap_err();
+        assert!(err.to_string().contains("own folder"), "{err}");
     }
 
     #[test]

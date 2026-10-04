@@ -1,0 +1,1397 @@
+{
+  "format": 1,
+  "exported_at": 1791074623,
+  "project": {
+    "id": "fb-share-groups-template",
+    "name": "Facebook — chia sẻ bài viết vào 5 nhóm ngẫu nhiên",
+    "notes": "Lấy link bài viết trong file Excel, mở bài đó bằng profile Facebook đã đăng nhập và chia sẻ vào ngẫu nhiên các nhóm tài khoản đã tham gia — mỗi link chia sẻ vào số nhóm đặt ở bước ① (mặc định 5), nghỉ ngẫu nhiên giữa các lần.\n\nCÁCH DÙNG\n1. Excel: 1 cột chứa link (dòng đầu là tên cột, mặc định \"link\"). File của bạn không bị sửa; link đã lấy được ghi vào file cùng tên có đuôi .used.txt để không chia sẻ lại — muốn dùng lại 1 link thì xoá dòng đó trong file .used.txt.\n2. Sửa các ô ① (đường dẫn Excel, ID profile…).\n   LẦN ĐẦU CHẠY THỬ: ô \"Chạy THỬ\" mặc định = 1 — đi hết các bước (mở bài, bấm Chia sẻ, chọn nhóm, mở khung đăng bài) nhưng KHÔNG bấm Đăng và không đánh dấu link đã dùng. Xem trình duyệt/nhật ký thấy đúng rồi mới đổi sang 0 để đăng thật.\n3. Đặt \"Số lượt\" (loops) = số link muốn chạy. Mỗi lượt lấy 1 link kế tiếp; hết link thì lần chạy dừng.\n4. Profile phải đăng nhập Facebook sẵn (nhập cookie hoặc đăng nhập tay một lần). Chỉ điền email/mật khẩu nếu thật sự cần.\n\nNHẬT KÝ: mỗi nhóm đã chia sẻ được ghi vào <file Excel>.da-chia-se.txt (link -> tên nhóm).\n\nAN TOÀN: gặp checkpoint, yêu cầu xác minh hay thông báo bị hạn chế là DỪNG ngay, không cố vượt qua. Facebook có thể giới hạn tài khoản chia sẻ nhiều/nhanh — đừng hạ thời gian nghỉ quá thấp, đừng tăng số nhóm quá cao.\n\nLƯU Ý: giao diện Facebook hay đổi; các bước tìm nút dựa vào nhãn/chữ hiển thị (tiếng Việt và tiếng Anh). Nếu một bước báo không thấy nút, gửi lại log để chỉnh.",
+    "blocks": [
+      {
+        "id": "v_home",
+        "kind": "var.set",
+        "label": "① Trang chủ Facebook (đổi nếu cần)",
+        "params": {
+          "name": "home_url",
+          "value": "https://www.facebook.com/"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 0.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "v_excel",
+        "kind": "var.set",
+        "label": "① File Excel chứa link bài viết",
+        "params": {
+          "name": "excel_path",
+          "value": "C:\\link\\bai-viet.xlsx"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 90.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "v_col",
+        "kind": "var.set",
+        "label": "① Tên cột chứa link (dòng đầu file)",
+        "params": {
+          "name": "excel_column",
+          "value": "link"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 180.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "v_profile",
+        "kind": "var.set",
+        "label": "① ID profile Facebook đã đăng nhập",
+        "params": {
+          "name": "profile_id",
+          "value": "DAN-ID-PROFILE-VAO-DAY"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 270.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "v_per",
+        "kind": "var.set",
+        "label": "① Số nhóm mỗi link",
+        "params": {
+          "name": "per_run",
+          "value": "5"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 360.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "v_watch",
+        "kind": "var.set",
+        "label": "① Xem bài/reel bao lâu trước khi chia sẻ (giây)",
+        "params": {
+          "name": "watch_s",
+          "value": "12"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 450.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "v_gmin",
+        "kind": "var.set",
+        "label": "① Nghỉ giữa 2 lần chia sẻ — ít nhất (giây)",
+        "params": {
+          "name": "gap_min",
+          "value": "25"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 540.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "v_gmax",
+        "kind": "var.set",
+        "label": "① Nghỉ giữa 2 lần chia sẻ — nhiều nhất (giây)",
+        "params": {
+          "name": "gap_max",
+          "value": "70"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 630.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "v_dry",
+        "kind": "var.set",
+        "label": "① Chạy THỬ không đăng thật? (1 = thử: đi hết các bước nhưng KHÔNG bấm Đăng; 0 = đăng thật)",
+        "params": {
+          "name": "dry_run",
+          "value": "1"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 720.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "v_user",
+        "kind": "var.set",
+        "label": "① (Tuỳ chọn) Email/SĐT Facebook — chỉ dùng khi profile chưa đăng nhập",
+        "params": {
+          "name": "fb_user",
+          "value": ""
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 810.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "v_pass",
+        "kind": "var.set",
+        "label": "① (Tuỳ chọn) Mật khẩu Facebook",
+        "params": {
+          "name": "fb_pass",
+          "value": ""
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 900.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": [
+          "value"
+        ]
+      },
+      {
+        "id": "use_profile",
+        "kind": "profile.use",
+        "label": "② Dùng profile",
+        "params": {
+          "id": "{{profile_id}}"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 990.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "v_mode",
+        "kind": "var.set",
+        "label": "② Cách lấy link: đăng thật = mỗi link 1 lần",
+        "params": {
+          "name": "take_mode",
+          "value": "next"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 1080.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "chk_dry_take",
+        "kind": "if.value",
+        "label": "② Chạy thử? → chỉ xem link, không đánh dấu đã dùng",
+        "params": {
+          "a": "{{dry_run}}",
+          "op": "=",
+          "b": "1"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 1170.0,
+        "on_done": "next",
+        "on_fail": {
+          "goto": "take_link"
+        },
+        "secrets": []
+      },
+      {
+        "id": "v_mode_peek",
+        "kind": "var.set",
+        "label": "② (chạy thử) xem link, không đánh dấu",
+        "params": {
+          "name": "take_mode",
+          "value": "peek"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 1260.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "take_link",
+        "kind": "sheet.next",
+        "label": "② Lấy link bài viết kế tiếp từ Excel",
+        "params": {
+          "path": "{{excel_path}}",
+          "column": "{{excel_column}}",
+          "mode": "{{take_mode}}",
+          "into": "post_url"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 1350.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "v_shared",
+        "kind": "var.set",
+        "label": "② Đặt lại bộ đếm",
+        "params": {
+          "name": "shared",
+          "value": "0"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 1440.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "v_tag",
+        "kind": "var.set",
+        "label": "② Đặt lại nhãn nhật ký",
+        "params": {
+          "name": "tag",
+          "value": ""
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 1530.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "v_done",
+        "kind": "var.set",
+        "label": "② Đặt lại danh sách nhóm đã chia sẻ",
+        "params": {
+          "name": "done_groups",
+          "value": ""
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 1620.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "open_home",
+        "kind": "goto",
+        "label": "③ Mở Facebook",
+        "params": {
+          "url": "{{home_url}}"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 1710.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "home_wait",
+        "kind": "wait",
+        "label": "③ Nghỉ",
+        "params": {
+          "seconds": 4
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 1800.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "guard1",
+        "kind": "script.run",
+        "label": "③ Kiểm tra Facebook có đang chặn/đòi xác minh không",
+        "params": {
+          "source": "(function(){var vis=function(e){var r=e.getBoundingClientRect();if(r.width<3||r.height<3)return false;var s=getComputedStyle(e);return s.visibility!=='hidden'&&s.display!=='none';};var txt=function(e){return (e.innerText||'').replace(/\\s+/g,' ').trim();};var topDlg=function(){var d=[].slice.call(document.querySelectorAll('div[role=\"dialog\"]')).filter(vis);var a=function(e){var r=e.getBoundingClientRect();return r.width*r.height;};d.sort(function(x,y){return a(y)-a(x);});return d.length?d[0]:document.body;};var clear=function(){[].slice.call(document.querySelectorAll('[data-hir]')).forEach(function(e){e.removeAttribute('data-hir');});};var t=((document.body&&document.body.innerText)||'').slice(0,30000);var bad=/(tạm thời bị chặn|temporarily blocked|bạn tạm thời không thể|hãy chậm lại|xác nhận danh tính|confirm your identity|xác thực hai yếu tố|two-factor|tài khoản của bạn đã bị hạn chế|your account has been restricted)/i;return (bad.test(t)||/checkpoint|two_step/.test(location.href))?'HIR_BLOCKED':'HIR_OK';})()",
+          "world": "isolated",
+          "into": "guard"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 1890.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "chk_guard1",
+        "kind": "if.value",
+        "label": "③ Đang bị chặn? → dừng",
+        "params": {
+          "a": "{{guard}}",
+          "op": "contains",
+          "b": "HIR_BLOCKED"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 1980.0,
+        "on_done": {
+          "goto": "blocked_end"
+        },
+        "on_fail": "next",
+        "secrets": []
+      },
+      {
+        "id": "chk_login",
+        "kind": "if.exists",
+        "label": "③ Thấy ô mật khẩu (chưa đăng nhập)?",
+        "params": {
+          "selector": "input[name=\"pass\"]"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 2070.0,
+        "on_done": "next",
+        "on_fail": {
+          "goto": "go_post"
+        },
+        "secrets": []
+      },
+      {
+        "id": "chk_creds",
+        "kind": "if.value",
+        "label": "③ Chưa điền email/mật khẩu? → dừng",
+        "params": {
+          "a": "{{fb_user}}",
+          "op": "is empty",
+          "b": ""
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 2160.0,
+        "on_done": {
+          "goto": "need_login"
+        },
+        "on_fail": "next",
+        "secrets": []
+      },
+      {
+        "id": "type_user",
+        "kind": "type",
+        "label": "③ Nhập email/SĐT",
+        "params": {
+          "selector": "input[name=\"email\"]",
+          "text": "{{fb_user}}"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 2250.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "type_pass",
+        "kind": "type",
+        "label": "③ Nhập mật khẩu",
+        "params": {
+          "selector": "input[name=\"pass\"]",
+          "text": "{{fb_pass}}"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 2340.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "press_enter",
+        "kind": "press",
+        "label": "③ Bấm Enter đăng nhập",
+        "params": {
+          "key": "Enter"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 2430.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "login_wait",
+        "kind": "wait",
+        "label": "③ Chờ đăng nhập",
+        "params": {
+          "seconds": 8
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 2520.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "guard2",
+        "kind": "script.run",
+        "label": "③ Sau đăng nhập: có checkpoint/xác minh không?",
+        "params": {
+          "source": "(function(){var vis=function(e){var r=e.getBoundingClientRect();if(r.width<3||r.height<3)return false;var s=getComputedStyle(e);return s.visibility!=='hidden'&&s.display!=='none';};var txt=function(e){return (e.innerText||'').replace(/\\s+/g,' ').trim();};var topDlg=function(){var d=[].slice.call(document.querySelectorAll('div[role=\"dialog\"]')).filter(vis);var a=function(e){var r=e.getBoundingClientRect();return r.width*r.height;};d.sort(function(x,y){return a(y)-a(x);});return d.length?d[0]:document.body;};var clear=function(){[].slice.call(document.querySelectorAll('[data-hir]')).forEach(function(e){e.removeAttribute('data-hir');});};var t=((document.body&&document.body.innerText)||'').slice(0,30000);var bad=/(tạm thời bị chặn|temporarily blocked|bạn tạm thời không thể|hãy chậm lại|xác nhận danh tính|confirm your identity|xác thực hai yếu tố|two-factor|tài khoản của bạn đã bị hạn chế|your account has been restricted)/i;return (bad.test(t)||/checkpoint|two_step/.test(location.href))?'HIR_BLOCKED':'HIR_OK';})()",
+          "world": "isolated",
+          "into": "guard"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 2610.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "chk_guard2",
+        "kind": "if.value",
+        "label": "③ Có → dừng (không cố vượt)",
+        "params": {
+          "a": "{{guard}}",
+          "op": "contains",
+          "b": "HIR_BLOCKED"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 2700.0,
+        "on_done": {
+          "goto": "blocked_end"
+        },
+        "on_fail": "next",
+        "secrets": []
+      },
+      {
+        "id": "chk_login2",
+        "kind": "if.exists",
+        "label": "③ Vẫn thấy ô mật khẩu? → đăng nhập thất bại",
+        "params": {
+          "selector": "input[name=\"pass\"]"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 2790.0,
+        "on_done": {
+          "goto": "login_failed"
+        },
+        "on_fail": "next",
+        "secrets": []
+      },
+      {
+        "id": "go_post",
+        "kind": "goto",
+        "label": "④ Mở bài viết",
+        "params": {
+          "url": "{{post_url}}"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 2880.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "post_wait",
+        "kind": "wait",
+        "label": "④ Xem bài viết trước khi chia sẻ",
+        "params": {
+          "seconds": "{{watch_s}}"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 2970.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "loop",
+        "kind": "if.value",
+        "label": "⑤ Đủ số nhóm chưa?",
+        "params": {
+          "a": "{{shared}}",
+          "op": ">=",
+          "b": "{{per_run}}"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 3060.0,
+        "on_done": {
+          "goto": "finish"
+        },
+        "on_fail": "next",
+        "secrets": []
+      },
+      {
+        "id": "guard_loop",
+        "kind": "script.run",
+        "label": "⑤ Facebook có đang chặn không?",
+        "params": {
+          "source": "(function(){var vis=function(e){var r=e.getBoundingClientRect();if(r.width<3||r.height<3)return false;var s=getComputedStyle(e);return s.visibility!=='hidden'&&s.display!=='none';};var txt=function(e){return (e.innerText||'').replace(/\\s+/g,' ').trim();};var topDlg=function(){var d=[].slice.call(document.querySelectorAll('div[role=\"dialog\"]')).filter(vis);var a=function(e){var r=e.getBoundingClientRect();return r.width*r.height;};d.sort(function(x,y){return a(y)-a(x);});return d.length?d[0]:document.body;};var clear=function(){[].slice.call(document.querySelectorAll('[data-hir]')).forEach(function(e){e.removeAttribute('data-hir');});};var t=((document.body&&document.body.innerText)||'').slice(0,30000);var bad=/(tạm thời bị chặn|temporarily blocked|bạn tạm thời không thể|hãy chậm lại|xác nhận danh tính|confirm your identity|xác thực hai yếu tố|two-factor|tài khoản của bạn đã bị hạn chế|your account has been restricted)/i;return (bad.test(t)||/checkpoint|two_step/.test(location.href))?'HIR_BLOCKED':'HIR_OK';})()",
+          "world": "isolated",
+          "into": "guard"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 3150.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "chk_guard_loop",
+        "kind": "if.value",
+        "label": "⑤ Có → dừng",
+        "params": {
+          "a": "{{guard}}",
+          "op": "contains",
+          "b": "HIR_BLOCKED"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 3240.0,
+        "on_done": {
+          "goto": "blocked_end"
+        },
+        "on_fail": "next",
+        "secrets": []
+      },
+      {
+        "id": "tag_share",
+        "kind": "script.run",
+        "label": "⑤ Tìm nút Chia sẻ",
+        "params": {
+          "source": "(function(){var vis=function(e){var r=e.getBoundingClientRect();if(r.width<3||r.height<3)return false;var s=getComputedStyle(e);return s.visibility!=='hidden'&&s.display!=='none';};var txt=function(e){return (e.innerText||'').replace(/\\s+/g,' ').trim();};var topDlg=function(){var d=[].slice.call(document.querySelectorAll('div[role=\"dialog\"]')).filter(vis);var a=function(e){var r=e.getBoundingClientRect();return r.width*r.height;};d.sort(function(x,y){return a(y)-a(x);});return d.length?d[0]:document.body;};var clear=function(){[].slice.call(document.querySelectorAll('[data-hir]')).forEach(function(e){e.removeAttribute('data-hir');});};clear();var re=/(gửi nội dung này cho bạn bè|send this to friends|^chia sẻ$|^share$)/i;var c=[].slice.call(document.querySelectorAll('[role=\"button\"]')).filter(function(e){return vis(e)&&!e.closest('div[role=\"dialog\"]')&&(re.test(e.getAttribute('aria-label')||'')||re.test(txt(e)));});if(!c.length)return 'HIR_NONE';c[0].setAttribute('data-hir','share');c[0].scrollIntoView({block:'center'});return 'HIR_OK';})()",
+          "world": "isolated",
+          "into": "r"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 3330.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "chk_share",
+        "kind": "if.value",
+        "label": "⑤ Thấy nút?",
+        "params": {
+          "a": "{{r}}",
+          "op": "contains",
+          "b": "HIR_OK"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 3420.0,
+        "on_done": "next",
+        "on_fail": {
+          "goto": "fail_share"
+        },
+        "secrets": []
+      },
+      {
+        "id": "click_share",
+        "kind": "click",
+        "label": "⑤ Bấm Chia sẻ",
+        "params": {
+          "selector": "[data-hir=\"share\"]",
+          "timeout": 8
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 3510.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "share_wait",
+        "kind": "wait",
+        "label": "⑤ Nghỉ",
+        "params": {
+          "seconds": 2
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 3600.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "tag_menu",
+        "kind": "script.run",
+        "label": "⑤ Tìm mục \"Chia sẻ lên nhóm\"",
+        "params": {
+          "source": "(function(){var vis=function(e){var r=e.getBoundingClientRect();if(r.width<3||r.height<3)return false;var s=getComputedStyle(e);return s.visibility!=='hidden'&&s.display!=='none';};var txt=function(e){return (e.innerText||'').replace(/\\s+/g,' ').trim();};var topDlg=function(){var d=[].slice.call(document.querySelectorAll('div[role=\"dialog\"]')).filter(vis);var a=function(e){var r=e.getBoundingClientRect();return r.width*r.height;};d.sort(function(x,y){return a(y)-a(x);});return d.length?d[0]:document.body;};var clear=function(){[].slice.call(document.querySelectorAll('[data-hir]')).forEach(function(e){e.removeAttribute('data-hir');});};clear();var root=topDlg();var re=/^(chia sẻ (lên|vào) nhóm|nhóm$|share to a group|share in a group|groups?$)/i;var c=[].slice.call(root.querySelectorAll('[role=\"button\"],[role=\"menuitem\"],[role=\"link\"],[tabindex]')).filter(function(e){return vis(e)&&re.test(txt(e));});if(!c.length)return 'HIR_NONE';c.sort(function(a,b){return txt(a).length-txt(b).length;});c[0].setAttribute('data-hir','menu');return 'HIR_OK';})()",
+          "world": "isolated",
+          "into": "r"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 3690.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "chk_menu",
+        "kind": "if.value",
+        "label": "⑤ Thấy mục?",
+        "params": {
+          "a": "{{r}}",
+          "op": "contains",
+          "b": "HIR_OK"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 3780.0,
+        "on_done": {
+          "goto": "click_menu"
+        },
+        "on_fail": "next",
+        "secrets": []
+      },
+      {
+        "id": "menu_retry_wait",
+        "kind": "wait",
+        "label": "⑤ Chưa thấy — chờ thêm",
+        "params": {
+          "seconds": 4
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 3870.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "tag_menu2",
+        "kind": "script.run",
+        "label": "⑤ Tìm mục \"Chia sẻ lên nhóm\" (lần 2)",
+        "params": {
+          "source": "(function(){var vis=function(e){var r=e.getBoundingClientRect();if(r.width<3||r.height<3)return false;var s=getComputedStyle(e);return s.visibility!=='hidden'&&s.display!=='none';};var txt=function(e){return (e.innerText||'').replace(/\\s+/g,' ').trim();};var topDlg=function(){var d=[].slice.call(document.querySelectorAll('div[role=\"dialog\"]')).filter(vis);var a=function(e){var r=e.getBoundingClientRect();return r.width*r.height;};d.sort(function(x,y){return a(y)-a(x);});return d.length?d[0]:document.body;};var clear=function(){[].slice.call(document.querySelectorAll('[data-hir]')).forEach(function(e){e.removeAttribute('data-hir');});};clear();var root=topDlg();var re=/^(chia sẻ (lên|vào) nhóm|nhóm$|share to a group|share in a group|groups?$)/i;var c=[].slice.call(root.querySelectorAll('[role=\"button\"],[role=\"menuitem\"],[role=\"link\"],[tabindex]')).filter(function(e){return vis(e)&&re.test(txt(e));});if(!c.length)return 'HIR_NONE';c.sort(function(a,b){return txt(a).length-txt(b).length;});c[0].setAttribute('data-hir','menu');return 'HIR_OK';})()",
+          "world": "isolated",
+          "into": "r"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 3960.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "chk_menu2",
+        "kind": "if.value",
+        "label": "⑤ Thấy mục?",
+        "params": {
+          "a": "{{r}}",
+          "op": "contains",
+          "b": "HIR_OK"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 4050.0,
+        "on_done": {
+          "goto": "click_menu"
+        },
+        "on_fail": "next",
+        "secrets": []
+      },
+      {
+        "id": "tag_share_b",
+        "kind": "script.run",
+        "label": "⑤ Tìm lại nút Chia sẻ",
+        "params": {
+          "source": "(function(){var vis=function(e){var r=e.getBoundingClientRect();if(r.width<3||r.height<3)return false;var s=getComputedStyle(e);return s.visibility!=='hidden'&&s.display!=='none';};var txt=function(e){return (e.innerText||'').replace(/\\s+/g,' ').trim();};var topDlg=function(){var d=[].slice.call(document.querySelectorAll('div[role=\"dialog\"]')).filter(vis);var a=function(e){var r=e.getBoundingClientRect();return r.width*r.height;};d.sort(function(x,y){return a(y)-a(x);});return d.length?d[0]:document.body;};var clear=function(){[].slice.call(document.querySelectorAll('[data-hir]')).forEach(function(e){e.removeAttribute('data-hir');});};clear();var re=/(gửi nội dung này cho bạn bè|send this to friends|^chia sẻ$|^share$)/i;var c=[].slice.call(document.querySelectorAll('[role=\"button\"]')).filter(function(e){return vis(e)&&!e.closest('div[role=\"dialog\"]')&&(re.test(e.getAttribute('aria-label')||'')||re.test(txt(e)));});if(!c.length)return 'HIR_NONE';c[0].setAttribute('data-hir','share');c[0].scrollIntoView({block:'center'});return 'HIR_OK';})()",
+          "world": "isolated",
+          "into": "r"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 4140.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "chk_share_b",
+        "kind": "if.value",
+        "label": "⑤ Thấy nút?",
+        "params": {
+          "a": "{{r}}",
+          "op": "contains",
+          "b": "HIR_OK"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 4230.0,
+        "on_done": "next",
+        "on_fail": {
+          "goto": "fail_menu"
+        },
+        "secrets": []
+      },
+      {
+        "id": "click_share_b",
+        "kind": "click",
+        "label": "⑤ Bấm Chia sẻ (lần 2)",
+        "params": {
+          "selector": "[data-hir=\"share\"]",
+          "timeout": 8
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 4320.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "share_wait_b",
+        "kind": "wait",
+        "label": "⑤ Nghỉ",
+        "params": {
+          "seconds": 3
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 4410.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "tag_menu3",
+        "kind": "script.run",
+        "label": "⑤ Tìm mục \"Chia sẻ lên nhóm\" (lần 3)",
+        "params": {
+          "source": "(function(){var vis=function(e){var r=e.getBoundingClientRect();if(r.width<3||r.height<3)return false;var s=getComputedStyle(e);return s.visibility!=='hidden'&&s.display!=='none';};var txt=function(e){return (e.innerText||'').replace(/\\s+/g,' ').trim();};var topDlg=function(){var d=[].slice.call(document.querySelectorAll('div[role=\"dialog\"]')).filter(vis);var a=function(e){var r=e.getBoundingClientRect();return r.width*r.height;};d.sort(function(x,y){return a(y)-a(x);});return d.length?d[0]:document.body;};var clear=function(){[].slice.call(document.querySelectorAll('[data-hir]')).forEach(function(e){e.removeAttribute('data-hir');});};clear();var root=topDlg();var re=/^(chia sẻ (lên|vào) nhóm|nhóm$|share to a group|share in a group|groups?$)/i;var c=[].slice.call(root.querySelectorAll('[role=\"button\"],[role=\"menuitem\"],[role=\"link\"],[tabindex]')).filter(function(e){return vis(e)&&re.test(txt(e));});if(!c.length)return 'HIR_NONE';c.sort(function(a,b){return txt(a).length-txt(b).length;});c[0].setAttribute('data-hir','menu');return 'HIR_OK';})()",
+          "world": "isolated",
+          "into": "r"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 4500.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "chk_menu3",
+        "kind": "if.value",
+        "label": "⑤ Thấy mục?",
+        "params": {
+          "a": "{{r}}",
+          "op": "contains",
+          "b": "HIR_OK"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 4590.0,
+        "on_done": "next",
+        "on_fail": {
+          "goto": "fail_menu"
+        },
+        "secrets": []
+      },
+      {
+        "id": "click_menu",
+        "kind": "click",
+        "label": "⑤ Bấm \"Chia sẻ lên nhóm\"",
+        "params": {
+          "selector": "[data-hir=\"menu\"]",
+          "timeout": 8
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 4680.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "menu_wait",
+        "kind": "wait",
+        "label": "⑤ Chờ danh sách nhóm",
+        "params": {
+          "seconds": 3
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 4770.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "scroll_list",
+        "kind": "script.run",
+        "label": "⑤ Cuộn danh sách nhóm đến chỗ ngẫu nhiên",
+        "params": {
+          "source": "(function(){var vis=function(e){var r=e.getBoundingClientRect();if(r.width<3||r.height<3)return false;var s=getComputedStyle(e);return s.visibility!=='hidden'&&s.display!=='none';};var txt=function(e){return (e.innerText||'').replace(/\\s+/g,' ').trim();};var topDlg=function(){var d=[].slice.call(document.querySelectorAll('div[role=\"dialog\"]')).filter(vis);var a=function(e){var r=e.getBoundingClientRect();return r.width*r.height;};d.sort(function(x,y){return a(y)-a(x);});return d.length?d[0]:document.body;};var clear=function(){[].slice.call(document.querySelectorAll('[data-hir]')).forEach(function(e){e.removeAttribute('data-hir');});};var root=topDlg();var rows=[].slice.call(root.querySelectorAll('[role=\"button\"],[role=\"radio\"],[role=\"option\"],[role=\"listitem\"]')).filter(vis);if(!rows.length)return 'HIR_NONE';var p=rows[0].parentElement;while(p&&p!==document.body){if(p.scrollHeight>p.clientHeight+30){var o=getComputedStyle(p).overflowY;if(o==='auto'||o==='scroll')break;}p=p.parentElement;}if(p&&p!==document.body){p.scrollTop=Math.floor(Math.random()*Math.max(1,p.scrollHeight-p.clientHeight)*0.85);return 'HIR_SCROLLED';}return 'HIR_FLAT';})()",
+          "world": "isolated",
+          "into": "r"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 4860.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "scroll_wait",
+        "kind": "wait",
+        "label": "⑤ Chờ nhóm tải thêm",
+        "params": {
+          "seconds": 2
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 4950.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "pick",
+        "kind": "script.run",
+        "label": "⑤ Chọn ngẫu nhiên 1 nhóm chưa chia sẻ",
+        "params": {
+          "source": "(function(){var vis=function(e){var r=e.getBoundingClientRect();if(r.width<3||r.height<3)return false;var s=getComputedStyle(e);return s.visibility!=='hidden'&&s.display!=='none';};var txt=function(e){return (e.innerText||'').replace(/\\s+/g,' ').trim();};var topDlg=function(){var d=[].slice.call(document.querySelectorAll('div[role=\"dialog\"]')).filter(vis);var a=function(e){var r=e.getBoundingClientRect();return r.width*r.height;};d.sort(function(x,y){return a(y)-a(x);});return d.length?d[0]:document.body;};var clear=function(){[].slice.call(document.querySelectorAll('[data-hir]')).forEach(function(e){e.removeAttribute('data-hir');});};clear();var done=('{{done_groups}}').split('||');var root=topDlg();var skip=/^(đăng|post|hủy|huỷ|cancel|đóng|close|quay lại|back|tìm kiếm|search|xong|done|chia sẻ lên nhóm|share to a group|chia sẻ|share)$/i;var seen={};var c=[];[].slice.call(root.querySelectorAll('[role=\"button\"],[role=\"radio\"],[role=\"option\"],[role=\"listitem\"]')).forEach(function(e){if(!vis(e))return;var name=((e.innerText||'').split('\\n')[0]||'').replace(/['\"\\\\]/g,'').trim();if(name.length<2||name.length>80||skip.test(name)||seen[name]||done.indexOf(name)>=0)return;seen[name]=1;c.push([e,name]);});if(!c.length)return 'HIR_NONE';var k=c[Math.floor(Math.random()*c.length)];k[0].setAttribute('data-hir','pick');k[0].scrollIntoView({block:'center'});document.documentElement.setAttribute('data-hir-name',k[1]);return 'HIR_OK';})()",
+          "world": "isolated",
+          "into": "r"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 5040.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "chk_pick",
+        "kind": "if.value",
+        "label": "⑤ Chọn được nhóm?",
+        "params": {
+          "a": "{{r}}",
+          "op": "contains",
+          "b": "HIR_OK"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 5130.0,
+        "on_done": "next",
+        "on_fail": {
+          "goto": "fail_pick"
+        },
+        "secrets": []
+      },
+      {
+        "id": "read_name",
+        "kind": "readAttribute",
+        "label": "⑤ Đọc tên nhóm đã chọn",
+        "params": {
+          "selector": "html",
+          "name": "data-hir-name",
+          "into": "picked"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 5220.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "click_pick",
+        "kind": "click",
+        "label": "⑤ Bấm vào nhóm",
+        "params": {
+          "selector": "[data-hir=\"pick\"]",
+          "timeout": 8
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 5310.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "pick_wait",
+        "kind": "wait",
+        "label": "⑤ Chờ khung đăng bài",
+        "params": {
+          "seconds": 3
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 5400.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "tag_post",
+        "kind": "script.run",
+        "label": "⑤ Tìm nút Đăng",
+        "params": {
+          "source": "(function(){var vis=function(e){var r=e.getBoundingClientRect();if(r.width<3||r.height<3)return false;var s=getComputedStyle(e);return s.visibility!=='hidden'&&s.display!=='none';};var txt=function(e){return (e.innerText||'').replace(/\\s+/g,' ').trim();};var topDlg=function(){var d=[].slice.call(document.querySelectorAll('div[role=\"dialog\"]')).filter(vis);var a=function(e){var r=e.getBoundingClientRect();return r.width*r.height;};d.sort(function(x,y){return a(y)-a(x);});return d.length?d[0]:document.body;};var clear=function(){[].slice.call(document.querySelectorAll('[data-hir]')).forEach(function(e){e.removeAttribute('data-hir');});};clear();var root=topDlg();var re=/^(đăng|post|chia sẻ|share)$/i;var c=[].slice.call(root.querySelectorAll('[role=\"button\"]')).filter(function(e){return vis(e)&&(re.test((e.getAttribute('aria-label')||'').trim())||re.test(txt(e)));});if(!c.length)return 'HIR_NONE';var b=c[c.length-1];if(b.getAttribute('aria-disabled')==='true')return 'HIR_DISABLED';b.setAttribute('data-hir','post');return 'HIR_OK';})()",
+          "world": "isolated",
+          "into": "r"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 5490.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "chk_post",
+        "kind": "if.value",
+        "label": "⑤ Nút Đăng sẵn sàng?",
+        "params": {
+          "a": "{{r}}",
+          "op": "contains",
+          "b": "HIR_OK"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 5580.0,
+        "on_done": {
+          "goto": "dry_check"
+        },
+        "on_fail": "next",
+        "secrets": []
+      },
+      {
+        "id": "post_retry_wait",
+        "kind": "wait",
+        "label": "⑤ Chưa sẵn sàng — chờ thêm",
+        "params": {
+          "seconds": 4
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 5670.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "tag_post2",
+        "kind": "script.run",
+        "label": "⑤ Tìm nút Đăng (lần 2)",
+        "params": {
+          "source": "(function(){var vis=function(e){var r=e.getBoundingClientRect();if(r.width<3||r.height<3)return false;var s=getComputedStyle(e);return s.visibility!=='hidden'&&s.display!=='none';};var txt=function(e){return (e.innerText||'').replace(/\\s+/g,' ').trim();};var topDlg=function(){var d=[].slice.call(document.querySelectorAll('div[role=\"dialog\"]')).filter(vis);var a=function(e){var r=e.getBoundingClientRect();return r.width*r.height;};d.sort(function(x,y){return a(y)-a(x);});return d.length?d[0]:document.body;};var clear=function(){[].slice.call(document.querySelectorAll('[data-hir]')).forEach(function(e){e.removeAttribute('data-hir');});};clear();var root=topDlg();var re=/^(đăng|post|chia sẻ|share)$/i;var c=[].slice.call(root.querySelectorAll('[role=\"button\"]')).filter(function(e){return vis(e)&&(re.test((e.getAttribute('aria-label')||'').trim())||re.test(txt(e)));});if(!c.length)return 'HIR_NONE';var b=c[c.length-1];if(b.getAttribute('aria-disabled')==='true')return 'HIR_DISABLED';b.setAttribute('data-hir','post');return 'HIR_OK';})()",
+          "world": "isolated",
+          "into": "r"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 5760.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "chk_post2",
+        "kind": "if.value",
+        "label": "⑤ Nút Đăng sẵn sàng?",
+        "params": {
+          "a": "{{r}}",
+          "op": "contains",
+          "b": "HIR_OK"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 5850.0,
+        "on_done": "next",
+        "on_fail": {
+          "goto": "fail_post"
+        },
+        "secrets": []
+      },
+      {
+        "id": "dry_check",
+        "kind": "if.value",
+        "label": "⑤ Đang chạy thử (không đăng)?",
+        "params": {
+          "a": "{{dry_run}}",
+          "op": "=",
+          "b": "1"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 5940.0,
+        "on_done": {
+          "goto": "dry_close"
+        },
+        "on_fail": {
+          "goto": "click_post"
+        },
+        "secrets": []
+      },
+      {
+        "id": "click_post",
+        "kind": "click",
+        "label": "⑤ Bấm Đăng",
+        "params": {
+          "selector": "[data-hir=\"post\"]",
+          "timeout": 8
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 6030.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "post_closed",
+        "kind": "waitGone",
+        "label": "⑤ Chờ khung đăng bài đóng",
+        "params": {
+          "selector": "div[role=\"dialog\"]",
+          "timeout": 30
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 6120.0,
+        "on_done": {
+          "goto": "count"
+        },
+        "on_fail": {
+          "goto": "fail_post"
+        },
+        "secrets": []
+      },
+      {
+        "id": "dry_close",
+        "kind": "press",
+        "label": "⑤ [THỬ] Đóng khung đăng bài, KHÔNG đăng",
+        "params": {
+          "key": "Escape"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 6210.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "dry_close2",
+        "kind": "press",
+        "label": "⑤ [THỬ] Đóng lần nữa nếu còn",
+        "params": {
+          "key": "Escape"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 6300.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "dry_tag",
+        "kind": "var.set",
+        "label": "⑤ [THỬ] Đánh dấu nhật ký là chạy thử",
+        "params": {
+          "name": "tag",
+          "value": "[THỬ] "
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 6390.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "dry_say",
+        "kind": "log",
+        "label": "⑤ [THỬ] Sẽ đăng vào nhóm",
+        "params": {
+          "text": "[THỬ — không đăng] sẽ chia sẻ vào: {{picked}}"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 6480.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "count",
+        "kind": "var.math",
+        "label": "⑤ Đếm +1",
+        "params": {
+          "a": "{{shared}}",
+          "op": "+",
+          "b": "1",
+          "into": "shared"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 6570.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "add_done",
+        "kind": "var.set",
+        "label": "⑤ Ghi nhớ nhóm này",
+        "params": {
+          "name": "done_groups",
+          "value": "{{done_groups}}||{{picked}}"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 6660.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "write_log",
+        "kind": "file.append",
+        "label": "⑤ Ghi file nhật ký",
+        "params": {
+          "path": "{{excel_path}}.da-chia-se.txt",
+          "line": "{{tag}}{{post_url}} -> {{picked}}"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 6750.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "say",
+        "kind": "log",
+        "label": "⑤ Báo tiến độ",
+        "params": {
+          "text": "{{tag}}Đã chia sẻ {{shared}}/{{per_run}}: {{picked}}"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 6840.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "gap_rand",
+        "kind": "var.random",
+        "label": "⑤ Chọn thời gian nghỉ ngẫu nhiên",
+        "params": {
+          "min": "{{gap_min}}",
+          "max": "{{gap_max}}",
+          "into": "gap"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 6930.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "gap_wait",
+        "kind": "wait",
+        "label": "⑤ Nghỉ giữa 2 nhóm",
+        "params": {
+          "seconds": "{{gap}}"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 7020.0,
+        "on_done": {
+          "goto": "loop"
+        },
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "finish",
+        "kind": "log",
+        "label": "⑥ Xong link này",
+        "params": {
+          "text": "Xong: {{shared}} nhóm cho {{post_url}}"
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 7110.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "end_pass",
+        "kind": "stop",
+        "label": "⑥ Kết thúc lượt (lượt sau lấy link kế tiếp)",
+        "params": {},
+        "enabled": true,
+        "x": 0.0,
+        "y": 7200.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "blocked_end",
+        "kind": "fail",
+        "label": "✖ Facebook chặn / đòi xác minh",
+        "params": {
+          "text": "Facebook đang chặn hoặc đòi xác minh (checkpoint). Dừng, không cố vượt qua — vào profile xử lý bằng tay rồi chạy lại."
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 7290.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "need_login",
+        "kind": "fail",
+        "label": "✖ Chưa đăng nhập",
+        "params": {
+          "text": "Profile chưa đăng nhập Facebook và chưa điền email/mật khẩu ở bước ①. Đăng nhập profile bằng tay (hoặc nhập cookie) rồi chạy lại."
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 7380.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "login_failed",
+        "kind": "fail",
+        "label": "✖ Đăng nhập thất bại",
+        "params": {
+          "text": "Đăng nhập không thành công (vẫn thấy ô mật khẩu). Kiểm tra lại email/mật khẩu."
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 7470.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "fail_share",
+        "kind": "fail",
+        "label": "✖ Không thấy nút Chia sẻ",
+        "params": {
+          "text": "Không thấy nút Chia sẻ trên bài viết — link sai, bài đã xoá, hoặc giao diện Facebook đã đổi."
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 7560.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "fail_menu",
+        "kind": "fail",
+        "label": "✖ Không thấy mục chia sẻ lên nhóm",
+        "params": {
+          "text": "Không thấy mục chia sẻ lên nhóm — tài khoản chưa vào nhóm nào, hoặc giao diện Facebook đã đổi."
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 7650.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "fail_pick",
+        "kind": "fail",
+        "label": "✖ Không chọn được nhóm",
+        "params": {
+          "text": "Không còn nhóm nào để chọn (đã chia sẻ hết các nhóm đang thấy) hoặc giao diện Facebook đã đổi."
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 7740.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      },
+      {
+        "id": "fail_post",
+        "kind": "fail",
+        "label": "✖ Đăng không thành công",
+        "params": {
+          "text": "Không thấy nút Đăng, hoặc đã bấm Đăng nhưng khung đăng bài không đóng — nhóm có thể yêu cầu thêm bước (duyệt bài, chọn chủ đề...) hoặc giao diện Facebook đã đổi."
+        },
+        "enabled": true,
+        "x": 0.0,
+        "y": 7830.0,
+        "on_done": "next",
+        "on_fail": "stop",
+        "secrets": []
+      }
+    ],
+    "run": {
+      "threads": 1,
+      "loops": 1,
+      "hours": 0.0,
+      "profiles": [],
+      "start": ""
+    },
+    "rules": [],
+    "created_at": 1791074623,
+    "updated_at": 1791074623
+  },
+  "modules": [],
+  "module_files": [],
+  "needs": [
+    {
+      "block_id": "v_pass",
+      "label": "① (Tuỳ chọn) Mật khẩu Facebook",
+      "params": [
+        "value"
+      ]
+    }
+  ]
+}

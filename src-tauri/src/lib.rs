@@ -1063,6 +1063,14 @@ async fn extension_import_url(url: String) -> Result<extensions::ExtensionEntry,
     extensions::import_url(&url).await.map_err(|e| format!("{e:#}"))
 }
 
+/// Turns a library extension on for every profile; returns how many changed.
+#[tauri::command]
+fn extension_apply_all(id: String) -> Result<usize, String> {
+    // Only what is actually in the library.
+    extensions::load_path(&id).ok_or_else(|| "that extension is not in the library".to_string())?;
+    profile::add_extension_to_all(&id).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn extension_delete(id: String) -> Result<(), String> {
     extensions::delete(&id).map_err(|e| e.to_string())
@@ -1387,6 +1395,13 @@ fn normalize_color(s: &str) -> Option<String> {
 }
 
 fn parse_csv_rows(text: &str) -> Vec<BulkParseRow> {
+    bulk_rows_from_table(csv_table(text))
+}
+
+/// A CSV as rows of cells — quoted newlines kept inside their cell, and the
+/// delimiter (`,` `;` or tab) guessed from the first line, since Excel in a
+/// Vietnamese or European locale saves `;`.
+fn csv_table(text: &str) -> Vec<Vec<String>> {
     let text = text.trim_start_matches('\u{feff}');
     // Records end at a newline outside quotes, so a quoted note may hold one.
     let mut lines: Vec<String> = Vec::new();
@@ -1404,14 +1419,12 @@ fn parse_csv_rows(text: &str) -> Vec<BulkParseRow> {
         lines.push(cur);
     }
     let Some(first) = lines.first() else { return Vec::new() };
-    // Excel in a Vietnamese/European locale saves ";" (or tabs) rather than ",".
     let delim = [',', ';', '\t']
         .into_iter()
         .max_by_key(|d| first.matches(*d).count())
         .filter(|d| first.contains(*d))
         .unwrap_or(',');
-    let rows: Vec<Vec<String>> = lines.iter().map(|l| split_delimited_line(l, delim)).collect();
-    bulk_rows_from_table(rows)
+    lines.iter().map(|l| split_delimited_line(l, delim)).collect()
 }
 
 fn split_delimited_line(line: &str, delim: char) -> Vec<String> {
@@ -1589,6 +1602,11 @@ fn xlsx_sheet_rows(sheet_xml: &str, shared: &[String]) -> Vec<Vec<String>> {
 }
 
 fn parse_xlsx_rows(path: &std::path::Path) -> Result<Vec<BulkParseRow>, String> {
+    Ok(bulk_rows_from_table(xlsx_table(path)?))
+}
+
+/// The first sheet of an .xlsx as rows of cells.
+fn xlsx_table(path: &std::path::Path) -> Result<Vec<Vec<String>>, String> {
     use std::io::Read;
     let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
     let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("không đọc được .xlsx (zip): {e}"))?;
@@ -1626,8 +1644,7 @@ fn parse_xlsx_rows(path: &std::path::Path) -> Result<Vec<BulkParseRow>, String> 
     if !found || sheet_xml.is_empty() {
         return Err("không tìm thấy sheet trong .xlsx".into());
     }
-    let rows = xlsx_sheet_rows(&sheet_xml, &shared);
-    Ok(bulk_rows_from_table(rows))
+    Ok(xlsx_sheet_rows(&sheet_xml, &shared))
 }
 
 /// A cookie cell is the cookies themselves, or the path of a file holding them.
@@ -1777,6 +1794,22 @@ fn build_bulk_template_xlsx() -> Result<Vec<u8>, String> {
         z.finish().map_err(|e| e.to_string())?;
     }
     Ok(buf.into_inner())
+}
+
+/// A spreadsheet the automation reads from — `.xlsx` or `.csv`/`.txt` — as rows of
+/// cells, whatever the extension, so a project does not care which one the
+/// operator saved.
+pub(crate) fn read_table_file(path: &std::path::Path) -> Result<Vec<Vec<String>>, String> {
+    if !path.exists() {
+        return Err(format!("{} không tồn tại", path.display()));
+    }
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+    if ext == "xlsx" {
+        xlsx_table(path)
+    } else {
+        let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(csv_table(&text))
+    }
 }
 
 #[tauri::command]
@@ -3673,6 +3706,7 @@ pub fn run() {
             extension_list,
             extension_import,
             extension_import_url,
+            extension_apply_all,
             extension_delete,
             bookmark_list,
             bookmark_save,

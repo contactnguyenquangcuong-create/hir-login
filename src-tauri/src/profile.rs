@@ -866,6 +866,35 @@ pub fn set_folder(id: &str, folder: &str) -> Result<()> {
     Ok(())
 }
 
+/// Turns one library extension on for every profile that does not have it yet
+/// (temporary profiles are left alone — they live for one run). Returns how
+/// many profiles changed. Like pin and folder this is the machine's own
+/// choice, so it is written without bumping the sync revision.
+pub fn add_extension_to_all(ext_id: &str) -> Result<usize> {
+    let _guard = file_lock();
+    let dir = store::profiles_dir()?;
+    let mut n = 0;
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        if entry.path().extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(body) = fs::read_to_string(entry.path()) else { continue };
+        let Ok(mut stored): std::result::Result<StoredProfile, _> = serde_json::from_str(&body)
+        else {
+            continue;
+        };
+        if stored.meta.temporary || stored.meta.extensions.iter().any(|e| e == ext_id) {
+            continue;
+        }
+        stored.meta.extensions.push(ext_id.to_string());
+        let out = serde_json::to_string_pretty(&stored)?;
+        write_atomic(&entry.path(), out.as_bytes())?;
+        n += 1;
+    }
+    Ok(n)
+}
+
 /// Retag profiles from folder `old` to `new`; returns count.
 pub fn rename_folder(old: &str, new: &str) -> Result<usize> {
     let _guard = file_lock();
@@ -1080,6 +1109,27 @@ mod bundle_tests {
             crate::store::set_data_root(None);
             let _ = fs::remove_dir_all(&self.dir);
         }
+    }
+
+    #[test]
+    fn one_extension_can_be_turned_on_for_every_profile() {
+        let _root = Root::new("ext-all");
+        let a = make("a", None);
+        let b = make("b", None);
+        let mut sb = load_raw(&b).unwrap();
+        sb.meta.extensions = vec!["ext1".into()];
+        save_raw(&mut sb).unwrap();
+        let mut tmp = StoredProfile { meta: StoredMeta::default(), config: serde_json::Map::new() };
+        tmp.meta.temporary = true;
+        save_raw(&mut tmp).unwrap();
+
+        assert_eq!(add_extension_to_all("ext1").unwrap(), 1, "b already had it");
+        assert_eq!(load_raw(&a).unwrap().meta.extensions, vec!["ext1".to_string()]);
+        assert_eq!(load_raw(&b).unwrap().meta.extensions, vec!["ext1".to_string()], "not doubled");
+        assert!(load_raw(&tmp.meta.id).unwrap().meta.extensions.is_empty(), "temporary profile untouched");
+        assert_eq!(add_extension_to_all("ext1").unwrap(), 0, "second call changes nothing");
+        assert_eq!(add_extension_to_all("ext2").unwrap(), 2);
+        assert_eq!(load_raw(&a).unwrap().meta.extensions, vec!["ext1".to_string(), "ext2".to_string()]);
     }
 
     /// A profile with the usual account files plus the cache a real browser

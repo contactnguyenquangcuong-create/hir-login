@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Button, DialogModal } from "@proxyshard/shardx-ui-kit";
+import { Button, Checkbox, DialogModal } from "@proxyshard/shardx-ui-kit";
 import { Topbar } from "../../shared/ui/Topbar";
 import { useStoreChanged } from "../../shared/hooks/useStoreChanged";
 import { AddIcon, DeleteIcon, FolderIcon, GlobeIcon, NavExtensionsIcon } from "../../shared/icons";
@@ -11,6 +11,7 @@ import { useT } from "../../shared/i18n";
 function Card({ e }: { e: ExtensionEntry }) {
   const t = useT();
   const remove = useExtensions((s) => s.remove);
+  const applyAll = useExtensions((s) => s.applyAll);
   return (
     <article className="flex flex-col gap-2.5 rounded-xl bg-bg-white-0 p-3.5 ring-1 ring-inset ring-stroke-soft-200">
       <div className="flex items-start gap-2.5">
@@ -33,7 +34,15 @@ function Card({ e }: { e: ExtensionEntry }) {
       <p className="m-0 line-clamp-3 min-h-[2.4em] text-paragraph-xs text-text-sub-600">
         {e.description || <span className="text-text-soft-400">{t("extensions.noDescription")}</span>}
       </p>
-      <div className="flex justify-end">
+      <div className="flex items-center justify-between gap-2">
+        <Button
+          variant="primary"
+          mode="ghost"
+          size="2xsmall"
+          onClick={() => applyAll(e)}
+        >
+          {t("extensions.applyAll")}
+        </Button>
         <Button
           variant="error"
           mode="ghost"
@@ -52,6 +61,8 @@ function Card({ e }: { e: ExtensionEntry }) {
 function LinkDialog({ onClose }: { onClose: () => void }) {
   const t = useT();
   const [url, setUrl] = useState("");
+  const everywhere = useExtensions((s) => s.everywhere);
+  const setEverywhere = useExtensions((s) => s.setEverywhere);
   const busy = useExtensions((s) => s.busy);
   const importUrl = useExtensions((s) => s.importUrl);
   return (
@@ -77,6 +88,11 @@ function LinkDialog({ onClose }: { onClose: () => void }) {
         <p className="m-0 text-paragraph-xs text-text-soft-400">
           {t("extensions.linkHelp")}
         </p>
+        <Checkbox
+          checked={everywhere}
+          onChange={(ev) => setEverywhere(ev.target.checked)}
+          label={t("extensions.linkApplyAll")}
+        />
       </div>
     </DialogModal>
   );
@@ -91,6 +107,8 @@ export function ExtensionsPage() {
   const setSearch = useExtensions((s) => s.setSearch);
   const importFiles = useExtensions((s) => s.importFiles);
   const importFolder = useExtensions((s) => s.importFolder);
+  const everywhere = useExtensions((s) => s.everywhere);
+  const setEverywhere = useExtensions((s) => s.setEverywhere);
   const linkOpen = useExtensions((s) => s.linkOpen);
   const setLinkOpen = useExtensions((s) => s.setLinkOpen);
 
@@ -141,6 +159,14 @@ export function ExtensionsPage() {
             {t("extensions.addFiles")}
           </Button>
         </div>
+      </div>
+
+      <div className="mb-3 flex justify-end">
+        <Checkbox
+          checked={everywhere}
+          onChange={(ev) => setEverywhere(ev.target.checked)}
+          label={t("extensions.syncAllOption")}
+        />
       </div>
 
       {shown.length === 0 ? (

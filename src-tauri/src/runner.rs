@@ -87,7 +87,7 @@ pub fn stop(project_id: &str) {
 
 /// Where a run's log lives. One file per run, named so they sort by time.
 fn log_path(project_id: &str, started_at: u64) -> Option<std::path::PathBuf> {
-    let dir = store::config_root().ok()?.join("automation-runs");
+    let dir = store::user_files_root().ok()?.join("automation-runs");
     std::fs::create_dir_all(&dir).ok()?;
     Some(dir.join(format!("{started_at}-{project_id}.log")))
 }
@@ -95,7 +95,7 @@ fn log_path(project_id: &str, started_at: u64) -> Option<std::path::PathBuf> {
 /// Keeps the newest `keep` run logs and deletes the rest. Called once when a
 /// run starts, so a machine left running for months does not fill up.
 fn prune_logs(keep: usize) {
-    let Ok(root) = store::config_root() else { return };
+    let Ok(root) = store::user_files_root() else { return };
     let dir = root.join("automation-runs");
     let Ok(entries) = std::fs::read_dir(&dir) else { return };
     let mut files: Vec<_> = entries
@@ -603,10 +603,45 @@ async fn ensure_browser(bound: &Bound, run: &Run) -> Result<()> {
         let (port, token) = bus_details().await?;
         launch::launch_profile_synced(&bound.id, true, false, None, port, &token).await?;
     }
-    let info = process::Tracker::shared()
-        .cdp(&bound.id)
-        .ok_or_else(|| anyhow!("the browser started without a debugging port"))?;
-    cdp::attach(bound.id.clone(), info.web_socket_debugger_url, |_| {}).await?;
+    // A browser that has only just opened its debugging port may not have a
+    // page yet, or may still be settling: retry for a few seconds instead of
+    // failing the whole run on the first "no page attached".
+    let mut last = anyhow!("the browser never became reachable");
+    let mut up = false;
+    for attempt in 0..20u32 {
+        let Some(info) = process::Tracker::shared().cdp(&bound.id) else {
+            last = anyhow!("the browser started without a debugging port");
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            continue;
+        };
+        let tried = match cdp::attach(bound.id.clone(), info.web_socket_debugger_url, |_| {}).await {
+            Ok(()) => cdp::page_call(
+                &bound.id,
+                "Runtime.evaluate",
+                json!({ "expression": "1" }),
+            )
+            .await
+            .map(|_| ()),
+            Err(e) => Err(e),
+        };
+        match tried {
+            Ok(()) => {
+                up = true;
+                break;
+            }
+            Err(e) => {
+                if attempt > 0 {
+                    run.log(format!("browser not ready yet ({e}), retrying"));
+                }
+                last = e;
+                cdp::detach(&bound.id);
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
+    }
+    if !up {
+        return Err(last);
+    }
     run.log(format!("browser up for {}", bound.id));
     // Mount the project's interception rules before anything navigates, so the
     // profile's very first request already sees them. Profile-scoped (no
@@ -638,6 +673,92 @@ async fn ensure_browser(bound: &Bound, run: &Run) -> Result<()> {
 async fn bus_details() -> Result<(u16, String)> {
     let b = crate::bus().await.map_err(|e| anyhow!(e))?;
     Ok((b.port, b.token.clone()))
+}
+
+fn sheet_lock() -> &'static Mutex<()> {
+    static L: OnceLock<Mutex<()>> = OnceLock::new();
+    L.get_or_init(|| Mutex::new(()))
+}
+
+/// Takes the next value from one column of a spreadsheet (`.xlsx`, or `.csv`),
+/// each value once: what has been taken is remembered in `<file>.used.txt` next
+/// to it, so the operator's own file is never modified and a second run, or a
+/// second thread, carries on where the last one stopped instead of handing the
+/// same link out again. Remembered by *value*, not row number, so editing or
+/// replacing the sheet cannot make it skip or repeat the wrong rows — and a link
+/// that appears twice in the sheet is still shared once.
+///
+/// The column is a header name ("link"), a letter ("B") or a 1-based number.
+/// Left empty it is the first column. A first row that is not itself data (it
+/// does not start with "http" when no named column says otherwise) is a header
+/// and is skipped.
+pub(crate) fn sheet_take(path: &str, column: &str, mode: &str) -> Result<String> {
+    let random = mode == "random";
+    // "peek" reads the next unused value without marking it taken — a trial run.
+    let peek = mode == "peek";
+    let _g = sheet_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let rows = crate::read_table_file(std::path::Path::new(path)).map_err(|e| anyhow!(e))?;
+    let Some(head) = rows.first() else {
+        return Err(anyhow!("{path} is empty"));
+    };
+    let cell = |r: &Vec<String>, i: usize| r.get(i).map(|c| c.trim().to_string()).unwrap_or_default();
+    let col = column.trim();
+    let (idx, first_data) = if col.is_empty() {
+        (0, if cell(head, 0).to_lowercase().starts_with("http") { 0 } else { 1 })
+    } else if let Some(i) = head.iter().position(|h| h.trim().eq_ignore_ascii_case(col)) {
+        (i, 1)
+    } else {
+        let by_position = if let Ok(n) = col.parse::<usize>() {
+            n.checked_sub(1)
+        } else if col.len() == 1 && col.as_bytes()[0].is_ascii_alphabetic() {
+            Some((col.as_bytes()[0].to_ascii_uppercase() - b'A') as usize)
+        } else {
+            None
+        };
+        match by_position {
+            Some(i) => (i, if cell(head, i).to_lowercase().starts_with("http") { 0 } else { 1 }),
+            None => {
+                let names: Vec<String> = head.iter().map(|h| h.trim().to_string()).filter(|h| !h.is_empty()).collect();
+                return Err(anyhow!("no column \"{col}\" in {path} (columns: {})", names.join(", ")));
+            }
+        }
+    };
+
+    let used_path = format!("{path}.used.txt");
+    let used: std::collections::HashSet<String> = std::fs::read_to_string(&used_path)
+        .unwrap_or_default()
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    let left: Vec<String> = rows
+        .iter()
+        .skip(first_data)
+        .map(|r| cell(r, idx))
+        .filter(|v| !v.is_empty() && !used.contains(v) && seen.insert(v.clone()))
+        .collect();
+    if left.is_empty() {
+        return Err(anyhow!("{path} has no unused rows left"));
+    }
+    let pick = if random {
+        let b = uuid::Uuid::new_v4();
+        u16::from_le_bytes([b.as_bytes()[0], b.as_bytes()[1]]) as usize % left.len()
+    } else {
+        0
+    };
+    let value = left[pick].clone();
+    if peek {
+        return Ok(value);
+    }
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&used_path)
+        .with_context(|| format!("open {used_path}"))?;
+    writeln!(f, "{value}")?;
+    Ok(value)
 }
 
 /// What a block did. `EndPass` ends the rest of this pass; `Else` is a
@@ -1552,6 +1673,23 @@ async fn run_block(
             vars.insert(into, line);
             return Ok(Flow::Next);
         }
+        // Ends the whole run, as a failure, with this message — for "stop, something
+        // is wrong" (a checkpoint, a block page) as opposed to `stop`, which only
+        // ends the current pass and lets the next one start.
+        "fail" => {
+            let text = expand(param(p, "text").unwrap_or("stopped by the project"), vars);
+            return Err(anyhow!("{text}"));
+        }
+        "sheet.next" => {
+            let path = expand(param(p, "path").context("no file")?, vars);
+            let column = expand(param(p, "column").unwrap_or(""), vars);
+            let into = check_var_name(param(p, "into").context("no name to save into")?)?;
+            let mode = param(p, "mode").map(|m| expand(m, vars)).unwrap_or_default();
+            let value = sheet_take(&path, &column, &mode)?;
+            run.log(format!("{into} = {value}"));
+            vars.insert(into, value);
+            return Ok(Flow::Next);
+        }
         "file.append" => {
             let path = expand(param(p, "path").context("no file")?, vars);
             let line = expand(param(p, "line").unwrap_or(""), vars);
@@ -2091,7 +2229,15 @@ async fn run_block(
             }
         }
         "wait" => {
-            let secs = param_f64(p, "seconds").unwrap_or(1.0).clamp(0.0, 3600.0);
+            // A number, or a variable holding one ("{{gap}}" after a random step) —
+            // read as a plain number only, an unexpanded name used to fall back to
+            // one second without a word.
+            let secs = param(p, "seconds")
+                .map(|v| expand(v, vars))
+                .and_then(|v| v.trim().parse::<f64>().ok())
+                .or_else(|| param_f64(p, "seconds"))
+                .unwrap_or(1.0)
+                .clamp(0.0, 3600.0);
             tokio::time::sleep(Duration::from_secs_f64(secs)).await;
         }
         "waitFor" => {
@@ -2227,7 +2373,7 @@ async fn run_block(
             let path = match param(p, "path").map(|s| expand(s, vars)).filter(|s| !s.trim().is_empty()) {
                 Some(p) => std::path::PathBuf::from(p),
                 // Beside the run logs, so evidence and log sit together.
-                None => crate::store::config_root()?
+                None => crate::store::user_files_root()?
                     .join("automation-runs")
                     .join(format!("{}-{}.png", profile, now())),
             };
@@ -3153,6 +3299,437 @@ mod tests {
         run_block(&mut bound, &call, &mut vars, &run, &mut ctx).await.unwrap();
         assert_eq!(vars.get("added").map(String::as_str), Some("hi!"));
     }
+    mod sheet_tests {
+        use super::*;
+
+        fn tmpdir() -> std::path::PathBuf {
+            let d = std::env::temp_dir().join(format!("hir-sheet-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&d).unwrap();
+            d
+        }
+
+        /// A real .xlsx (inline strings, like the importer's own template) from rows.
+        fn write_xlsx(path: &std::path::Path, rows: &[&[&str]]) {
+            use std::io::Write;
+            let esc = |t: &str| t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+            let mut sheet = String::from(r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>"#);
+            for (r, row) in rows.iter().enumerate() {
+                sheet.push_str(&format!(r#"<row r="{}">"#, r + 1));
+                for (c, v) in row.iter().enumerate() {
+                    if v.is_empty() { continue; }
+                    let col = (b'A' + c as u8) as char;
+                    sheet.push_str(&format!(r#"<c r="{col}{}" t="inlineStr"><is><t>{}</t></is></c>"#, r + 1, esc(v)));
+                }
+                sheet.push_str("</row>");
+            }
+            sheet.push_str("</sheetData></worksheet>");
+            let mut z = zip::ZipWriter::new(std::fs::File::create(path).unwrap());
+            let o = zip::write::SimpleFileOptions::default();
+            let mut add = |name: &str, body: &str| { z.start_file(name, o).unwrap(); z.write_all(body.as_bytes()).unwrap(); };
+            add("[Content_Types].xml", r#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"#);
+            add("_rels/.rels", r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#);
+            add("xl/workbook.xml", r#"<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="S" sheetId="1" r:id="rId1"/></sheets></workbook>"#);
+            add("xl/_rels/workbook.xml.rels", r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#);
+            add("xl/worksheets/sheet1.xml", &sheet);
+            z.finish().unwrap();
+        }
+
+        /// Links come out in order, each once, from a named column, and the
+        /// operator's own file is left exactly as it was.
+        #[test]
+        fn takes_each_link_once_in_order_and_leaves_the_file_alone() {
+            let d = tmpdir();
+            let f = d.join("posts.xlsx");
+            write_xlsx(&f, &[&["Tên", "link", "ghi chú"], &["a", "https://fb.com/1", ""], &["b", "https://fb.com/2", ""], &["c", "", "no link"], &["d", "https://fb.com/3", ""]]);
+            let before = std::fs::read(&f).unwrap();
+            let p = f.to_str().unwrap();
+            assert_eq!(sheet_take(p, "link", "next").unwrap(), "https://fb.com/1");
+            assert_eq!(sheet_take(p, "LINK", "next").unwrap(), "https://fb.com/2", "header match ignores case");
+            assert_eq!(sheet_take(p, "link", "next").unwrap(), "https://fb.com/3", "blank cells are skipped");
+            let err = sheet_take(p, "link", "next").unwrap_err().to_string();
+            assert!(err.contains("no unused rows"), "{err}");
+            assert_eq!(std::fs::read(&f).unwrap(), before, "the sheet itself must not be modified");
+            let _ = std::fs::remove_dir_all(&d);
+        }
+
+        /// Replacing the sheet with a new list must not skip or repeat the wrong
+        /// rows — what was taken is remembered by value, not by row number.
+        #[test]
+        fn remembers_by_value_so_an_edited_sheet_stays_correct() {
+            let d = tmpdir();
+            let f = d.join("posts.xlsx");
+            write_xlsx(&f, &[&["link"], &["https://x/1"], &["https://x/2"]]);
+            let p = f.to_str().unwrap();
+            assert_eq!(sheet_take(p, "link", "next").unwrap(), "https://x/1");
+            // The operator adds a new link ABOVE and one duplicate of a used link.
+            write_xlsx(&f, &[&["link"], &["https://x/new"], &["https://x/1"], &["https://x/2"], &["https://x/2"]]);
+            assert_eq!(sheet_take(p, "link", "next").unwrap(), "https://x/new");
+            assert_eq!(sheet_take(p, "link", "next").unwrap(), "https://x/2", "already-shared link not handed out again");
+            assert!(sheet_take(p, "link", "next").is_err());
+            let _ = std::fs::remove_dir_all(&d);
+        }
+
+        #[test]
+        fn column_by_letter_number_or_default_and_a_csv_works_too() {
+            let d = tmpdir();
+            let f = d.join("posts.csv");
+            std::fs::write(&f, "ten;link\nA;https://c/1\nB;https://c/2\nC;https://c/3\n").unwrap();
+            let p = f.to_str().unwrap();
+            assert_eq!(sheet_take(p, "B", "next").unwrap(), "https://c/1", "letter");
+            assert_eq!(sheet_take(p, "2", "next").unwrap(), "https://c/2", "1-based number");
+            let err = sheet_take(p, "nope", "next").unwrap_err().to_string();
+            assert!(err.contains("no column") && err.contains("link"), "lists the real columns: {err}");
+
+            let g = d.join("plain.xlsx");
+            write_xlsx(&g, &[&["https://p/1"], &["https://p/2"]]);
+            let q = g.to_str().unwrap();
+            assert_eq!(sheet_take(q, "", "next").unwrap(), "https://p/1", "no header row, first column");
+            let _ = std::fs::remove_dir_all(&d);
+        }
+
+        /// A trial run looks at the next link without using it up.
+        #[test]
+        fn peek_shows_the_next_value_without_taking_it() {
+            let d = tmpdir();
+            let f = d.join("posts.csv");
+            std::fs::write(&f, "link\nhttps://k/1\nhttps://k/2\n").unwrap();
+            let p = f.to_str().unwrap();
+            assert_eq!(sheet_take(p, "link", "peek").unwrap(), "https://k/1");
+            assert_eq!(sheet_take(p, "link", "peek").unwrap(), "https://k/1", "still there");
+            assert!(!std::path::Path::new(&format!("{p}.used.txt")).exists(), "nothing marked");
+            assert_eq!(sheet_take(p, "link", "next").unwrap(), "https://k/1", "and a real take still gets it");
+            let _ = std::fs::remove_dir_all(&d);
+        }
+
+        #[test]
+        fn random_mode_still_never_repeats() {
+            let d = tmpdir();
+            let f = d.join("posts.xlsx");
+            let rows: Vec<Vec<String>> = std::iter::once(vec!["link".to_string()]).chain((0..30).map(|i| vec![format!("https://r/{i}")])).collect();
+            let refs: Vec<Vec<&str>> = rows.iter().map(|r| r.iter().map(|s| s.as_str()).collect()).collect();
+            let slices: Vec<&[&str]> = refs.iter().map(|r| r.as_slice()).collect();
+            write_xlsx(&f, &slices);
+            let p = f.to_str().unwrap();
+            let mut got = std::collections::HashSet::new();
+            let mut order = Vec::new();
+            for _ in 0..30 {
+                let v = sheet_take(p, "link", "random").unwrap();
+                assert!(got.insert(v.clone()), "{v} handed out twice");
+                order.push(v);
+            }
+            assert!(sheet_take(p, "link", "random").is_err());
+            let sorted: Vec<String> = (0..30).map(|i| format!("https://r/{i}")).collect();
+            assert_ne!(order, sorted, "30 random picks should not come out in sheet order");
+            let _ = std::fs::remove_dir_all(&d);
+        }
+
+        /// As a block, inside a run: the value lands in the variable.
+        #[tokio::test]
+        async fn the_block_saves_into_a_variable_and_fails_when_the_sheet_is_spent() {
+            let d = tmpdir();
+            let f = d.join("posts.xlsx");
+            write_xlsx(&f, &[&["link"], &["https://b/1"]]);
+            let run = a_run(vec![]);
+            let mut ctx = CallCtx::new();
+            let mut bound = Bound::default();
+            let mut vars: HashMap<String, String> = HashMap::new();
+            let blk = block("sheet.next", json!({ "path": f.to_str().unwrap(), "column": "link", "into": "post" }));
+            run_block(&mut bound, &blk, &mut vars, &run, &mut ctx).await.unwrap();
+            assert_eq!(vars.get("post").map(String::as_str), Some("https://b/1"));
+            assert!(run_block(&mut bound, &blk, &mut vars, &run, &mut ctx).await.is_err());
+            let _ = std::fs::remove_dir_all(&d);
+        }
+    }
+
+    /// The shipped Facebook share project, run for real (real engine, real
+    /// runner) against a LOCAL mock page that imitates the share dialog — never
+    /// against facebook.com, since running it there would post for real. What
+    /// this proves is the project's own logic: reading the sheet, five distinct
+    /// random groups per link, pacing, the log, and stopping on a block page.
+    /// What it cannot prove is that Facebook's live markup still matches the
+    /// selectors; that needs a real account.
+    ///
+    /// Opt-in: `HIR_RUN_FB_SHARE_E2E=1 cargo test --no-default-features --features automation --lib fb_share_e2e -- --ignored --nocapture --test-threads=1`
+    mod fb_share_e2e {
+        use super::*;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        const PROJECT: &str = include_str!("../../docs/automation/facebook-chia-se-nhom.json");
+
+        const POST_PAGE: &str = r#"<!doctype html><meta charset="utf-8"><body style="font-family:sans-serif">
+<h1>Bài viết thử</h1>
+<div role="button" tabindex="0" id="sharebtn" aria-label="Gửi nội dung này cho bạn bè hoặc đăng lên trang cá nhân của bạn." style="border:1px solid #888;padding:8px;display:inline-block">Chia sẻ</div>
+<div id="root"></div>
+<script>
+var groups=["Rao vặt Hà Nội","Mua bán điện thoại cũ","Hội yêu công nghệ","Săn sale 0đ","Dân chơi Samsung","Chợ online Sài Gòn","Điện thoại giá rẻ","Review đồ công nghệ","Thanh lý đồ cũ","Cộng đồng mua bán","Tin tức công nghệ","Góc săn deal"];
+function dlg(h){document.getElementById('root').innerHTML='<div role="dialog" style="position:fixed;left:15%;top:8%;width:70%;background:#fff;border:2px solid #333">'+h+'</div>';}
+function closeDlg(){document.getElementById('root').innerHTML='';}
+document.getElementById('sharebtn').addEventListener('click',function(){
+ dlg('<div role="button" tabindex="0" id="m1" style="padding:10px"><span>Chia sẻ ngay (Bạn bè)</span></div><div role="button" tabindex="0" id="m2" style="padding:10px"><span>Chia sẻ lên nhóm</span></div><div role="button" tabindex="0" id="m3" style="padding:10px"><span>Gửi bằng Messenger</span></div>');
+});
+document.addEventListener('keydown',function(ev){if(ev.key==='Escape')closeDlg();});
+document.addEventListener('click',function(ev){
+ var t=ev.target.closest('[role=button]'); if(!t) return;
+ if(t.id==='m2'){
+  var rows=groups.map(function(n){return '<div role="button" tabindex="0" class="g" data-n="'+n+'" style="height:56px;border-bottom:1px solid #ddd"><div>'+n+'</div><div style="font-size:11px">Nhóm công khai · 12K thành viên</div></div>';}).join('');
+  dlg('<div style="padding:8px">Chia sẻ lên nhóm</div><input placeholder="Tìm kiếm nhóm"><div style="height:240px;overflow-y:auto">'+rows+'</div><div role="button" tabindex="0" style="padding:6px">Hủy</div>');
+ } else if(t.classList.contains('g')){
+  var n=t.getAttribute('data-n');
+  dlg('<div style="padding:8px">Đăng vào: '+n+'</div><textarea></textarea><div role="button" tabindex="0" aria-label="Đăng" id="postbtn" data-n="'+n+'" style="padding:10px;background:#1877f2;color:#fff;display:inline-block">Đăng</div>');
+ } else if(t.id==='postbtn'){
+  var g=t.getAttribute('data-n');
+  fetch('/share?g='+encodeURIComponent(g)+'&u='+encodeURIComponent(location.search)).then(function(){closeDlg();});
+ }
+});
+</script>"#;
+
+        fn pct_decode(s: &str) -> String {
+            let b = s.as_bytes();
+            let mut out = Vec::new();
+            let mut i = 0;
+            while i < b.len() {
+                if b[i] == b'%' && i + 2 < b.len() + 0 && i + 2 <= b.len() - 1 + 0 {
+                    if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                        out.push(v);
+                        i += 3;
+                        continue;
+                    }
+                }
+                out.push(b[i]);
+                i += 1;
+            }
+            String::from_utf8_lossy(&out).to_string()
+        }
+
+        /// (port, every "link -> group" the mock was asked to post)
+        async fn mock_facebook() -> (u16, Arc<Mutex<Vec<(String, String)>>>) {
+            let shares: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let seen = shares.clone();
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut sock, _)) = listener.accept().await else { continue };
+                    let seen = seen.clone();
+                    tokio::spawn(async move {
+                        let mut buf = vec![0u8; 16384];
+                        let n = sock.read(&mut buf).await.unwrap_or(0);
+                        let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                        let path = req.lines().next().unwrap_or("").split_whitespace().nth(1).unwrap_or("/").to_string();
+                        let body = if path.starts_with("/post") {
+                            POST_PAGE.to_string()
+                        } else if path.starts_with("/blocked") {
+                            "<!doctype html><meta charset=utf-8><body><h1>Bạn tạm thời bị chặn</h1><p>Chúng tôi hạn chế một số tính năng.</p>".to_string()
+                        } else if path.starts_with("/login") {
+                            "<!doctype html><meta charset=utf-8><body><form><input name=\"email\"><input name=\"pass\" type=\"password\"></form>".to_string()
+                        } else if path.starts_with("/share") {
+                            let q = path.split_once('?').map(|x| x.1).unwrap_or("");
+                            let mut g = String::new();
+                            let mut u = String::new();
+                            for kv in q.split('&') {
+                                if let Some(v) = kv.strip_prefix("g=") { g = pct_decode(v); }
+                                if let Some(v) = kv.strip_prefix("u=") { u = pct_decode(v); }
+                            }
+                            seen.lock().unwrap().push((u, g));
+                            "ok".to_string()
+                        } else {
+                            "<!doctype html><meta charset=utf-8><body><h1>Trang chủ</h1>".to_string()
+                        };
+                        let resp = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(), body
+                        );
+                        let _ = sock.write_all(resp.as_bytes()).await;
+                        let _ = sock.shutdown().await;
+                    });
+                }
+            });
+            (port, shares)
+        }
+
+        /// Imports the shipped JSON exactly as the "Nhập" button would, then points
+        /// its editable steps at the mock.
+        fn import_project(vars: &[(&str, String)], loops: u32) -> automation::Project {
+            let bundle: automation::Bundle = serde_json::from_str(PROJECT).expect("the shipped project parses as a bundle");
+            let mut project = automation::import(bundle).expect("imports");
+            for b in project.blocks.iter_mut() {
+                if b.kind == "var.set" {
+                    let name = b.params["name"].as_str().unwrap_or("").to_string();
+                    if let Some((_, v)) = vars.iter().find(|(k, _)| *k == name) {
+                        b.params["value"] = json!(v);
+                    }
+                }
+            }
+            project.run.loops = loops;
+            automation::save(project).unwrap()
+        }
+
+        async fn run_to_end(project_id: &str) -> RunState {
+            start(project_id).await.expect("run starts");
+            let t = std::time::Instant::now();
+            loop {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let st = status(project_id).expect("run exists");
+                if !st.running {
+                    return st;
+                }
+                assert!(t.elapsed() < Duration::from_secs(420), "run did not finish: {:?}", st.log);
+            }
+        }
+
+        fn a_profile() -> String {
+            let fps = crate::fingerprints::list_all().unwrap();
+            let tpl = fps.iter().find(|f| f.platform == "macOS" || f.platform == "Windows").unwrap().id.clone();
+            let mut merged = crate::merge_library_fingerprint(&tpl).unwrap();
+            merged.insert("name".into(), serde_json::Value::String("fb-share-e2e".into()));
+            crate::enrich_new_config(None, &mut merged);
+            crate::save_profile_core(None, serde_json::Value::Object(merged), false).unwrap().id
+        }
+
+        fn sheet(dir: &std::path::Path, links: &[String]) -> std::path::PathBuf {
+            let f = dir.join("links.csv");
+            std::fs::write(&f, format!("link\n{}\n", links.join("\n"))).unwrap();
+            f
+        }
+
+        fn cleanup(id: &str, tmp: &std::path::Path) {
+            // Whatever the run left behind.
+            futures_lite_block(async { let _ = process::Tracker::shared().kill(id).await; });
+            cdp::detach(id);
+            let _ = profile::delete(id);
+            crate::store::set_data_root(None);
+            let _ = std::fs::remove_dir_all(tmp);
+        }
+
+        fn futures_lite_block<F: std::future::Future<Output = ()>>(f: F) {
+            tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(f));
+        }
+
+        fn root() -> (std::path::PathBuf, std::sync::MutexGuard<'static, ()>) {
+            let g = crate::cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let tmp = std::env::temp_dir().join(format!("hir-fbshare-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&tmp).unwrap();
+            crate::store::set_data_root(Some(tmp.clone()));
+            (tmp, g)
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore]
+        async fn two_links_five_distinct_groups_each() {
+            if std::env::var("HIR_RUN_FB_SHARE_E2E").as_deref() != Ok("1") { return; }
+            let (tmp, _g) = root();
+            let (port, shares) = mock_facebook().await;
+            let base = format!("http://127.0.0.1:{port}");
+            let links: Vec<String> = (1..=2).map(|i| format!("{base}/post?n={i}")).collect();
+            let xlsx = sheet(&tmp, &links);
+            let pid = a_profile();
+            let project = import_project(&[
+                ("home_url", format!("{base}/")),
+                ("excel_path", xlsx.display().to_string()),
+                ("profile_id", pid.clone()),
+                ("gap_min", "1".into()),
+                ("gap_max", "2".into()),
+                ("dry_run", "0".into()),
+            ], 2);
+
+            let st = run_to_end(&project.id).await;
+            for l in &st.log { println!("LOG {l}"); }
+            let got = shares.lock().unwrap().clone();
+            println!("SHARES {got:#?}");
+            let used = std::fs::read_to_string(format!("{}.used.txt", xlsx.display())).unwrap_or_default();
+            let written = std::fs::read_to_string(format!("{}.da-chia-se.txt", xlsx.display())).unwrap_or_default();
+            cleanup(&pid, &tmp);
+
+            assert_eq!(got.len(), 10, "5 groups for each of 2 links: {got:?}");
+            for l in &links {
+                let q = format!("?n={}", l.rsplit('=').next().unwrap());
+                let names: Vec<&String> = got.iter().filter(|(u, _)| *u == q).map(|(_, g)| g).collect();
+                assert_eq!(names.len(), 5, "link {l}: {names:?}");
+                let uniq: std::collections::HashSet<&&String> = names.iter().collect();
+                assert_eq!(uniq.len(), 5, "no group twice for one link: {names:?}");
+            }
+            assert_eq!(used.lines().count(), 2, "{used}");
+            assert_eq!(written.lines().count(), 10, "{written}");
+            assert!(!st.log.iter().any(|l| l.contains("✖")), "{:?}", st.log);
+        }
+
+        /// The shipped default is a TRIAL run: every step happens except the final
+        /// Đăng, and the link is not used up.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore]
+        async fn the_default_is_a_dry_run_that_posts_nothing_and_keeps_the_link() {
+            if std::env::var("HIR_RUN_FB_SHARE_E2E").as_deref() != Ok("1") { return; }
+            let (tmp, _g) = root();
+            let (port, shares) = mock_facebook().await;
+            let base = format!("http://127.0.0.1:{port}");
+            let xlsx = sheet(&tmp, &[format!("{base}/post?n=1")]);
+            let pid = a_profile();
+            // dry_run left at the shipped default.
+            let project = import_project(&[
+                ("home_url", format!("{base}/")),
+                ("excel_path", xlsx.display().to_string()),
+                ("profile_id", pid.clone()),
+                ("gap_min", "1".into()),
+                ("gap_max", "2".into()),
+            ], 1);
+            let st = run_to_end(&project.id).await;
+            for l in &st.log { println!("LOG {l}"); }
+            let n = shares.lock().unwrap().len();
+            let used = std::fs::read_to_string(format!("{}.used.txt", xlsx.display())).unwrap_or_default();
+            let written = std::fs::read_to_string(format!("{}.da-chia-se.txt", xlsx.display())).unwrap_or_default();
+            cleanup(&pid, &tmp);
+            assert_eq!(n, 0, "a trial run must not post anything");
+            assert!(used.trim().is_empty(), "the link must not be used up: {used}");
+            assert_eq!(written.lines().filter(|l| l.starts_with("[THỬ]")).count(), 5, "five groups walked through, marked as trial: {written}");
+            assert!(st.log.iter().filter(|l| l.contains("không đăng")).count() >= 5, "{:?}", st.log);
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore]
+        async fn a_block_page_stops_the_run_without_sharing_anything() {
+            if std::env::var("HIR_RUN_FB_SHARE_E2E").as_deref() != Ok("1") { return; }
+            let (tmp, _g) = root();
+            let (port, shares) = mock_facebook().await;
+            let base = format!("http://127.0.0.1:{port}");
+            let xlsx = sheet(&tmp, &[format!("{base}/post?n=1")]);
+            let pid = a_profile();
+            let project = import_project(&[
+                ("home_url", format!("{base}/blocked")),
+                ("excel_path", xlsx.display().to_string()),
+                ("profile_id", pid.clone()),
+            ], 1);
+            let st = run_to_end(&project.id).await;
+            for l in &st.log { println!("LOG {l}"); }
+            let n = shares.lock().unwrap().len();
+            cleanup(&pid, &tmp);
+            assert_eq!(n, 0, "nothing may be shared once Facebook is blocking");
+            assert!(st.log.iter().any(|l| l.contains("không cố vượt qua")), "{:?}", st.log);
+            assert!(st.workers.iter().any(|w| w.status == "failed"), "{:?}", st.workers);
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        #[ignore]
+        async fn a_logged_out_profile_without_credentials_stops_and_says_so() {
+            if std::env::var("HIR_RUN_FB_SHARE_E2E").as_deref() != Ok("1") { return; }
+            let (tmp, _g) = root();
+            let (port, shares) = mock_facebook().await;
+            let base = format!("http://127.0.0.1:{port}");
+            let xlsx = sheet(&tmp, &[format!("{base}/post?n=1")]);
+            let pid = a_profile();
+            let project = import_project(&[
+                ("home_url", format!("{base}/login")),
+                ("excel_path", xlsx.display().to_string()),
+                ("profile_id", pid.clone()),
+            ], 1);
+            let st = run_to_end(&project.id).await;
+            for l in &st.log { println!("LOG {l}"); }
+            let n = shares.lock().unwrap().len();
+            cleanup(&pid, &tmp);
+            assert_eq!(n, 0);
+            assert!(st.log.iter().any(|l| l.contains("chưa đăng nhập")), "{:?}", st.log);
+        }
+    }
+
     /// Real end-to-end check of the automation + extensions path with an actual
     /// engine and an actual Chrome Web Store download — not gated by default
     /// (needs network and a real browser launch; too slow/flaky for the regular
