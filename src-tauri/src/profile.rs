@@ -18,7 +18,12 @@ fn file_lock() -> MutexGuard<'static, ()> {
 /// Temp file plus rename: `fs::write` truncates first, and a truncated profile
 /// is unparseable, so `list_all` drops it. The retry is for Windows scanners.
 fn write_atomic(path: &Path, body: &[u8]) -> Result<()> {
-    let tmp = path.with_extension("json.tmp");
+    // A name of its own per write: the list loader backfills created_at without
+    // the file lock, so it can race a bulk write on the same profile, and two
+    // writers sharing one `.json.tmp` fail the rename with a sharing violation.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("json.{}.{n}.tmp", std::process::id()));
     {
         let mut f = fs::File::create(&tmp)
             .with_context(|| format!("create {}", tmp.display()))?;
@@ -27,24 +32,40 @@ fn write_atomic(path: &Path, body: &[u8]) -> Result<()> {
         f.sync_all()?;
     }
     let mut last = None;
-    for attempt in 0..4 {
+    // A scanner can hold a fresh file for a second or two, longer when a bulk
+    // action (sync-to-all-profiles) rewrites every profile at once.
+    const ATTEMPTS: u64 = 12;
+    for attempt in 0..ATTEMPTS {
         match fs::rename(&tmp, path) {
             Ok(()) => return Ok(()),
             Err(e) => {
                 last = Some(e);
-                if attempt < 3 {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
+                if attempt + 1 < ATTEMPTS {
+                    std::thread::sleep(std::time::Duration::from_millis(50 + 25 * attempt));
                 }
             }
         }
     }
-    let _ = fs::remove_file(&tmp);
-    Err(anyhow::anyhow!(
-        "rename {} -> {}: {}",
-        tmp.display(),
-        path.display(),
-        last.map(|e| e.to_string()).unwrap_or_default()
-    ))
+    let rename_err = last.map(|e| e.to_string()).unwrap_or_default();
+    eprintln!("[launcher] profile rename {} failed after {ATTEMPTS} tries: {rename_err}", path.display());
+    // Something keeps the target from being replaced. Rewriting it in place is
+    // not crash-safe, but the temp copy stays until that has worked, and a
+    // profile that cannot be saved at all is worse.
+    match fs::write(path, body) {
+        Ok(()) => {
+            eprintln!("[launcher] profile {} saved in place instead", path.display());
+            let _ = fs::remove_file(&tmp);
+            Ok(())
+        }
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            Err(anyhow::anyhow!(
+                "rename {} -> {}: {rename_err}; in-place write: {e}",
+                tmp.display(),
+                path.display(),
+            ))
+        }
+    }
 }
 
 /// Launcher-side view of a profile (wraps raw FingerprintConfig JSON).
