@@ -1,6 +1,8 @@
 // ShardX Launcher — Tauri backend.
 
 mod profile_icon;
+mod winfs;
+mod winhide;
 mod api;
 mod bookmarks;
 mod cloud_sync;
@@ -640,6 +642,8 @@ async fn automation_launch(app: tauri::AppHandle, profile_id: String) -> Result<
         let out = launch::launch_profile_synced(&profile_id, true, false, None, b.port, &b.token)
             .await
             .map_err(|e| e.to_string())?;
+        // The studio shows the page in its own pane; the real window stays out of sight.
+        winhide::move_offscreen_soon(out.pid);
         automation_attach(app, profile_id).await?;
         return Ok(out.pid);
     }
@@ -1061,6 +1065,103 @@ fn extension_import(paths: Vec<String>) -> Result<Vec<extensions::ExtensionEntry
 #[tauri::command]
 async fn extension_import_url(url: String) -> Result<extensions::ExtensionEntry, String> {
     extensions::import_url(&url).await.map_err(|e| format!("{e:#}"))
+}
+
+/// Brings a running profile's browser window back on screen when automation had put it
+/// out of sight. `false` when it was not hidden.
+#[tauri::command]
+fn profile_show_window(id: String) -> Result<bool, String> {
+    let pid = process::Tracker::shared()
+        .running()
+        .into_iter()
+        .find(|r| r.profile_id == id)
+        .map(|r| r.pid)
+        .ok_or_else(|| "that profile is not running".to_string())?;
+    Ok(winhide::bring_back(pid))
+}
+
+/// Attaches CDP to a profile's browser the way the studio does, so the page streams to the
+/// studio pane and navigations / intercepted requests reach it. A run that opens the
+/// browser itself used to attach with no listener at all, and the pane — attaching later —
+/// found the connection taken and received nothing.
+#[cfg(feature = "automation")]
+pub(crate) async fn attach_for_studio(profile_id: String, ws_url: String) -> anyhow::Result<()> {
+    use tauri::Emitter;
+    let Some(app) = APP_HANDLE.get() else {
+        return cdp::attach(profile_id, ws_url, |_| {}).await;
+    };
+    let (frames, navs, events) = (app.clone(), app.clone(), app.clone());
+    let ev_profile = profile_id.clone();
+    cdp::attach_with(
+        profile_id,
+        ws_url,
+        move |frame| {
+            let _ = frames.emit("automation:frame", frame);
+        },
+        move |profile_id, url| {
+            let _ = navs.emit("automation:navigated", serde_json::json!({ "profile_id": profile_id, "url": url }));
+        },
+        move |method, params| {
+            let topic = match method.as_str() {
+                "Traffic.requestPaused" => "automation:traffic-paused",
+                "Traffic.requestObserved" => "automation:traffic-observed",
+                _ => return,
+            };
+            let _ = events.emit(topic, serde_json::json!({ "profile_id": ev_profile, "params": params }));
+        },
+    )
+    .await
+}
+
+/// One column of a spreadsheet, for the step panel's column picker.
+#[derive(serde::Serialize)]
+struct TableColumn {
+    /// What goes into the step: the header name, or the letter when the sheet has no header row.
+    value: String,
+    /// What the person reads: the name, its letter, and a sample from the first data row.
+    label: String,
+}
+
+/// A spreadsheet's columns (`.xlsx`, `.csv`, `.txt`), so the step can offer a
+/// list instead of asking for a name to be typed exactly.
+#[tauri::command]
+fn table_columns(path: String) -> Result<Vec<TableColumn>, String> {
+    let rows = read_table_file(std::path::Path::new(path.trim()))?;
+    let head = rows.first().ok_or_else(|| "the file is empty".to_string())?;
+    // Same rule `sheet.next` uses: a first row holding links is data, not a header.
+    let has_header = !head.iter().any(|c| c.trim().to_lowercase().starts_with("http"));
+    let letter = |mut i: usize| {
+        let mut out = String::new();
+        loop {
+            out.insert(0, (b'A' + (i % 26) as u8) as char);
+            if i < 26 {
+                break;
+            }
+            i = i / 26 - 1;
+        }
+        out
+    };
+    let sample_row = if has_header { rows.get(1) } else { rows.first() };
+    let mut out = Vec::new();
+    for (i, cell) in head.iter().enumerate() {
+        let name = cell.trim();
+        let sample: String = sample_row
+            .and_then(|r| r.get(i))
+            .map(|c| c.trim().chars().take(40).collect())
+            .unwrap_or_default();
+        if has_header && name.is_empty() && sample.is_empty() {
+            continue;
+        }
+        let l = letter(i);
+        let (value, shown) = if has_header && !name.is_empty() {
+            (name.to_string(), format!("{name} ({l})"))
+        } else {
+            (l.clone(), format!("Cột {l}"))
+        };
+        let label = if sample.is_empty() { shown } else { format!("{shown} — {sample}") };
+        out.push(TableColumn { value, label });
+    }
+    Ok(out)
 }
 
 /// Turns a library extension on for every profile; returns how many changed.
@@ -3707,6 +3808,8 @@ pub fn run() {
             extension_import,
             extension_import_url,
             extension_apply_all,
+            table_columns,
+            profile_show_window,
             extension_delete,
             bookmark_list,
             bookmark_save,

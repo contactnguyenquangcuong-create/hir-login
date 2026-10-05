@@ -411,7 +411,7 @@ fn webstore_id(raw: &str) -> Option<String> {
 pub fn delete(id: &str) -> Result<()> {
     let dir = dir_for(id)?;
     if dir.exists() {
-        fs::remove_dir_all(dir)?;
+        crate::winfs::remove_dir_all(&dir)?;
     }
     Ok(())
 }

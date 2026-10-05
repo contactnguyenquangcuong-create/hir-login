@@ -11,6 +11,9 @@ import type {
 } from "./types";
 
 export const automationAvailable = () => invoke<boolean>("automation_available");
+export type TableColumn = { value: string; label: string };
+/** The columns of an Excel/CSV file, for the column picker. */
+export const tableColumns = (path: string) => invoke<TableColumn[]>("table_columns", { path });
 export const automationList = () => invoke<Project[]>("automation_list");
 export const automationCreate = (name: string) => invoke<Project>("automation_create", { name });
 export const automationSave = (project: Project) => invoke<Project>("automation_save", { project });

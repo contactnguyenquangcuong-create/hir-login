@@ -7,6 +7,7 @@ import { CountryFlag } from "../../shared/ui/CountryFlag";
 import { fmtTs, fmtUptime } from "../../shared/lib/utils";
 import { useT } from "../../shared/i18n";
 import { useProfile, type ProfileMeta } from "../../entities/profile";
+import { profileShowWindow } from "../../entities/profile/model/api";
 import type { ProxyEntry } from "../../entities/proxy";
 import { ProfileInlineEditor, ProfileRowActions } from "../../features/manage-profiles";
 
@@ -43,6 +44,7 @@ export function ProfileRow({ profile, proxy, onMenu }: {
   // Per-profile action menu shared by right-click and the ⋮ button.
   const menu = (): ContextItem[] => [
     { label: isRunning ? t("profileRow.menuStop") : t("profileRow.menuLaunch"), onClick: () => startStop(p) },
+    ...(isRunning ? [{ label: t("profileRow.menuShowWindow"), onClick: () => { profileShowWindow(p.id).catch(() => {}); } }] : []),
     { label: t("profileRow.menuEdit"), onClick: () => expand(p.id) },
     { label: t("profileRow.menuClone"), onClick: () => cloneProfile(p.id) },
     { label: p.pinned ? t("profileRow.menuUnpin") : t("profileRow.menuPin"), onClick: () => togglePin(p) },

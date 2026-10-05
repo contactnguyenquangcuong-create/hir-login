@@ -108,7 +108,7 @@ fn store_guard() -> std::sync::MutexGuard<'static, ()> {
 fn write_atomic(path: &std::path::Path, body: &[u8]) -> Result<()> {
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, body)?;
-    fs::rename(&tmp, path)?;
+    crate::winfs::rename_replace(&tmp, path)?;
     Ok(())
 }
 

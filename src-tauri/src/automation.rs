@@ -163,7 +163,7 @@ fn write_atomic(path: &Path, body: &[u8]) -> Result<()> {
         f.write_all(body)?;
         f.sync_all()?;
     }
-    fs::rename(&tmp, path).with_context(|| format!("rename {}", path.display()))?;
+    crate::winfs::rename_replace(&tmp, path).with_context(|| format!("rename {}", path.display()))?;
     Ok(())
 }
 

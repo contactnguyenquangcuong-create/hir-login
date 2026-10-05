@@ -17,7 +17,13 @@ export type ParamKind =
   /** A saved project, chosen from a list. */
   | "project"
   /** An entry point inside the project another param names. */
-  | "projectStep";
+  | "projectStep"
+  /** A path on disk, with a button that opens the system file picker. */
+  | "file"
+  /** One of this machine's profiles, chosen from a list by name. */
+  | "profile"
+  /** A column of the spreadsheet the sibling `of` param names, chosen from a list. */
+  | "column";
 
 export type ParamSpec = {
   name: string;
@@ -33,6 +39,10 @@ export type ParamSpec = {
    *  a proxy with credentials in it. Only these fields offer "secret", which
    *  blanks the value on export. A folder name or a CSS selector does not. */
   secret?: boolean;
+  /** For "column": the list has no "first column" entry — empty means "none". */
+  optional?: boolean;
+  /** For "file": what the picker offers, e.g. spreadsheets only. */
+  filters?: { name: string; extensions: string[] }[];
 };
 
 export type BlockSpec = {
@@ -85,7 +95,7 @@ export const PALETTE: Category[] = [
         kind: "profile.use",
         label: "palette.profileUse.label",
         about: "palette.profileUse.about",
-        params: [{ name: "id", label: "palette.profileUse.id.label", kind: "text", hint: "palette.profileUse.id.hint" }],
+        params: [{ name: "id", label: "palette.profileUse.id.label", kind: "profile", hint: "palette.profileUse.id.hint" }],
       },
       {
         kind: "profile.keep",
@@ -111,7 +121,7 @@ export const PALETTE: Category[] = [
         kind: "profile.delete",
         label: "palette.profileDelete.label",
         about: "palette.profileDelete.about",
-        params: [{ name: "id", label: "palette.profileDelete.id.label", kind: "text", hint: "palette.profileDelete.id.hint" }],
+        params: [{ name: "id", label: "palette.profileDelete.id.label", kind: "profile", hint: "palette.profileDelete.id.hint" }],
       },
     ],
   },
@@ -205,6 +215,67 @@ export const PALETTE: Category[] = [
         label: "palette.waitload.label",
         about: "palette.waitload.about",
         params: [{ name: "timeout", label: "palette.waitload.timeout.label", kind: "number", default: 30 }],
+      },
+    ],
+  },
+  {
+    id: "facebook",
+    label: "palette.cat.facebook",
+    blocks: [
+      {
+        kind: "fb.check",
+        label: "palette.fbCheck.label",
+        about: "palette.fbCheck.about",
+        params: [],
+      },
+      {
+        kind: "fb.watch",
+        label: "palette.fbWatch.label",
+        about: "palette.fbWatch.about",
+        params: [
+          { name: "seconds", label: "palette.fbWatch.seconds.label", kind: "number", default: 10 },
+          { name: "extra", label: "palette.fbWatch.extra.label", kind: "number", default: 0 },
+        ],
+      },
+      {
+        kind: "fb.react",
+        label: "palette.fbReact.label",
+        about: "palette.fbReact.about",
+        params: [
+          { name: "reaction", label: "palette.fbReact.reaction.label", kind: "select", options: ["like", "love", "care", "haha", "wow", "sad", "angry"], default: "like" },
+          { name: "dry", label: "palette.fbDry.label", kind: "select", options: ["0", "1"], default: "0" },
+        ],
+      },
+      {
+        kind: "fb.comment",
+        label: "palette.fbComment.label",
+        about: "palette.fbComment.about",
+        params: [
+          { name: "text", label: "palette.fbComment.text.label", kind: "textarea", hint: "palette.fbComment.text.hint" },
+          { name: "dry", label: "palette.fbDry.label", kind: "select", options: ["0", "1"], default: "1" },
+        ],
+      },
+      {
+        kind: "fb.share",
+        label: "palette.fbShare.label",
+        about: "palette.fbShare.about",
+        params: [
+          { name: "to", label: "palette.fbShare.to.label", kind: "select", options: ["group", "profile"], default: "group" },
+          { name: "group", label: "palette.fbShare.group.label", kind: "textarea", hint: "palette.fbShare.group.hint" },
+          { name: "count", label: "palette.fbShare.count.label", kind: "number", default: 1 },
+          { name: "gap", label: "palette.fbShare.gap.label", kind: "number", default: 25 },
+          { name: "caption", label: "palette.fbShare.caption.label", kind: "textarea", hint: "palette.fbShare.caption.hint" },
+          { name: "dry", label: "palette.fbDry.label", kind: "select", options: ["0", "1"], default: "1" },
+          { name: "into", label: "palette.fbShare.into.label", kind: "text", hint: "palette.sheetNext.into.hint" },
+        ],
+      },
+      {
+        kind: "fb.save",
+        label: "palette.fbSave.label",
+        about: "palette.fbSave.about",
+        params: [
+          { name: "dry", label: "palette.fbDry.label", kind: "select", options: ["0", "1"], default: "0" },
+        ],
       },
     ],
   },
@@ -815,7 +886,7 @@ export const PALETTE: Category[] = [
         label: "palette.fileReadLine.label",
         about: "palette.fileReadLine.about",
         params: [
-          { name: "path", label: "palette.fileReadLine.path.label", kind: "text", hint: "palette.fileReadLine.path.hint" },
+          { name: "path", label: "palette.fileReadLine.path.label", kind: "file", hint: "palette.fileReadLine.path.hint", filters: [{ name: "Text", extensions: ["txt", "csv"] }] },
           { name: "into", label: "palette.fileReadLine.into.label", kind: "text", hint: "palette.fileReadLine.into.hint" },
           {
             name: "take",
@@ -831,10 +902,12 @@ export const PALETTE: Category[] = [
         label: "palette.sheetNext.label",
         about: "palette.sheetNext.about",
         params: [
-          { name: "path", label: "palette.sheetNext.path.label", kind: "text", hint: "palette.sheetNext.path.hint" },
-          { name: "column", label: "palette.sheetNext.column.label", kind: "text", hint: "palette.sheetNext.column.hint" },
+          { name: "path", label: "palette.sheetNext.path.label", kind: "file", hint: "palette.sheetNext.path.hint", filters: [{ name: "Excel / CSV", extensions: ["xlsx", "xls", "csv"] }] },
+          { name: "column", label: "palette.sheetNext.column.label", kind: "column", hint: "palette.sheetNext.column.hint", of: "path" },
+          { name: "comment_column", label: "palette.sheetNext.commentColumn.label", kind: "column", hint: "palette.sheetNext.commentColumn.hint", of: "path", optional: true },
           { name: "mode", label: "palette.sheetNext.mode.label", kind: "select", options: ["next", "random"], default: "next" },
-          { name: "into", label: "palette.sheetNext.into.label", kind: "text", hint: "palette.sheetNext.into.hint" },
+          { name: "into", label: "palette.sheetNext.into.label", kind: "text", hint: "palette.sheetNext.into.hint", default: "link" },
+          { name: "comment_into", label: "palette.sheetNext.commentInto.label", kind: "text", hint: "palette.sheetNext.into.hint", default: "comment" },
         ],
       },
       {

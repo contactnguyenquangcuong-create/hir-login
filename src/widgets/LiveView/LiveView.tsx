@@ -12,7 +12,7 @@ import {
   type Frame,
   type Picked,
 } from "../../entities/automation";
-import { processKill } from "../../entities/profile";
+import { processKill, useProfile } from "../../entities/profile";
 import { ActionMenu, type MenuAction } from "./ActionMenu";
 import { useT } from "../../shared/i18n";
 
@@ -93,6 +93,25 @@ export function LiveView({
     }).then((un) => { stop = un; });
     return () => { alive = false; stop?.(); };
   }, [profileId, recording, onRecorded]);
+
+  // Follow the profile instead of waiting to be the one who opened it: a run, or the
+  // profile table, may have started it already, and "Open browser" would then show
+  // nothing for a browser that is up and busy.
+  const running = useProfile((s) => (profileId ? !!s.running[profileId] : false));
+  useEffect(() => {
+    if (!profileId || !running || live) return;
+    let alive = true;
+    const attach = () =>
+      automationScreencast(profileId, true, MAX_W, MAX_H)
+        .then(() => { if (alive) setLive(true); })
+        .catch(() => { /* not attached yet — the next tick tries again */ });
+    attach();
+    const timer = setInterval(attach, 2500);
+    return () => { alive = false; clearInterval(timer); };
+  }, [profileId, running, live]);
+  useEffect(() => {
+    if (live && !running) setLive(false);
+  }, [live, running]);
 
   const start = useCallback(async () => {
     if (!profileId) return;

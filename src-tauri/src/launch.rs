@@ -51,6 +51,21 @@ pub async fn launch_profile(
 
 /// As `launch_profile`, but joins the browser to a synchronisation group:
 /// every profile launched under the same `sync_group` mirrors input.
+/// Whether the profile's browser has a session saved that it will reopen by
+/// itself: the engine writes `Session_*` / `Tabs_*` files under
+/// `Default/Sessions` as pages are opened. Empty files do not count.
+fn has_saved_session(udd: &std::path::Path) -> bool {
+    std::fs::read_dir(udd.join("Default").join("Sessions"))
+        .map(|rd| {
+            rd.flatten().any(|e| {
+                let name = e.file_name().to_string_lossy().to_string();
+                (name.starts_with("Session_") || name.starts_with("Tabs_"))
+                    && e.metadata().map(|m| m.len() > 0).unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
 pub async fn launch_profile_synced(
     profile_id: &str,
     enable_cdp: bool,
@@ -232,6 +247,12 @@ pub async fn launch_profile_synced(
     if !headless && !enable_cdp {
         cmd.arg("--hide-crash-restore-bubble");
     }
+    // A browser driven over CDP may sit off screen; do not let that slow its pages down.
+    if enable_cdp && !headless {
+        cmd.arg("--disable-backgrounding-occluded-windows");
+        cmd.arg("--disable-renderer-backgrounding");
+        cmd.arg("--disable-background-timer-throttling");
+    }
 
     if let Some(p) = bound_proxy.as_ref() {
         // Never hand the engine a proxy setting it would silently drop: that is a
@@ -385,7 +406,12 @@ pub async fn launch_profile_synced(
     // entirely, outside their WebUI override) is the only start page that
     // reliably isn't intercepted. Skipped if the operator already configured
     // one via a positional URL in Extra Args.
-    if !operator_start_url {
+    //
+    // Only for a profile with no saved session. With one, the engine already
+    // brings back the page the profile was last on, and a start URL on top of
+    // that is one more `about:blank` tab per launch — a profile opened a dozen
+    // times by automation ended up with a dozen of them.
+    if !operator_start_url && !has_saved_session(&udd) {
         cmd.arg("about:blank");
     }
 

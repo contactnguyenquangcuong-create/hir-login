@@ -61,12 +61,12 @@ fn save_json_atomic(path: &PathBuf, val: &Value) -> Result<()> {
     }
     // retry rename like profile.rs does
     for _ in 0..4 {
-        if std::fs::rename(&tmp, path).is_ok() {
+        if crate::winfs::rename_replace(&tmp, path).is_ok() {
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(50));
     }
-    std::fs::rename(&tmp, path).context("atomic write failed")?;
+    crate::winfs::rename_replace(&tmp, path).context("atomic write failed")?;
     Ok(())
 }
 

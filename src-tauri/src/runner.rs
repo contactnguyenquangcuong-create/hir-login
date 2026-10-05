@@ -15,6 +15,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+mod fb;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkerState {
     pub profile_id: String,
@@ -601,7 +603,9 @@ async fn ensure_browser(bound: &Bound, run: &Run) -> Result<()> {
     }
     if process::Tracker::shared().cdp(&bound.id).is_none() {
         let (port, token) = bus_details().await?;
-        launch::launch_profile_synced(&bound.id, true, false, None, port, &token).await?;
+        let out = launch::launch_profile_synced(&bound.id, true, false, None, port, &token).await?;
+        // A run is watched in the studio pane, not in a browser window on the desktop.
+        crate::winhide::move_offscreen_soon(out.pid);
     }
     // A browser that has only just opened its debugging port may not have a
     // page yet, or may still be settling: retry for a few seconds instead of
@@ -614,7 +618,7 @@ async fn ensure_browser(bound: &Bound, run: &Run) -> Result<()> {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             continue;
         };
-        let tried = match cdp::attach(bound.id.clone(), info.web_socket_debugger_url, |_| {}).await {
+        let tried = match crate::attach_for_studio(bound.id.clone(), info.web_socket_debugger_url).await {
             Ok(()) => cdp::page_call(
                 &bound.id,
                 "Runtime.evaluate",
@@ -692,7 +696,17 @@ fn sheet_lock() -> &'static Mutex<()> {
 /// Left empty it is the first column. A first row that is not itself data (it
 /// does not start with "http" when no named column says otherwise) is a header
 /// and is skipped.
+#[allow(dead_code)] // the run uses `sheet_take_row`; this one-value form is what the tests call
 pub(crate) fn sheet_take(path: &str, column: &str, mode: &str) -> Result<String> {
+    Ok(sheet_take_row(path, column, mode, "")?.0)
+}
+
+/// `sheet_take` plus a second cell of the SAME row: `also` names another column
+/// (header, letter or number — the same ways as `column`), and its text comes back
+/// beside the value, e.g. the comment that belongs to a link. `None` when no
+/// column was asked for or the sheet has no such column; an empty string when the
+/// cell is blank.
+pub(crate) fn sheet_take_row(path: &str, column: &str, mode: &str, also: &str) -> Result<(String, Option<String>)> {
     let random = mode == "random";
     // "peek" reads the next unused value without marking it taken — a trial run.
     let peek = mode == "peek";
@@ -702,6 +716,23 @@ pub(crate) fn sheet_take(path: &str, column: &str, mode: &str) -> Result<String>
         return Err(anyhow!("{path} is empty"));
     };
     let cell = |r: &Vec<String>, i: usize| r.get(i).map(|c| c.trim().to_string()).unwrap_or_default();
+    // A column by header name, letter ("B") or 1-based number.
+    let resolve = |name: &str| -> Option<usize> {
+        let name = name.trim();
+        if name.is_empty() {
+            return None;
+        }
+        if let Some(i) = head.iter().position(|h| h.trim().eq_ignore_ascii_case(name)) {
+            return Some(i);
+        }
+        if let Ok(n) = name.parse::<usize>() {
+            return n.checked_sub(1);
+        }
+        if name.len() == 1 && name.as_bytes()[0].is_ascii_alphabetic() {
+            return Some((name.as_bytes()[0].to_ascii_uppercase() - b'A') as usize);
+        }
+        None
+    };
     let col = column.trim();
     let (idx, first_data) = if col.is_empty() {
         (0, if cell(head, 0).to_lowercase().starts_with("http") { 0 } else { 1 })
@@ -732,11 +763,12 @@ pub(crate) fn sheet_take(path: &str, column: &str, mode: &str) -> Result<String>
         .filter(|l| !l.is_empty())
         .collect();
     let mut seen = std::collections::HashSet::new();
-    let left: Vec<String> = rows
+    let left: Vec<(String, usize)> = rows
         .iter()
+        .enumerate()
         .skip(first_data)
-        .map(|r| cell(r, idx))
-        .filter(|v| !v.is_empty() && !used.contains(v) && seen.insert(v.clone()))
+        .map(|(i, r)| (cell(r, idx), i))
+        .filter(|(v, _)| !v.is_empty() && !used.contains(v) && seen.insert(v.clone()))
         .collect();
     if left.is_empty() {
         return Err(anyhow!("{path} has no unused rows left"));
@@ -747,9 +779,10 @@ pub(crate) fn sheet_take(path: &str, column: &str, mode: &str) -> Result<String>
     } else {
         0
     };
-    let value = left[pick].clone();
+    let (value, row_index) = left[pick].clone();
+    let other = resolve(also).map(|ci| cell(&rows[row_index], ci));
     if peek {
-        return Ok(value);
+        return Ok((value, other));
     }
     use std::io::Write;
     let mut f = std::fs::OpenOptions::new()
@@ -758,7 +791,7 @@ pub(crate) fn sheet_take(path: &str, column: &str, mode: &str) -> Result<String>
         .open(&used_path)
         .with_context(|| format!("open {used_path}"))?;
     writeln!(f, "{value}")?;
-    Ok(value)
+    Ok((value, other))
 }
 
 /// What a block did. `EndPass` ends the rest of this pass; `Else` is a
@@ -1685,9 +1718,26 @@ async fn run_block(
             let column = expand(param(p, "column").unwrap_or(""), vars);
             let into = check_var_name(param(p, "into").context("no name to save into")?)?;
             let mode = param(p, "mode").map(|m| expand(m, vars)).unwrap_or_default();
-            let value = sheet_take(&path, &column, &mode)?;
+            let also = expand(param(p, "comment_column").unwrap_or(""), vars);
+            let (value, other) = sheet_take_row(&path, &column, &mode, &also)?;
             run.log(format!("{into} = {value}"));
             vars.insert(into, value);
+            if !also.trim().is_empty() {
+                let into2 = param(p, "comment_into").map(|s| expand(s, vars)).filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "comment".to_string());
+                let into2 = check_var_name(&into2)?;
+                match other {
+                    Some(text) => {
+                        run.log(format!("{into2} = {text}"));
+                        vars.insert(into2, text);
+                    }
+                    None => {
+                        // No such column in the sheet: say so, and leave it empty so a
+                        // step that needs it can skip itself.
+                        run.log(format!("the sheet has no column \"{}\" — {into2} is empty", also.trim()));
+                        vars.insert(into2, String::new());
+                    }
+                }
+            }
             return Ok(Flow::Next);
         }
         "file.append" => {
@@ -1815,6 +1865,20 @@ async fn run_block(
     let profile = bound.id.as_str();
 
     match block.kind.as_str() {
+        // The Facebook tab: one block per thing a person does on a post.
+        "fb.check" | "fb.watch" | "fb.react" | "fb.comment" | "fb.share" | "fb.save" => {
+            match fb::run(bound.mobile, profile, &block.kind, p, vars, run).await {
+                // Facebook swaps a page's process now and then, and the control
+                // connection loses it. Attach again and give the step one more go.
+                Err(e) if e.to_string().contains("no page attached") => {
+                    run.log("the page was lost — attaching again and retrying this step once");
+                    cdp::detach(profile);
+                    ensure_browser(bound, run).await?;
+                    return fb::run(bound.mobile, profile, &block.kind, p, vars, run).await;
+                }
+                other => return other,
+            }
+        }
         "goto" => {
             let url = expand(param(p, "url").context("no address")?, vars);
             let before = current_url(profile).await;

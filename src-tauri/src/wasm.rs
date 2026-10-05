@@ -974,7 +974,7 @@ fn state_set(module_id: &str, key: &str, value: &str) -> Result<()> {
     // this could lose everything at once.
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, &body)?;
-    fs::rename(&tmp, &path)?;
+    crate::winfs::rename_replace(&tmp, &path)?;
     Ok(())
 }
 

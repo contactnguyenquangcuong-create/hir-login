@@ -1,6 +1,6 @@
 [package]
 name = "Hir-Login"
-version = "0.1.68"
+version = "0.1.69"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -101,5 +101,7 @@ getrandom = "0.2"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",            # HLOCAL + LocalFree live here in 0.59
     "Win32_Security_Cryptography", # CryptProtectData / CryptUnprotectData
+    "Win32_Storage_FileSystem",    # MoveFileExW / DeleteFileW (src/winfs.rs)
+    "Win32_UI_WindowsAndMessaging", # EnumWindows / SetWindowPos (src/winhide.rs)
 ] }
 

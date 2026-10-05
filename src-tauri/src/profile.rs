@@ -36,7 +36,7 @@ fn write_atomic(path: &Path, body: &[u8]) -> Result<()> {
     // action (sync-to-all-profiles) rewrites every profile at once.
     const ATTEMPTS: u64 = 12;
     for attempt in 0..ATTEMPTS {
-        match fs::rename(&tmp, path) {
+        match crate::winfs::rename_replace(&tmp, path) {
             Ok(()) => return Ok(()),
             Err(e) => {
                 last = Some(e);

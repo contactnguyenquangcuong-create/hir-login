@@ -157,7 +157,7 @@ impl AclStore {
         let path = dir.join("members.json");
         let tmp = dir.join("members.json.tmp");
         std::fs::write(&tmp, serde_json::to_string_pretty(self).unwrap_or_default())?;
-        std::fs::rename(tmp, path)
+        crate::winfs::rename_replace(&tmp, &path)
     }
 
     /// The member whose token this is, unless they were switched off.

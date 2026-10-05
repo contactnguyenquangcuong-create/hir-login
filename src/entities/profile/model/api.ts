@@ -65,3 +65,5 @@ export const hostPlatform = () => invoke<string>("host_platform");
 export const syncActivity = () => invoke<{ busy: string[]; generation: number }>("sync_activity");
 /// A profile was saved or created here: tell the team now instead of waiting.
 export const syncKick = () => invoke<void>("sync_kick");
+/** Brings a running profile's window back on screen if automation had put it out of sight. */
+export const profileShowWindow = (id: string) => invoke<boolean>("profile_show_window", { id });

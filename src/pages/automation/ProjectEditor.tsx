@@ -31,6 +31,16 @@ import { TrafficPanel } from "../../widgets/TrafficPanel";
 import type { TrafficRule } from "../../entities/automation";
 import { useT } from "../../shared/i18n";
 
+/** The runner stamps each log line with Unix seconds, `[1791170797] started "aa"`.
+ *  Shown as the local clock instead — `10:27:45 started "aa"`. */
+function stampLog(line: string): string {
+  const m = /^\[(\d{9,11})\]\s?(.*)$/s.exec(line);
+  if (!m) return line;
+  const d = new Date(Number(m[1]) * 1000);
+  const p2 = (n: number) => String(n).padStart(2, "0");
+  return `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())} ${m[2]}`;
+}
+
 export function ProjectEditor() {
   const t = useT();
   const project = useAutomation((s) => s.current());
@@ -46,7 +56,9 @@ export function ProjectEditor() {
   const [target, setTarget] = useState<string | null>(null);
   const [picking, setPicking] = useState(false);
   const [pickAt, setPickAt] = useState<{ x: number; y: number } | null>(null);
-  const [showLive, setShowLive] = useState(true);
+  const [showLive, setShowLive] = useState(false);
+  // Canvas-only: hides the step panel and the browser so the graph gets the whole width.
+  const [focus, setFocus] = useState(false);
   const [recording, setRecording] = useState(false);
   const [openStep, setOpenStep] = useState<string | null>(null);
   const [rightTab, setRightTab] = useState<"step" | "traffic">("step");
@@ -85,6 +97,16 @@ export function ProjectEditor() {
     return () => clearInterval(t);
   }, [project?.id]);
   useEffect(() => { profileList().then(setProfiles).catch(() => {}); }, []);
+
+  // The studio pane follows the profile the project itself names: pick it in the
+  // "Dùng profile" step and the pane (and its Console) is already on that profile, no
+  // second choice on the right. Picking another one by hand still works until the
+  // step's profile changes.
+  const stepProfile = (project?.blocks ?? []).find((b) => b.kind === "profile.use" && b.enabled)?.params.id;
+  useEffect(() => {
+    const id = typeof stepProfile === "string" ? stepProfile : "";
+    if (id && profiles.some((p) => p.id === id)) setTarget(id);
+  }, [stepProfile, profiles]);
 
   if (!project) {
     open(null);
@@ -182,7 +204,14 @@ export function ProjectEditor() {
   };
 
   const addFromLibrary = (spec: BlockSpec) => {
-    const b = newBlock(spec.kind, {}, "", pickAt ?? undefined);
+    // A default the panel shows must also be what the step holds: an empty
+    // param is "not set" to the runner, which for a "test run = 1" default
+    // would mean posting for real.
+    const defaults: Record<string, unknown> = {};
+    for (const prm of spec.params) {
+      if (prm.default !== undefined) defaults[prm.name] = prm.default;
+    }
+    const b = newBlock(spec.kind, defaults, "", pickAt ?? undefined);
     setPickAt(null);
     addBlock(project.id, b);
     setOpenStep(b.id);
@@ -296,62 +325,52 @@ export function ProjectEditor() {
         onSearch={() => {}}
       />
 
-      <div className="mb-3.5 flex items-end justify-between gap-4">
-        <div className="min-w-0">
+      <div className="mb-2.5 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-12 bg-bg-white-0 px-3 py-2 shadow-[var(--shadow-xs)] ring-1 ring-inset ring-stroke-soft-200">
+        <div className="min-w-[200px] flex-1">
           <input
-            className="m-0 w-full max-w-[36ch] truncate rounded-8 bg-transparent px-1 py-0.5 text-title-h5 text-text-strong-950 outline-none ring-1 ring-inset ring-transparent hover:ring-stroke-soft-200 focus:ring-primary-base"
+            className="m-0 w-full max-w-[36ch] truncate rounded-8 bg-transparent px-1 py-0.5 text-title-h6 text-text-strong-950 outline-none ring-1 ring-inset ring-transparent hover:ring-stroke-soft-200 focus:ring-primary-base"
             value={project.name}
             onChange={(e) => patch(project.id, { name: e.target.value })}
           />
           <input
-            className="mt-1 w-full max-w-[70ch] rounded-8 bg-transparent px-1 py-0.5 text-paragraph-xs text-text-soft-400 outline-none ring-1 ring-inset ring-transparent hover:ring-stroke-soft-200 focus:ring-primary-base"
+            className="w-full max-w-[60ch] rounded-8 bg-transparent px-1 py-0 text-paragraph-xs text-text-soft-400 outline-none ring-1 ring-inset ring-transparent hover:ring-stroke-soft-200 focus:ring-primary-base"
             placeholder={t("projectEditor.notesPlaceholder")}
             value={project.notes}
             onChange={(e) => patch(project.id, { notes: e.target.value })}
           />
         </div>
-        <Button
-          variant="neutral" mode="stroke" size="small"
-          leftIcon={<CloseIcon className="size-4" />}
-          onClick={() => open(null)}
-        >
-          {t("projectEditor.close")}
-        </Button>
-      </div>
 
-      <div className="mb-3.5 flex flex-wrap items-end gap-4 rounded-12 bg-bg-white-0 px-4 py-3 shadow-[var(--shadow-xs)] ring-1 ring-inset ring-stroke-soft-200">
-        <label className="flex flex-col gap-1">
-          <span className="text-subheading-2xs text-text-soft-400">{t("projectEditor.threads")}</span>
-          <input
-            type="number" min={1} max={64}
-            className="h-8 w-[90px] rounded-8 bg-bg-white-0 px-2 text-paragraph-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 outline-none focus:ring-primary-base"
-            value={project.run.threads}
-            onChange={(e) => setRunOpts({ threads: Math.max(1, Number(e.target.value) || 1) })}
-          />
-        </label>
-        <label className="flex flex-col gap-1">
-          <span className="text-subheading-2xs text-text-soft-400">{t("projectEditor.loops")}</span>
-          <input
-            type="number" min={0}
-            className="h-8 w-[90px] rounded-8 bg-bg-white-0 px-2 text-paragraph-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 outline-none focus:ring-primary-base"
-            value={project.run.loops}
-            onChange={(e) => setRunOpts({ loops: Math.max(0, Number(e.target.value) || 0) })}
-          />
-        </label>
-        {project.run.loops === 0 && (
-          <label className="flex flex-col gap-1">
-            <span className="text-subheading-2xs text-text-soft-400">{t("projectEditor.hours")}</span>
+        <div className="flex items-center gap-3" title={t("projectEditor.loopsHelp")}>
+          <label className="flex items-center gap-1.5">
+            <span className="text-subheading-2xs text-text-soft-400">{t("projectEditor.threads")}</span>
             <input
-              type="number" min={0} step={0.5}
-              className="h-8 w-[90px] rounded-8 bg-bg-white-0 px-2 text-paragraph-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 outline-none focus:ring-primary-base"
-              value={project.run.hours}
-              onChange={(e) => setRunOpts({ hours: Math.max(0, Number(e.target.value) || 0) })}
+              type="number" min={1} max={64}
+              className="h-8 w-[64px] rounded-8 bg-bg-white-0 px-2 text-paragraph-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 outline-none focus:ring-primary-base"
+              value={project.run.threads}
+              onChange={(e) => setRunOpts({ threads: Math.max(1, Number(e.target.value) || 1) })}
             />
           </label>
-        )}
-        <p className="m-0 max-w-[38ch] text-paragraph-xs text-text-soft-400">
-          {t("projectEditor.loopsHelp")}
-        </p>
+          <label className="flex items-center gap-1.5">
+            <span className="text-subheading-2xs text-text-soft-400">{t("projectEditor.loops")}</span>
+            <input
+              type="number" min={0}
+              className="h-8 w-[64px] rounded-8 bg-bg-white-0 px-2 text-paragraph-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 outline-none focus:ring-primary-base"
+              value={project.run.loops}
+              onChange={(e) => setRunOpts({ loops: Math.max(0, Number(e.target.value) || 0) })}
+            />
+          </label>
+          {project.run.loops === 0 && (
+            <label className="flex items-center gap-1.5">
+              <span className="text-subheading-2xs text-text-soft-400">{t("projectEditor.hours")}</span>
+              <input
+                type="number" min={0} step={0.5}
+                className="h-8 w-[64px] rounded-8 bg-bg-white-0 px-2 text-paragraph-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 outline-none focus:ring-primary-base"
+                value={project.run.hours}
+                onChange={(e) => setRunOpts({ hours: Math.max(0, Number(e.target.value) || 0) })}
+              />
+            </label>
+          )}
+        </div>
 
         <div className="ml-auto flex items-center gap-2">
           {run?.running ? (
@@ -386,6 +405,13 @@ export function ProjectEditor() {
           >
             {t("projectEditor.export")}
           </Button>
+          <Button
+            variant="neutral" mode="stroke" size="small"
+            leftIcon={<CloseIcon className="size-4" />}
+            onClick={() => open(null)}
+          >
+            {t("projectEditor.close")}
+          </Button>
         </div>
       </div>
 
@@ -396,8 +422,12 @@ export function ProjectEditor() {
       )}
 
       <div
-        className={`grid min-h-0 flex-1 gap-3.5 ${
-          showLive ? "grid-cols-[minmax(0,1fr)_300px_minmax(420px,42%)]" : "grid-cols-[1fr_300px]"
+        className={`grid min-h-0 flex-1 gap-3 ${
+          focus
+            ? "grid-cols-[minmax(0,1fr)]"
+            : showLive
+              ? "grid-cols-[minmax(0,1fr)_300px_minmax(340px,34%)]"
+              : "grid-cols-[minmax(0,1fr)_300px]"
         }`}
       >
         <div className="flex min-h-0 flex-col gap-2">
@@ -415,11 +445,19 @@ export function ProjectEditor() {
               >
                 {t("projectEditor.addStep")}
               </Button>
+              {!focus && (
+                <Button
+                  variant="neutral" mode="ghost" size="xsmall"
+                  onClick={() => setShowLive((v) => !v)}
+                >
+                  {showLive ? t("projectEditor.hideBrowser") : t("projectEditor.showBrowser")}
+                </Button>
+              )}
               <Button
-                variant="neutral" mode="ghost" size="xsmall"
-                onClick={() => setShowLive((v) => !v)}
+                variant="neutral" mode={focus ? "stroke" : "ghost"} size="xsmall"
+                onClick={() => setFocus((v) => !v)}
               >
-                {showLive ? t("projectEditor.hideBrowser") : t("projectEditor.showBrowser")}
+                {focus ? t("projectEditor.exitFocus") : t("projectEditor.focusCanvas")}
               </Button>
             </div>
           </div>
@@ -448,7 +486,7 @@ export function ProjectEditor() {
           </div>
         </div>
 
-        <div className="flex min-h-0 flex-col gap-2 overflow-y-auto rounded-12 bg-bg-white-0 p-3 shadow-[var(--shadow-xs)] ring-1 ring-inset ring-stroke-soft-200">
+        <div className={(focus ? "hidden " : "flex ") + "min-h-0 flex-col gap-2 overflow-y-auto rounded-12 bg-bg-white-0 p-3 shadow-[var(--shadow-xs)] ring-1 ring-inset ring-stroke-soft-200"}>
           <div className="flex gap-1">
             {(["step", "traffic"] as const).map((tab) => (
               <button
@@ -511,15 +549,16 @@ export function ProjectEditor() {
                 {run.log.length === 0 ? (
                   <div className="text-text-soft-400">{t("projectEditor.logEmpty")}</div>
                 ) : (
-                  run.log.slice(-60).map((l, i) => <div key={i}>{l}</div>)
+                  run.log.slice(-60).map((l, i) => <div key={i}>{stampLog(l)}</div>)
                 )}
               </div>
             </div>
           )}
         </div>
 
+
         {showLive && (
-          <div className="flex min-h-0 flex-col gap-2">
+          <div className={(focus ? "hidden " : "flex ") + "min-h-0 flex-col gap-2"}>
             <select
               className="h-8 w-full rounded-8 bg-bg-white-0 px-2 text-paragraph-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 outline-none focus:ring-primary-base"
               value={target ?? ""}

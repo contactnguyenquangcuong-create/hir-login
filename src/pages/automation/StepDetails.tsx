@@ -1,12 +1,17 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import {
   automationList,
+  tableColumns,
+  type TableColumn,
   branchKind,
   specFor,
   type Block,
   type Branch,
   type Project,
 } from "../../entities/automation";
+import { profileList } from "../../entities/profile/model/api";
+import type { ProfileMeta } from "../../entities/profile/model/types";
 import { MultiSelect, type MSOption } from "../../shared/ui/MultiSelect";
 import { useT } from "../../shared/i18n";
 import {
@@ -36,6 +41,417 @@ function useProjects(): Project[] {
     };
   }, []);
   return list;
+}
+
+/** This machine's profiles, loaded once for the picker below. */
+function useProfiles(): ProfileMeta[] {
+  const [list, setList] = useState<ProfileMeta[]>([]);
+  useEffect(() => {
+    let alive = true;
+    profileList()
+      .then((ps) => alive && setList(ps))
+      .catch(() => alive && setList([]));
+    return () => {
+      alive = false;
+    };
+  }, []);
+  return list;
+}
+
+const FIELD =
+  "h-8 flex-1 rounded-8 bg-bg-white-0 px-2 text-paragraph-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 outline-none placeholder:text-text-soft-400 focus:ring-primary-base";
+
+/** A profile chosen from a list that is already open: a search box on top and
+ *  every profile below it, tall enough to see a dozen at once, one click to
+ *  pick. Stores the id. A value that is not one of the listed ids (a
+ *  "{{variable}}", or a profile on another machine) is kept and shown in a text
+ *  box, so an imported project is not silently rewritten. */
+function ProfileField({
+  block,
+  name,
+  hint,
+  onParam,
+}: {
+  block: Block;
+  name: string;
+  hint?: string;
+  onParam: (id: string, key: string, value: unknown) => void;
+}) {
+  const t = useT();
+  const profiles = useProfiles();
+  const value = String(block.params[name] ?? "");
+  const [q, setQ] = useState("");
+  const [typing, setTyping] = useState(false);
+  // Open while choosing; once a profile is picked the list folds into one row
+  // showing its name, and a click on that row opens the list again.
+  const [open, setOpen] = useState(false);
+  const selected = profiles.findIndex((p) => p.id === value);
+  const known = selected >= 0;
+  const custom = typing || (value !== "" && !known && profiles.length > 0);
+  const query = q.trim().toLowerCase();
+  const rows = profiles
+    .map((p, i) => ({ p, n: i + 1 }))
+    .filter(
+      ({ p, n }) =>
+        !query ||
+        String(n) === query ||
+        (p.name || "").toLowerCase().includes(query) ||
+        p.id.toLowerCase().includes(query) ||
+        (p.folder || "").toLowerCase().includes(query),
+    );
+  return (
+    <div className="flex min-w-0 flex-1 flex-col gap-1.5">
+      {custom ? (
+        <div className="flex items-center gap-1.5">
+          <input
+            className={FIELD}
+            placeholder={hint ? t(hint) : undefined}
+            value={value}
+            onChange={(e) => onParam(block.id, name, e.target.value)}
+          />
+          <button
+            type="button"
+            className="h-8 shrink-0 rounded-8 px-2.5 text-label-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 hover:bg-bg-weak-50"
+            onClick={(e) => {
+              e.preventDefault();
+              setTyping(false);
+              if (!known) onParam(block.id, name, "");
+            }}
+          >
+            {t("stepDetails.profileFromList")}
+          </button>
+        </div>
+      ) : known && !open ? (
+        <button
+          type="button"
+          title={t("stepDetails.profileChange")}
+          className="flex h-9 items-center gap-2 rounded-8 bg-bg-white-0 px-2 text-left text-paragraph-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 hover:ring-primary-base"
+          onClick={(e) => {
+            e.preventDefault();
+            setQ("");
+            setOpen(true);
+          }}
+        >
+          <span className="w-5 shrink-0 text-right text-text-soft-400">{selected + 1}</span>
+          <span className="min-w-0 flex-1 truncate">
+            {profiles[selected].name || t("stepDetails.noName")}
+            {profiles[selected].folder ? (
+              <span className="text-text-soft-400"> · {profiles[selected].folder}</span>
+            ) : null}
+          </span>
+          <span className="shrink-0 font-mono text-[10px] text-text-soft-400">{value.slice(0, 8)}</span>
+          <span aria-hidden className="shrink-0 text-text-soft-400">▾</span>
+        </button>
+      ) : (
+        <>
+          <input
+            className={FIELD + " flex-none"}
+            placeholder={t("stepDetails.profileSearch", { n: profiles.length })}
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+          />
+          <div
+            role="listbox"
+            className="flex max-h-[min(52vh,440px)] min-h-[72px] flex-col gap-px overflow-y-auto rounded-8 bg-bg-weak-50 p-1 ring-1 ring-inset ring-stroke-soft-200"
+          >
+            {rows.length === 0 && (
+              <div className="px-2 py-3 text-center text-paragraph-xs text-text-soft-400">
+                {t("stepDetails.profileNone")}
+              </div>
+            )}
+            {rows.map(({ p, n }) => {
+              const on = p.id === value;
+              return (
+                <button
+                  key={p.id}
+                  type="button"
+                  role="option"
+                  aria-selected={on}
+                  title={p.id}
+                  className={
+                    "flex items-center gap-2 rounded-4 px-2 py-1.5 text-left text-paragraph-sm " +
+                    (on
+                      ? "bg-primary-alpha-10 text-text-strong-950 ring-1 ring-inset ring-primary-base"
+                      : "text-text-strong-950 hover:bg-bg-white-0")
+                  }
+                  onClick={(e) => {
+                    e.preventDefault();
+                    onParam(block.id, name, p.id);
+                    setQ("");
+                    setOpen(false);
+                  }}
+                >
+                  <span className="w-5 shrink-0 text-right text-text-soft-400">{n}</span>
+                  <span className="min-w-0 flex-1 truncate">
+                    {p.name || t("stepDetails.noName")}
+                    {p.folder ? <span className="text-text-soft-400"> · {p.folder}</span> : null}
+                  </span>
+                  <span className="shrink-0 font-mono text-[10px] text-text-soft-400">{p.id.slice(0, 8)}</span>
+                </button>
+              );
+            })}
+          </div>
+          <button
+            type="button"
+            className="self-start text-paragraph-xs text-text-soft-400 hover:text-text-strong-950"
+            onClick={(e) => {
+              e.preventDefault();
+              setTyping(true);
+            }}
+          >
+            {t("stepDetails.profileCustom")}
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** The columns of the spreadsheet the `of` param points at, as a list. It reloads
+ *  when the file changes, so picking a file shows its columns straight away. A
+ *  value the list does not have (a typed name, a "{{variable}}") is kept. */
+function ColumnField({
+  block,
+  name,
+  of,
+  hint,
+  optional,
+  onParam,
+}: {
+  block: Block;
+  name: string;
+  of: string;
+  hint?: string;
+  optional?: boolean;
+  onParam: (id: string, key: string, value: unknown) => void;
+}) {
+  const t = useT();
+  const path = String(block.params[of] ?? "").trim();
+  const value = String(block.params[name] ?? "");
+  const [cols, setCols] = useState<TableColumn[]>([]);
+  const [err, setErr] = useState("");
+  const [typing, setTyping] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    setErr("");
+    if (!path || path.includes("{{")) {
+      setCols([]);
+      return;
+    }
+    // A typed path is not a file until it stops changing.
+    const timer = setTimeout(() => {
+      tableColumns(path)
+        .then((c) => alive && setCols(c))
+        .catch((e) => {
+          if (!alive) return;
+          setCols([]);
+          setErr(String(e));
+        });
+    }, 350);
+    return () => {
+      alive = false;
+      clearTimeout(timer);
+    };
+  }, [path]);
+
+  const listed = cols.some((c) => c.value === value);
+  const manual = typing || cols.length === 0 || (value !== "" && !listed);
+  return (
+    <div className="flex min-w-0 flex-1 flex-col gap-1">
+      {manual ? (
+        <div className="flex items-center gap-1.5">
+          <input
+            className={FIELD}
+            placeholder={hint ? t(hint) : undefined}
+            value={value}
+            onChange={(e) => onParam(block.id, name, e.target.value)}
+          />
+          {cols.length > 0 && (
+            <button
+              type="button"
+              className="h-8 shrink-0 rounded-8 px-2.5 text-label-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 hover:bg-bg-weak-50"
+              onClick={(e) => {
+                e.preventDefault();
+                setTyping(false);
+                if (!listed) onParam(block.id, name, "");
+              }}
+            >
+              {t("stepDetails.columnFromList")}
+            </button>
+          )}
+        </div>
+      ) : (
+        <>
+          <select
+            className={FIELD}
+            value={value}
+            onChange={(e) => onParam(block.id, name, e.target.value)}
+          >
+            <option value="">{optional ? t("stepDetails.columnNone") : t("stepDetails.columnFirst")}</option>
+            {cols.map((c) => (
+              <option key={c.value} value={c.value}>{c.label}</option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className="self-start text-paragraph-xs text-text-soft-400 hover:text-text-strong-950"
+            onClick={(e) => {
+              e.preventDefault();
+              setTyping(true);
+            }}
+          >
+            {t("stepDetails.columnCustom")}
+          </button>
+        </>
+      )}
+      {err && path && (
+        <span className="text-paragraph-xs text-warning-base">{t("stepDetails.columnsFailed", { err })}</span>
+      )}
+    </div>
+  );
+}
+
+type VarInfo = { name: string; source: string; excel: boolean };
+
+/** Variables the project's steps define: the `into` of a step that saves a
+ *  result (an Excel row, a read text, a random pick…) and the name of a "set
+ *  variable" step. What a text field can pull in with {{name}}. */
+function collectVars(steps: Block[], t: (k: string) => string): VarInfo[] {
+  const out: VarInfo[] = [];
+  const seen = new Set<string>();
+  const add = (name: unknown, b: Block, excel: boolean) => {
+    const n = String(name ?? "").trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(n) || seen.has(n)) return;
+    seen.add(n);
+    const what = b.label || t(specFor(b.kind)?.label ?? b.kind);
+    const col = excel ? String(b.params.column ?? "").trim() : "";
+    out.push({ name: n, source: excel && col ? `${what} · ${col}` : what, excel });
+  };
+  for (const b of steps) {
+    if (b.kind === "var.set") add(b.params.name, b, false);
+    else {
+      add(b.params.into, b, b.kind === "sheet.next");
+      if (b.kind === "sheet.next" && String(b.params.comment_column ?? "").trim()) {
+        add(b.params.comment_into ?? "comment", b, true);
+      }
+    }
+  }
+  // Excel columns first: that is what people reach for.
+  return out.sort((a, b) => Number(b.excel) - Number(a.excel));
+}
+
+/** A "{ } Variable" button that lists what other steps saved and puts the
+ *  chosen one into the field as {{name}}. */
+function VarButton({
+  steps,
+  value,
+  onPick,
+}: {
+  steps: Block[];
+  value: string;
+  onPick: (next: string) => void;
+}) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const box = useRef<HTMLDivElement | null>(null);
+  const vars = collectVars(steps, t);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => {
+      if (box.current && !box.current.contains(e.target as Node)) setOpen(false);
+    };
+    window.addEventListener("mousedown", close);
+    return () => window.removeEventListener("mousedown", close);
+  }, [open]);
+  return (
+    <div ref={box} className="relative shrink-0">
+      <button
+        type="button"
+        title={t("stepDetails.varTitle")}
+        className="h-8 rounded-8 px-2 font-mono text-[11px] text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 hover:bg-bg-weak-50"
+        onClick={(e) => {
+          e.preventDefault();
+          setOpen((v) => !v);
+        }}
+      >
+        {"{ }"}
+      </button>
+      {open && (
+        <div className="absolute right-0 top-9 z-30 flex max-h-64 w-64 flex-col gap-px overflow-y-auto rounded-8 bg-bg-white-0 p-1 shadow-[var(--shadow-md)] ring-1 ring-inset ring-stroke-soft-200">
+          {vars.length === 0 ? (
+            <div className="px-2 py-2 text-paragraph-xs text-text-soft-400">{t("stepDetails.varNone")}</div>
+          ) : (
+            vars.map((v) => (
+              <button
+                key={v.name}
+                type="button"
+                className="flex flex-col rounded-4 px-2 py-1.5 text-left hover:bg-bg-weak-50"
+                onClick={(e) => {
+                  e.preventDefault();
+                  onPick(value ? `${value}{{${v.name}}}` : `{{${v.name}}}`);
+                  setOpen(false);
+                }}
+              >
+                <span className="flex items-center gap-1.5 text-paragraph-sm text-text-strong-950">
+                  <code className="font-mono text-[12px]">{`{{${v.name}}}`}</code>
+                  {v.excel && (
+                    <span className="rounded-4 bg-primary-alpha-10 px-1 text-[10px] text-primary-base">Excel</span>
+                  )}
+                </span>
+                <span className="truncate text-paragraph-xs text-text-soft-400">{v.source}</span>
+              </button>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A path with a Browse button — the system file picker, so nobody has to type
+ *  or paste a long path. Typing still works. */
+function FileField({
+  block,
+  name,
+  hint,
+  filters,
+  onParam,
+}: {
+  block: Block;
+  name: string;
+  hint?: string;
+  filters?: { name: string; extensions: string[] }[];
+  onParam: (id: string, key: string, value: unknown) => void;
+}) {
+  const t = useT();
+  const browse = async () => {
+    try {
+      const picked = await openFileDialog({ multiple: false, directory: false, filters });
+      if (typeof picked === "string" && picked) onParam(block.id, name, picked);
+    } catch {
+      /* the dialog was dismissed or is unavailable; the box still takes a typed path */
+    }
+  };
+  return (
+    <>
+      <input
+        className={FIELD}
+        placeholder={hint ? t(hint) : undefined}
+        value={String(block.params[name] ?? "")}
+        onChange={(e) => onParam(block.id, name, e.target.value)}
+      />
+      <button
+        type="button"
+        className="h-8 shrink-0 rounded-8 px-2.5 text-label-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 hover:bg-bg-weak-50"
+        onClick={(e) => {
+          e.preventDefault();
+          void browse();
+        }}
+      >
+        {t("stepDetails.pickFile")}
+      </button>
+    </>
+  );
 }
 
 /** Picks a saved project. Stores its id, and its name beside it: an id does not
@@ -324,7 +740,13 @@ export function StepDetails({ block, steps, onParam, onSecret, onBranch, onToggl
         <label key={prm.name} className="flex flex-col gap-1">
           <span className="text-subheading-2xs text-text-soft-400">{t(prm.label)}</span>
           <div className="flex items-center gap-1.5">
-            {prm.kind === "project" ? (
+            {prm.kind === "column" ? (
+              <ColumnField block={block} name={prm.name} of={prm.of ?? "path"} hint={prm.hint} optional={prm.optional} onParam={onParam} />
+            ) : prm.kind === "file" ? (
+              <FileField block={block} name={prm.name} hint={prm.hint} filters={prm.filters} onParam={onParam} />
+            ) : prm.kind === "profile" ? (
+              <ProfileField block={block} name={prm.name} hint={prm.hint} onParam={onParam} />
+            ) : prm.kind === "project" ? (
               <ProjectField block={block} name={prm.name} onParam={onParam} />
             ) : prm.kind === "projectStep" ? (
               <ProjectStepField
@@ -371,6 +793,16 @@ export function StepDetails({ block, steps, onParam, onSecret, onBranch, onToggl
                 }
               />
             )}
+            {(prm.kind === "text" || prm.kind === "url" || prm.kind === "textarea") &&
+              prm.name !== "into" &&
+              prm.name !== "comment_into" &&
+              !(block.kind === "var.set" && prm.name === "name") && (
+                <VarButton
+                  steps={steps}
+                  value={String(block.params[prm.name] ?? prm.default ?? "")}
+                  onPick={(next) => onParam(block.id, prm.name, next)}
+                />
+              )}
             {prm.secret && (
               <button
                 type="button"
