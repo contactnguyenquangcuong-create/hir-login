@@ -52,6 +52,14 @@ export type RunSettings = {
   profiles: string[];
   /** Which block the run starts at; empty means the first. */
   start: string;
+  /** Several profiles at once: one worker drives each, all together. */
+  targets?: string[];
+  /** Seconds between one profile starting and the next (random in the range, cumulative). */
+  start_gap_min?: number;
+  start_gap_max?: number;
+  /** A random pause, in seconds, before every step of every worker. */
+  step_delay_min?: number;
+  step_delay_max?: number;
 };
 
 export type Project = {

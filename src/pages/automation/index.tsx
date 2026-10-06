@@ -104,6 +104,12 @@ export function AutomationPage() {
                 await init();
                 open(p.id);
                 const n = bundle.needs?.length ?? 0;
+                const missing = p.missing ?? [];
+                if (missing.length > 0) {
+                  // Not an error: the project is in, but these steps need choosing again here.
+                  toast.info(t("automation.importedMissing", { list: missing.join(", ") }));
+                  return;
+                }
                 toast.ok(
                   n === 0
                     ? t("automation.imported")

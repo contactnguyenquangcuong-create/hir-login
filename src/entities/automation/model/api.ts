@@ -82,8 +82,9 @@ export const automationExport = (projectId: string) =>
 /** Writes the bundle into a folder the operator picked; resolves with the file it made. */
 export const automationExportToFolder = (projectId: string, dir: string) =>
   invoke<{ path: string; needs: number }>("automation_export_to_folder", { projectId, dir });
+/** The new project, and the steps whose profile or file this machine lacks (now emptied). */
 export const automationImport = (bundle: Bundle) =>
-  invoke<Project>("automation_import", { bundle });
+  invoke<Project & { missing?: string[] }>("automation_import", { bundle });
 export const automationDisplay = () => invoke<DisplayInfo>("automation_display");
 
 // ---- Request interception (Traffic domain) ----

@@ -104,6 +104,23 @@ pub struct RunSettings {
     /// is what a project built before the canvas expects.
     #[serde(default)]
     pub start: String,
+    /// Several profiles at once: when not empty, one worker drives each of these profiles
+    /// and they all run the project together. (Not `profiles` above, which old projects
+    /// still carry and which is ignored.)
+    #[serde(default)]
+    pub targets: Vec<String>,
+    /// Seconds between one profile starting and the next, a random value in this range
+    /// for each (they pile up: the third starts after two gaps).
+    #[serde(default)]
+    pub start_gap_min: f64,
+    #[serde(default)]
+    pub start_gap_max: f64,
+    /// A random pause, in this range of seconds, before every step of every worker, so the
+    /// accounts do not act in lockstep.
+    #[serde(default)]
+    pub step_delay_min: f64,
+    #[serde(default)]
+    pub step_delay_max: f64,
 }
 
 fn one() -> u32 {
@@ -112,7 +129,18 @@ fn one() -> u32 {
 
 impl Default for RunSettings {
     fn default() -> Self {
-        Self { threads: 1, loops: 1, hours: 0.0, profiles: Vec::new(), start: String::new() }
+        Self {
+            threads: 1,
+            loops: 1,
+            hours: 0.0,
+            profiles: Vec::new(),
+            start: String::new(),
+            targets: Vec::new(),
+            start_gap_min: 0.0,
+            start_gap_max: 0.0,
+            step_delay_min: 0.0,
+            step_delay_max: 0.0,
+        }
     }
 }
 
@@ -431,6 +459,36 @@ fn restore_modules(_files: &[BundledModule]) {}
 /// Brings a bundle in as a NEW project — never overwriting one, because two
 /// people trading projects will collide on ids sooner or later.
 pub fn import(bundle: Bundle) -> Result<Project> {
+    Ok(import_checked(bundle, false)?.0)
+}
+
+/// Steps that point at something only the exporting machine has: a profile by id, a file
+/// by path. Brought in as they are, they would fail on the first run with an error that
+/// names an id or a path nobody here recognises. Each one is emptied (so the step panel
+/// shows its picker, ready to choose) and named in the returned list. A value that is a
+/// `{{variable}}` is left alone: it is resolved when the project runs.
+fn clear_unusable(project: &mut Project) -> Vec<String> {
+    let mut missing = Vec::new();
+    for block in &mut project.blocks {
+        let (param, ok): (&str, fn(&str) -> bool) = match block.kind.as_str() {
+            "profile.use" | "profile.delete" => ("id", |v| crate::profile::load_raw(v).is_ok()),
+            "sheet.next" | "file.readLine" => ("path", |v| std::path::Path::new(v).exists()),
+            _ => continue,
+        };
+        let Value::Object(map) = &mut block.params else { continue };
+        let Some(Value::String(value)) = map.get(param) else { continue };
+        if value.trim().is_empty() || value.contains("{{") || ok(value.trim()) {
+            continue;
+        }
+        map.insert(param.to_string(), Value::String(String::new()));
+        let name = if block.label.is_empty() { block.kind.clone() } else { block.label.clone() };
+        missing.push(format!("{name} ({})", if param == "id" { "profile" } else { "file" }));
+    }
+    missing
+}
+
+/// `import`, optionally dropping what this machine cannot use (see `clear_unusable`).
+pub fn import_checked(bundle: Bundle, clear: bool) -> Result<(Project, Vec<String>)> {
     if bundle.format != BUNDLE_FORMAT {
         return Err(anyhow::anyhow!(
             "this bundle is format {} and this launcher reads {}",
@@ -449,7 +507,69 @@ pub fn import(bundle: Bundle) -> Result<Project> {
     project.created_at = t;
     project.updated_at = t;
     project.run.profiles.clear();
+    let missing = if clear { clear_unusable(&mut project) } else { Vec::new() };
     db.projects.push(project.clone());
     write_db(&db)?;
-    Ok(project)
+    Ok((project, missing))
+}
+
+
+#[cfg(test)]
+mod import_tests {
+    use super::*;
+
+    fn project_with(blocks: Vec<(&str, &str, Value)>) -> Project {
+        let blocks: Vec<Block> = blocks
+            .into_iter()
+            .enumerate()
+            .map(|(i, (kind, label, params))| Block {
+                id: format!("b{i}"),
+                kind: kind.into(),
+                label: label.into(),
+                params,
+                enabled: true,
+                secrets: Vec::new(),
+                x: 0.0,
+                y: 0.0,
+                on_done: Branch::default(),
+                on_fail: Branch::default(),
+            })
+            .collect();
+        Project {
+            id: "p".into(),
+            name: "t".into(),
+            notes: String::new(),
+            blocks,
+            run: RunSettings::default(),
+            rules: Vec::new(),
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    /// A project moved to another machine named that machine's profile ids and file paths,
+    /// which mean nothing here. They are emptied and listed; variables and real things stay.
+    #[test]
+    fn steps_pointing_at_things_this_machine_lacks_are_emptied_and_listed() {
+        let real = std::env::temp_dir().join(format!("hir-real-{}.csv", uuid::Uuid::new_v4()));
+        std::fs::write(&real, "link\nhttps://x/1\n").unwrap();
+        let mut p = project_with(vec![
+            ("profile.use", "Dùng profile số 1", serde_json::json!({ "id": "no-such-profile-id" })),
+            ("profile.use", "by variable", serde_json::json!({ "id": "{{profile_id}}" })),
+            ("sheet.next", "Excel gone", serde_json::json!({ "path": "C:\\nope\\demo.xlsx", "column": "Link" })),
+            ("sheet.next", "Excel here", serde_json::json!({ "path": real.to_string_lossy(), "column": "Link" })),
+            ("click", "unrelated", serde_json::json!({ "selector": "#a" })),
+        ]);
+        let missing = clear_unusable(&mut p);
+        let _ = std::fs::remove_file(&real);
+
+        assert_eq!(missing.len(), 2, "{missing:?}");
+        assert!(missing[0].contains("Dùng profile số 1") && missing[0].contains("profile"));
+        assert!(missing[1].contains("Excel gone") && missing[1].contains("file"));
+        assert_eq!(p.blocks[0].params["id"], "");
+        assert_eq!(p.blocks[1].params["id"], "{{profile_id}}", "a variable is resolved at run time");
+        assert_eq!(p.blocks[2].params["path"], "");
+        assert_eq!(p.blocks[2].params["column"], "Link", "the rest of the step is kept");
+        assert!(p.blocks[3].params["path"].as_str().unwrap().ends_with(".csv"), "a file that exists is kept");
+    }
 }

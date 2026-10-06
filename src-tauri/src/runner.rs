@@ -1346,6 +1346,10 @@ async fn run_block(
             }
             return Ok(Flow::Next);
         }
+        "profile.use" if vars.contains_key("hir_seeded") => {
+            run.log("this run chose the profile for each worker — \"use profile\" skipped");
+            return Ok(Flow::Next);
+        }
         "profile.use" => {
             let id = expand(param(p, "id").context("no profile id")?, vars);
             profile::load_raw(&id).with_context(|| format!("no profile {id}"))?;
@@ -2718,6 +2722,12 @@ async fn run_worker(
     };
     let mut vars: HashMap<String, String> = HashMap::new();
     vars.insert("thread".into(), (idx + 1).to_string());
+    if !bound.id.is_empty() {
+        // The run named this worker's profile. A "use profile" step would send every
+        // worker to the same one, so it stands aside (see the profile.use arm).
+        vars.insert("hir_seeded".into(), "1".into());
+        vars.insert("profile_id".into(), bound.id.clone());
+    }
     let mut ctx = CallCtx::new();
 
     let endless = project.run.loops == 0;
@@ -2777,6 +2787,16 @@ async fn run_worker(
                 w.note = block.label.clone();
             });
 
+            // A random pause before the step, so several accounts never move together.
+            if project.run.step_delay_max > 0.0 {
+                let d = between(project.run.step_delay_min, project.run.step_delay_max);
+                if d > 0.05 {
+                    pause_unless_stopped(&run, d).await;
+                    if run.stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                }
+            }
             let outcome = run_block(&mut bound, block, &mut vars, &run, &mut ctx).await;
             let branch = match &outcome {
                 Ok(Flow::Next) => block.on_done.clone(),
@@ -2796,6 +2816,18 @@ async fn run_worker(
                     at += 1;
                 }
                 automation::Branch::Stop => {
+                    // An Excel/CSV list that has run out is the run's natural end, not a failure.
+                    if let Err(e) = &outcome {
+                        if e.to_string().contains("no unused rows left") {
+                            run.log("the list is finished");
+                            run.worker(idx, |w| {
+                                w.status = "done".into();
+                                w.note = "list finished".into();
+                            });
+                            end_run = true;
+                            break;
+                        }
+                    }
                     if outcome.is_err() {
                         run.worker(idx, |w| {
                             w.status = "failed".into();
@@ -2852,6 +2884,28 @@ async fn run_worker(
     }
 }
 
+/// A random number of seconds in [min, max] (either may be zero; a reversed or negative
+/// range is straightened out).
+fn between(min: f64, max: f64) -> f64 {
+    let lo = min.max(0.0);
+    let hi = max.max(lo);
+    let b = uuid::Uuid::new_v4();
+    let u = u16::from_le_bytes([b.as_bytes()[0], b.as_bytes()[1]]) as f64 / 65535.0;
+    lo + (hi - lo) * u
+}
+
+/// Sleeps `secs`, but wakes early if the run is stopped, so Stop never waits out a delay.
+async fn pause_unless_stopped(run: &Run, secs: f64) {
+    let end = Instant::now() + Duration::from_secs_f64(secs.max(0.0));
+    while Instant::now() < end {
+        if run.stop.load(Ordering::Relaxed) {
+            return;
+        }
+        let left = end.saturating_duration_since(Instant::now());
+        tokio::time::sleep(left.min(Duration::from_millis(250))).await;
+    }
+}
+
 pub async fn start(project_id: &str) -> Result<()> {
     if migrate::in_progress() {
         return Err(anyhow!("profiles are being moved — try again when that finishes"));
@@ -2886,7 +2940,28 @@ pub async fn start(project_id: &str) -> Result<()> {
             project.run.profiles.len()
         );
     }
-    let seeds: Vec<Option<String>> = (0..threads).map(|_| None).collect();
+    // Several profiles: one worker for each, all at once. Without any, `threads` workers
+    // each start from nothing and the graph picks (or makes) their profile.
+    let targets: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        project
+            .run
+            .targets
+            .iter()
+            .filter(|id| crate::profile::load_raw(id).is_ok() && seen.insert((*id).clone()))
+            .cloned()
+            .collect()
+    };
+    if !project.run.targets.is_empty() && targets.is_empty() {
+        return Err(anyhow!("none of the profiles chosen for this run exists on this machine"));
+    }
+    let multi = !targets.is_empty();
+    let threads = if multi { targets.len().min(64) } else { threads };
+    let seeds: Vec<Option<String>> = if multi {
+        targets.into_iter().take(64).map(Some).collect()
+    } else {
+        (0..threads).map(|_| None).collect()
+    };
 
     let names = crate::profile::list_all()
         .unwrap_or_default()
@@ -2944,15 +3019,26 @@ pub async fn start(project_id: &str) -> Result<()> {
     tokio::spawn(async move {
         let sem = Arc::new(tokio::sync::Semaphore::new(threads));
         let mut handles = Vec::new();
+        // The moment each profile starts, counted from now: the gaps add up.
+        let mut start_at = 0.0_f64;
         for (idx, seed) in seeds.into_iter().enumerate() {
             let permit = sem.clone().acquire_owned().await;
             if run.stop.load(Ordering::Relaxed) {
                 break;
             }
+            if idx > 0 {
+                start_at += between(project.run.start_gap_min, project.run.start_gap_max);
+            }
+            let wait = start_at;
             let run = run.clone();
             let project = project.clone();
             handles.push(tokio::spawn(async move {
                 let _permit = permit;
+                if wait > 0.0 {
+                    run.worker(idx, |w| w.note = format!("starts in {wait:.0}s"));
+                    run.log(format!("profile {} starts in {wait:.0}s", idx + 1));
+                    pause_unless_stopped(&run, wait).await;
+                }
                 run_worker(run, idx, seed, project, deadline).await;
             }));
         }

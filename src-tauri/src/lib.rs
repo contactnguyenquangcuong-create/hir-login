@@ -921,11 +921,21 @@ fn automation_export_to_folder(project_id: String, dir: String) -> Result<serde_
     Ok(serde_json::json!({ "path": path.to_string_lossy(), "needs": bundle.needs.len() }))
 }
 
+/// The imported project, plus the steps that had to be emptied because they pointed at a
+/// profile or a file this machine does not have (so the operator knows what to pick again).
+#[derive(serde::Serialize)]
+struct ImportResult {
+    #[serde(flatten)]
+    project: automation::Project,
+    missing: Vec<String>,
+}
+
 #[tauri::command]
-fn automation_import(bundle: serde_json::Value) -> Result<automation::Project, String> {
+fn automation_import(bundle: serde_json::Value) -> Result<ImportResult, String> {
     let parsed: automation::Bundle =
         serde_json::from_value(bundle).map_err(|e| format!("that is not a project bundle: {e}"))?;
-    automation::import(parsed).map_err(|e| e.to_string())
+    let (project, missing) = automation::import_checked(parsed, true).map_err(|e| e.to_string())?;
+    Ok(ImportResult { project, missing })
 }
 
 /// Starts the project. Answers as soon as the run is under way; progress is

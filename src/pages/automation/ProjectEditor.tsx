@@ -32,6 +32,33 @@ import { TrafficPanel } from "../../widgets/TrafficPanel";
 import type { TrafficRule } from "../../entities/automation";
 import { useT } from "../../shared/i18n";
 
+/** Two numbers: from … to … seconds. */
+function RangeField({
+  label,
+  min,
+  max,
+  onChange,
+}: {
+  label: string;
+  min: number;
+  max: number;
+  onChange: (min: number, max: number) => void;
+}) {
+  const cls =
+    "h-8 w-[72px] rounded-8 bg-bg-white-0 px-2 text-paragraph-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 outline-none focus:ring-primary-base";
+  const num = (v: string) => Math.max(0, Number(v) || 0);
+  return (
+    <label className="flex flex-col gap-1">
+      <span className="text-subheading-2xs text-text-soft-400">{label}</span>
+      <span className="flex items-center gap-1.5">
+        <input type="number" min={0} step={1} className={cls} value={min} onChange={(e) => onChange(num(e.target.value), Math.max(max, num(e.target.value)))} />
+        <span className="text-text-soft-400">–</span>
+        <input type="number" min={0} step={1} className={cls} value={max} onChange={(e) => onChange(Math.min(min, num(e.target.value)), num(e.target.value))} />
+      </span>
+    </label>
+  );
+}
+
 /** The runner stamps each log line with Unix seconds, `[1791170797] started "aa"`.
  *  Shown as the local clock instead — `10:27:45 started "aa"`. */
 function stampLog(line: string): string {
@@ -58,6 +85,7 @@ export function ProjectEditor() {
   const [picking, setPicking] = useState(false);
   const [pickAt, setPickAt] = useState<{ x: number; y: number } | null>(null);
   const [showLive, setShowLive] = useState(false);
+  const [multiOpen, setMultiOpen] = useState(false);
   // Canvas-only: hides the step panel and the browser so the graph gets the whole width.
   const [focus, setFocus] = useState(false);
   const [recording, setRecording] = useState(false);
@@ -378,6 +406,15 @@ export function ProjectEditor() {
           )}
         </div>
 
+        <Button
+          variant="neutral" mode={(project.run.targets?.length ?? 0) > 0 ? "filled" : "stroke"} size="small"
+          onClick={() => setMultiOpen((v) => !v)}
+        >
+          {(project.run.targets?.length ?? 0) > 0
+            ? t("projectEditor.multiButtonOn", { n: project.run.targets?.length ?? 0 })
+            : t("projectEditor.multiButton")}
+        </Button>
+
         <div className="ml-auto flex items-center gap-2">
           {run?.running ? (
             <Button
@@ -420,6 +457,65 @@ export function ProjectEditor() {
           </Button>
         </div>
       </div>
+
+      {multiOpen && (
+        <div className="mb-2.5 flex flex-col gap-3 rounded-12 bg-bg-white-0 px-3 py-3 shadow-[var(--shadow-xs)] ring-1 ring-inset ring-stroke-soft-200">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <div className="text-label-sm text-text-strong-950">{t("projectEditor.multiTitle")}</div>
+              <div className="text-paragraph-xs text-text-soft-400">{t("projectEditor.multiHelp")}</div>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <Button variant="neutral" mode="stroke" size="xsmall" onClick={() => setRunOpts({ targets: profiles.map((p) => p.id) })}>
+                {t("projectEditor.multiAll")}
+              </Button>
+              <Button variant="neutral" mode="stroke" size="xsmall" onClick={() => setRunOpts({ targets: [] })}>
+                {t("projectEditor.multiNone")}
+              </Button>
+            </div>
+          </div>
+          <div className="flex max-h-44 flex-wrap gap-1.5 overflow-y-auto">
+            {profiles.map((p, i) => {
+              const on = (project.run.targets ?? []).includes(p.id);
+              return (
+                <button
+                  key={p.id}
+                  type="button"
+                  title={p.id}
+                  className={
+                    "flex items-center gap-1.5 rounded-8 px-2 py-1 text-paragraph-xs ring-1 ring-inset " +
+                    (on
+                      ? "bg-primary-alpha-10 text-text-strong-950 ring-primary-base"
+                      : "text-text-sub-600 ring-stroke-soft-200 hover:bg-bg-weak-50")
+                  }
+                  onClick={() => {
+                    const cur = project.run.targets ?? [];
+                    setRunOpts({ targets: on ? cur.filter((x) => x !== p.id) : [...cur, p.id] });
+                  }}
+                >
+                  <span className="text-text-soft-400">{i + 1}</span>
+                  <span>{p.name || t("stepDetails.noName")}</span>
+                  <span className="font-mono text-[10px] text-text-soft-400">{p.id.slice(0, 6)}</span>
+                </button>
+              );
+            })}
+          </div>
+          <div className="flex flex-wrap items-end gap-x-6 gap-y-2">
+            <RangeField
+              label={t("projectEditor.multiStartGap")}
+              min={project.run.start_gap_min ?? 0}
+              max={project.run.start_gap_max ?? 0}
+              onChange={(a, b) => setRunOpts({ start_gap_min: a, start_gap_max: b })}
+            />
+            <RangeField
+              label={t("projectEditor.multiStepDelay")}
+              min={project.run.step_delay_min ?? 0}
+              max={project.run.step_delay_max ?? 0}
+              onChange={(a, b) => setRunOpts({ step_delay_min: a, step_delay_max: b })}
+            />
+          </div>
+        </div>
+      )}
 
       {display?.limited && (
         <div className="mb-3.5 rounded-12 bg-warning-alpha-16 px-4 py-2.5 text-paragraph-xs text-warning-base">
