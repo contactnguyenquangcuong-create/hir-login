@@ -910,10 +910,10 @@ fn automation_export_to_folder(project_id: String, dir: String) -> Result<serde_
         .collect();
     let stem = stem.trim_matches('-');
     let stem = if stem.is_empty() { "project" } else { stem };
-    let mut path = dir.join(format!("{stem}.shardx-project.json"));
+    let mut path = dir.join(format!("{stem}.hirlogin-project.json"));
     let mut n = 2;
     while path.exists() {
-        path = dir.join(format!("{stem} ({n}).shardx-project.json"));
+        path = dir.join(format!("{stem} ({n}).hirlogin-project.json"));
         n += 1;
     }
     let json = serde_json::to_string_pretty(&bundle).map_err(|e| e.to_string())?;

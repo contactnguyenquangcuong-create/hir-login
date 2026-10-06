@@ -63,7 +63,7 @@ export function ProfileRowActions({ profile, onMore }: {
         leftIcon={<CopyIcon className="size-4" />}
       >
       </Button>
-      <Button variant="error" mode='filled' size="xsmall" onlyIcon onClick={() => remove(p.id)} title={t("profileRowActions.delete")}
+      <Button variant="error" mode="lighter" size="xsmall" onlyIcon onClick={() => remove(p.id)} title={t("profileRowActions.delete")}
         leftIcon={<DeleteIcon className="size-4" />}
       >
       </Button>

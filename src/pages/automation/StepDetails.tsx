@@ -590,6 +590,8 @@ function ResiLocField({
 }
 
 type Props = {
+  /** How many profiles the run drives together; above 0 the "use profile" step is not used. */
+  multiCount?: number;
   block: Block | null;
   steps: Block[];
   onParam: (blockId: string, name: string, value: unknown) => void;
@@ -670,7 +672,7 @@ function BranchField({
 
 /** The selected block's settings. Kept out of the canvas so a long parameter
  *  list never changes where the cards are. */
-export function StepDetails({ block, steps, onParam, onSecret, onBranch, onToggle }: Props) {
+export function StepDetails({ block, steps, multiCount = 0, onParam, onSecret, onBranch, onToggle }: Props) {
   const t = useT();
   if (!block) {
     return (
@@ -736,7 +738,11 @@ export function StepDetails({ block, steps, onParam, onSecret, onBranch, onToggl
         {block.enabled ? t("stepDetails.enabledToggle") : t("stepDetails.skippedToggle")}
       </button>
 
-      {(spec?.params ?? []).map((prm) => (
+      {(spec?.params ?? []).map((prm) => prm.kind === "profile" && multiCount > 0 ? (
+        <div key={prm.name} className="rounded-10 bg-primary-alpha-10 px-3 py-2.5 text-paragraph-sm text-text-strong-950">
+          {t("stepDetails.profileMulti", { n: multiCount })}
+        </div>
+      ) : (
         <label key={prm.name} className="flex flex-col gap-1">
           <span className="text-subheading-2xs text-text-soft-400">{t(prm.label)}</span>
           <div className="flex items-center gap-1.5">
