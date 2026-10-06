@@ -891,6 +891,36 @@ fn automation_export(project_id: String) -> Result<serde_json::Value, String> {
         .map_err(|e| e.to_string())
 }
 
+/// Writes the exported bundle straight into a folder the operator picked, so
+/// "Export" no longer depends on where the webview decides downloads go. A
+/// name that is already taken gets " (2)", " (3)"… instead of being overwritten.
+/// Answers with where it landed and how many secrets were left blank.
+#[tauri::command]
+fn automation_export_to_folder(project_id: String, dir: String) -> Result<serde_json::Value, String> {
+    let dir = std::path::PathBuf::from(dir);
+    if !dir.is_dir() {
+        return Err(format!("not a folder: {}", dir.display()));
+    }
+    let bundle = automation::export(&project_id).map_err(|e| e.to_string())?;
+    let stem: String = bundle
+        .project
+        .name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '-' })
+        .collect();
+    let stem = stem.trim_matches('-');
+    let stem = if stem.is_empty() { "project" } else { stem };
+    let mut path = dir.join(format!("{stem}.shardx-project.json"));
+    let mut n = 2;
+    while path.exists() {
+        path = dir.join(format!("{stem} ({n}).shardx-project.json"));
+        n += 1;
+    }
+    let json = serde_json::to_string_pretty(&bundle).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    Ok(serde_json::json!({ "path": path.to_string_lossy(), "needs": bundle.needs.len() }))
+}
+
 #[tauri::command]
 fn automation_import(bundle: serde_json::Value) -> Result<automation::Project, String> {
     let parsed: automation::Bundle =
@@ -3799,6 +3829,7 @@ pub fn run() {
             automation_module_grant,
             automation_modules_dir,
             automation_export,
+            automation_export_to_folder,
             automation_import,
             trash_list,
             trash_restore,

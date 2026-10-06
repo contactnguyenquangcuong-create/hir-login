@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "@proxyshard/shardx-ui-kit";
 import { Topbar } from "../../shared/ui/Topbar";
 import { AddIcon, CloseIcon, DownloadIcon, PlayIcon, StopIcon } from "../../shared/icons";
 import {
   specFor,
   automationDisplay,
-  automationExport,
+  automationExportToFolder,
   automationFleetWindow,
   automationRun,
   automationRunStatus,
@@ -261,22 +262,27 @@ export function ProjectEditor() {
       ),
     });
 
+  // The operator picks the destination folder (the last one is offered again),
+  // and the bundle is written there as <name>.shardx-project.json.
   const exportProject = async () => {
     try {
-      const bundle = await automationExport(project.id);
-      const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" });
-      const a = document.createElement("a");
-      a.href = URL.createObjectURL(blob);
-      a.download = `${project.name.replace(/[^\w.-]+/g, "-")}.shardx-project.json`;
-      a.click();
-      URL.revokeObjectURL(a.href);
-      const n = bundle.needs.length;
+      const KEY = "automation.exportDir";
+      let last: string | undefined;
+      try { last = localStorage.getItem(KEY) ?? undefined; } catch { /* storage unavailable */ }
+      const dir = await openDialog({
+        directory: true,
+        defaultPath: last,
+        title: t("projectEditor.exportPickFolderTitle"),
+      });
+      if (!dir || Array.isArray(dir)) return;
+      try { localStorage.setItem(KEY, dir); } catch { /* storage unavailable */ }
+      const { path, needs: n } = await automationExportToFolder(project.id, dir);
       toast.ok(
         n === 0
-          ? t("projectEditor.exported")
+          ? t("projectEditor.exportedTo", { path })
           : n === 1
-            ? t("projectEditor.exportedOneSecret")
-            : t("projectEditor.exportedSecrets", { n }),
+            ? t("projectEditor.exportedToOneSecret", { path })
+            : t("projectEditor.exportedToSecrets", { path, n }),
       );
     } catch (e) { toast.err(String(e)); }
   };

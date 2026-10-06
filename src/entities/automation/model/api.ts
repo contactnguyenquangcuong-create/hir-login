@@ -79,6 +79,9 @@ export const automationModuleRemove = (id: string) =>
 export const automationModulesDir = () => invoke<string>("automation_modules_dir");
 export const automationExport = (projectId: string) =>
   invoke<Bundle>("automation_export", { projectId });
+/** Writes the bundle into a folder the operator picked; resolves with the file it made. */
+export const automationExportToFolder = (projectId: string, dir: string) =>
+  invoke<{ path: string; needs: number }>("automation_export_to_folder", { projectId, dir });
 export const automationImport = (bundle: Bundle) =>
   invoke<Project>("automation_import", { bundle });
 export const automationDisplay = () => invoke<DisplayInfo>("automation_display");

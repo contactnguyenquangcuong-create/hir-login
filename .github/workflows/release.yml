@@ -36,6 +36,26 @@ jobs:
         run: npm ci
 
       - name: Build Tauri app
+        id: build
+        continue-on-error: true
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          # A draft, not a public release — the built-in updater points at
+          # Supabase Storage (uploaded below), not this GitHub release.
+          # Kept only so tauri-action has somewhere to stash build artifacts.
+          tagName: ${{ github.ref_name }}
+          releaseName: "Hir-Login ${{ github.ref_name }}"
+          releaseDraft: true
+          includeUpdaterJson: false
+
+      # A network hiccup on the runner ("Connect Timeout Error") fails the step with
+      # nothing wrong in the code. Try once more; the Rust cache makes it quick.
+      - name: Build Tauri app (retry after a failure)
+        if: steps.build.outcome == 'failure'
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
