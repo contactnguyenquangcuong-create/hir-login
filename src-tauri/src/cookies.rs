@@ -94,6 +94,25 @@ impl Crypt {
         }
     }
 
+    /// The plaintext inside a "v10" blob, whatever sealed it. `strip_host`: cookies carry a
+    /// 32-byte SHA256(host) prefix, saved passwords do not.
+    fn decrypt_blob(&self, encrypted: &[u8], strip_host: bool) -> Option<Vec<u8>> {
+        if encrypted.len() < 3 || &encrypted[..3] != b"v10" {
+            return None;
+        }
+        let pt = cipher_decrypt(&self.key, &encrypted[3..])?;
+        Some(if strip_host { strip_host_prefix(pt) } else { pt })
+    }
+
+    /// A password sealed the way Chromium seals it: "v10" + cipher(plaintext), no host prefix.
+    fn encrypt_plain(&self, plaintext: &[u8]) -> Vec<u8> {
+        let body = cipher_encrypt(&self.key, plaintext);
+        let mut out = Vec::with_capacity(3 + body.len());
+        out.extend_from_slice(b"v10");
+        out.extend_from_slice(&body);
+        out
+    }
+
     fn encrypt(&self, host: &str, value: &str) -> Vec<u8> {
         // 32-byte SHA256(host) prefix per Chromium ≥130.
         let mut plaintext = Sha256::digest(host.as_bytes()).to_vec();
@@ -608,3 +627,121 @@ mod import_format_tests {
     }
 }
 
+
+
+// ---- Portable copies: cookies and saved passwords moving between machines ----
+//
+// A cookie or a saved password is sealed with a key that belongs to one machine (on Windows
+// a DPAPI key tied to the Windows account, on macOS a fixed one, but a different cipher). The
+// raw database from one machine is gibberish on the next, which is how a profile arrived on
+// a second computer logged out with its passwords gone. So what travels is a copy of the
+// database with every sealed value replaced by its plaintext behind a marker; the receiving
+// machine seals each one again with its own key.
+
+/// Starts a value in a portable copy: the bytes after it are the plaintext.
+const PORTABLE_MARK: &[u8] = b"hir-plain:";
+
+/// Which sealed database a portable copy is made from.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Sealed {
+    /// `Network/Cookies`: table `cookies`, column `encrypted_value`, host-prefixed.
+    Cookies,
+    /// `Login Data` and `Login Data For Account`: table `logins`, column `password_value`.
+    Logins,
+}
+
+impl Sealed {
+    fn table_column(self) -> (&'static str, &'static str) {
+        match self {
+            Sealed::Cookies => ("cookies", "encrypted_value"),
+            Sealed::Logins => ("logins", "password_value"),
+        }
+    }
+    /// Query returning (rowid, sealed value, host) for every row.
+    fn select(self) -> &'static str {
+        match self {
+            Sealed::Cookies => "SELECT rowid, encrypted_value, host_key FROM cookies",
+            Sealed::Logins => "SELECT rowid, password_value, '' FROM logins",
+        }
+    }
+}
+
+fn scratch_copy(src: &Path) -> Result<PathBuf> {
+    let tmp = std::env::temp_dir().join(format!("hir-portable-{}.db", uuid::Uuid::new_v4()));
+    std::fs::copy(src, &tmp).with_context(|| format!("copy {}", src.display()))?;
+    Ok(tmp)
+}
+
+fn remove_db(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    for suffix in ["-journal", "-wal", "-shm"] {
+        let mut o = path.as_os_str().to_owned();
+        o.push(suffix);
+        let _ = std::fs::remove_file(PathBuf::from(o));
+    }
+}
+
+/// A copy of the database at `src` with every value this machine sealed turned into
+/// plaintext. A value this machine cannot open (sealed by another one long ago) is dropped
+/// with its row, rather than sent on as noise. The original is only read.
+pub(crate) fn portable_copy(udd: &Path, src: &Path, kind: Sealed) -> Result<Vec<u8>> {
+    let tmp = scratch_copy(src)?;
+    let result = (|| -> Result<Vec<u8>> {
+        let crypt = Crypt::open(udd)?;
+        let (table, column) = kind.table_column();
+        let conn = rusqlite::Connection::open(&tmp).with_context(|| format!("open {}", tmp.display()))?;
+        let rows: Vec<(i64, Vec<u8>)> = {
+            let mut stmt = conn.prepare(kind.select())?;
+            let it = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?;
+            it.filter_map(|r| r.ok()).collect()
+        };
+        for (rowid, blob) in rows {
+            if blob.len() < 3 || &blob[..3] != b"v10" {
+                continue; // empty, or stored in the clear: nothing to convert
+            }
+            match crypt.decrypt_blob(&blob, kind == Sealed::Cookies) {
+                Some(plain) => {
+                    let mut out = PORTABLE_MARK.to_vec();
+                    out.extend_from_slice(&plain);
+                    conn.execute(&format!("UPDATE {table} SET {column} = ?1 WHERE rowid = ?2"), rusqlite::params![out, rowid])?;
+                }
+                None => {
+                    conn.execute(&format!("DELETE FROM {table} WHERE rowid = ?1"), rusqlite::params![rowid])?;
+                }
+            }
+        }
+        drop(conn);
+        Ok(std::fs::read(&tmp)?)
+    })();
+    remove_db(&tmp);
+    result
+}
+
+/// Seals every portable value in the database file at `db` with THIS machine's key, in place.
+/// Returns how many were converted.
+pub(crate) fn localize_file(udd: &Path, db: &Path, kind: Sealed) -> Result<usize> {
+    let crypt = Crypt::open(udd)?;
+    let (table, column) = kind.table_column();
+    let conn = rusqlite::Connection::open(db).with_context(|| format!("open {}", db.display()))?;
+    let rows: Vec<(i64, Vec<u8>, String)> = {
+        let mut stmt = conn.prepare(kind.select())?;
+        let it = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, String>(2)?)))?;
+        it.filter_map(|r| r.ok()).collect()
+    };
+    let mut n = 0;
+    for (rowid, blob, host) in rows {
+        let Some(plain) = blob.strip_prefix(PORTABLE_MARK) else { continue };
+        let sealed = match kind {
+            Sealed::Cookies => crypt.encrypt(&host, &String::from_utf8_lossy(plain)),
+            Sealed::Logins => crypt.encrypt_plain(plain),
+        };
+        conn.execute(&format!("UPDATE {table} SET {column} = ?1 WHERE rowid = ?2"), rusqlite::params![sealed, rowid])?;
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// Where a profile's cookie database is, for the sync (which wants the file that exists).
+pub(crate) fn cookie_db(udd: &Path) -> PathBuf {
+    cookies_db_path(udd)
+}

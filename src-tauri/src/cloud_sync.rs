@@ -10,7 +10,7 @@
 //! server refuses a lock already held by another device, so two machines can
 //! never run the same profile at once.
 
-use crate::{settings, store, trash};
+use crate::{cookies, settings, store, trash};
 use anyhow::{Context, Result};
 use settings::SyncConfig;
 use std::fs;
@@ -152,6 +152,9 @@ async fn mark_synced(id: &str) {
 
 fn client() -> reqwest::Client {
     reqwest::Client::builder()
+        // A server that is switched off or unreachable must fail in seconds, not hold a
+        // profile launch for the system's own TCP timeout (more than a minute).
+        .connect_timeout(Duration::from_secs(8))
         .timeout(Duration::from_secs(180))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
@@ -304,6 +307,28 @@ pub(crate) fn synced_paths() -> impl Iterator<Item = &'static str> {
     trash::KEEP.iter().copied().chain(SYNC_EXTRA.iter().copied())
 }
 
+/// Files that are sealed with (or hold) this machine's key: cookies, saved passwords and
+/// Local State, where the key itself lives. Sent raw they are noise on another machine —
+/// and `Local State` would replace the receiving machine's own key. They travel as
+/// re-sealable copies under `portable/` instead (see `cookies::portable_copy`).
+const SEALED: &[(&str, &str, cookies::Sealed)] = &[
+    ("Default/Network/Cookies", "portable/Cookies", cookies::Sealed::Cookies),
+    ("Default/Login Data", "portable/Login Data", cookies::Sealed::Logins),
+    ("Default/Login Data For Account", "portable/Login Data For Account", cookies::Sealed::Logins),
+];
+
+/// Never sent raw, and never taken raw from a bundle (an older build sent them).
+fn is_unportable(rel: &str) -> bool {
+    rel == "Local State"
+        || rel == "Default/Cookies"
+        || SEALED.iter().any(|(path, _, _)| *path == rel)
+}
+
+/// What travels as plain files: everything in `synced_paths` that is not sealed.
+fn raw_paths() -> impl Iterator<Item = &'static str> {
+    synced_paths().filter(|p| !is_unportable(p))
+}
+
 /// The proxy a profile is bound to, if any. It travels inside the bundle so a
 /// profile arriving on another machine finds its proxy there too, instead of
 /// pointing at an id that machine has never heard of.
@@ -342,12 +367,26 @@ fn build_bundle(id: &str) -> Result<Vec<u8>> {
 
         let udd = store::user_data_root()?.join(id);
         if udd.exists() {
-            for rel in synced_paths() {
+            for rel in raw_paths() {
                 let src = udd.join(rel);
                 if src.is_dir() {
                     add_dir(&mut zip, &src, &format!("user-data/{rel}"), opts)?;
                 } else if src.is_file() {
                     add_file(&mut zip, &src, &format!("user-data/{rel}"), opts)?;
+                }
+            }
+            // The login: cookies and saved passwords, as copies another machine can re-seal.
+            for (rel, name, kind) in SEALED {
+                let src = if *kind == cookies::Sealed::Cookies { cookies::cookie_db(&udd) } else { udd.join(rel) };
+                if !src.is_file() {
+                    continue;
+                }
+                match cookies::portable_copy(&udd, &src, *kind) {
+                    Ok(bytes) => {
+                        zip.start_file(*name, opts)?;
+                        zip.write_all(&bytes)?;
+                    }
+                    Err(e) => eprintln!("[sync] {id}: could not prepare {rel} for another machine: {e:#}"),
                 }
             }
         }
@@ -421,7 +460,7 @@ fn apply_bundle_with(id: &str, bytes: &[u8], keep_local_session: bool) -> Result
         let Ok(f) = zip.by_index(i) else { continue };
         let name = f.name().replace('\\', "/");
         let Some(sub) = name.strip_prefix("user-data/") else { continue };
-        if let Some(root) = synced_paths().find(|r| sub == *r || sub.starts_with(&format!("{r}/"))) {
+        if let Some(root) = raw_paths().find(|r| sub == *r || sub.starts_with(&format!("{r}/"))) {
             roots.insert(root);
         }
     }
@@ -489,8 +528,19 @@ fn apply_bundle_with(id: &str, bytes: &[u8], keep_local_session: bool) -> Result
             }
             continue;
         }
+        if let Some((dest, _, kind)) = SEALED.iter().find(|(_, name, _)| *name == rel_str).map(|(d, n, k)| (*d, *n, *k)) {
+            // A login travelling as a portable copy: seal it with this machine's key, then put it in place.
+            if !keep_local_session {
+                if let Err(e) = install_portable(&udd, dest, &buf, kind) {
+                    eprintln!("[sync] {id}: could not restore {dest}: {e:#}");
+                }
+            }
+            continue;
+        }
         let Some(sub) = rel_str.strip_prefix("user-data/") else { continue };
-        if keep_local_session {
+        if keep_local_session || is_unportable(sub) {
+            // An older build sent its own sealed files raw; they cannot be opened here and
+            // would replace this machine's key and logins with the other machine's.
             continue;
         }
         let out = udd.join(sub);
@@ -524,6 +574,36 @@ fn apply_bundle_with(id: &str, bytes: &[u8], keep_local_session: bool) -> Result
         }
     }
     Ok(())
+}
+
+/// Seals a portable copy with this machine's key and puts it where the browser expects it.
+fn install_portable(udd: &Path, dest_rel: &str, bytes: &[u8], kind: cookies::Sealed) -> Result<()> {
+    // A cookie database lives at Network/Cookies on current engines. Follow wherever this
+    // profile already keeps one; on a machine that has never opened it, use the engine's own
+    // place — the old Default/Cookies would not be read, nor migrated.
+    let dest = if kind == cookies::Sealed::Cookies {
+        let existing = cookies::cookie_db(udd);
+        if existing.exists() { existing } else { udd.join("Default/Network/Cookies") }
+    } else {
+        udd.join(dest_rel)
+    };
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = dest.with_extension("hir-incoming");
+    fs::write(&tmp, bytes)?;
+    let done = cookies::localize_file(udd, &tmp, kind).and_then(|n| {
+        for suffix in ["-journal", "-wal", "-shm"] {
+            let mut o = dest.as_os_str().to_owned();
+            o.push(suffix);
+            let _ = fs::remove_file(std::path::PathBuf::from(o));
+        }
+        crate::winfs::rename_replace(&tmp, &dest).map(|_| n).map_err(Into::into)
+    });
+    if done.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    done.map(|_| ())
 }
 
 /// Puts the extensions that came in a bundle into this machine's extension
@@ -594,6 +674,7 @@ async fn relock(c: &reqwest::Client, base: &str, token: &str, id: &str, holder: 
         .post(format!("{base}/profiles/{id}/lock"))
         .bearer_auth(token)
         .json(&serde_json::json!({ "holder": holder }))
+        .timeout(Duration::from_secs(25))
         .send()
         .await
         .context("renew lock")?;
@@ -662,6 +743,7 @@ pub async fn checkout(profile_id: &str) -> Result<()> {
         .post(format!("{base}/profiles/{profile_id}/lock"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "holder": holder }))
+        .timeout(Duration::from_secs(25))
         .send()
         .await
         .context("contact sync server")?;
@@ -799,6 +881,7 @@ async fn unlock(base: &str, token: &str, profile_id: &str, holder: &str) -> Resu
         .post(format!("{base}/profiles/{profile_id}/unlock"))
         .bearer_auth(token)
         .json(&serde_json::json!({ "holder": holder }))
+        .timeout(Duration::from_secs(25))
         .send()
         .await
         .context("release lock")?;
@@ -923,6 +1006,7 @@ async fn report_deleted(id: String) {
         .post(format!("{base}/profiles/{id}/delete"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "holder": holder }))
+        .timeout(Duration::from_secs(25))
         .send()
         .await;
     match res {
@@ -1047,6 +1131,7 @@ async fn push_profile(base: &str, token: &str, holder: &str, id: &str) -> Result
         .post(format!("{base}/profiles/{id}/lock"))
         .bearer_auth(token)
         .json(&serde_json::json!({ "holder": holder }))
+        .timeout(Duration::from_secs(25))
         .send()
         .await
         .context("contact sync server")?;
@@ -1346,6 +1431,98 @@ pub(crate) static TEST_ROOT_LOCK: Mutex<()> = Mutex::new(());
 mod tests {
     use super::*;
 
+    /// A login sealed on one machine must open on the next. Cookies are sealed with a key
+    /// that belongs to the machine (a DPAPI key on Windows), so the raw database from the
+    /// first one is noise on the second — a profile arrived logged out, its saved passwords
+    /// gone, and `Local State` (the key itself) would have replaced the receiving machine's.
+    /// The bundle carries a portable copy instead; the receiver seals it again.
+    #[test]
+    fn logins_are_resealed_for_the_receiving_machine() {
+        let _g = TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let a = std::env::temp_dir().join(format!("hir-logina-{}", uuid::Uuid::new_v4()));
+        let b = std::env::temp_dir().join(format!("hir-loginb-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let id = "login-1";
+
+        // Machine A: a profile with a Facebook login cookie, sealed with A's key.
+        store::set_data_root(Some(a.clone()));
+        let mut stored = crate::profile::StoredProfile::default();
+        stored.meta.id = id.to_string();
+        stored.config.insert("name".into(), serde_json::json!("Login test"));
+        crate::profile::save_raw(&mut stored).unwrap();
+        let cookie: cookies::Cookie = serde_json::from_value(serde_json::json!({
+            "domain": ".facebook.com", "name": "c_user", "value": "100012345", "path": "/",
+            "expires": 1893456000.0, "secure": true, "httpOnly": false
+        })).unwrap();
+        cookies::import(id, &[cookie]).expect("seed a cookie");
+        let udd_a = store::user_data_root().unwrap().join(id);
+        let sealed_on_a = std::fs::read(cookies::cookie_db(&udd_a)).unwrap();
+        let bytes = build_bundle(id).unwrap();
+
+        let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes.clone())).unwrap();
+        let names: Vec<String> = (0..z.len()).map(|i| z.by_index(i).unwrap().name().to_string()).collect();
+        let has = |n: &str| names.iter().any(|x| x == n);
+        assert!(has("portable/Cookies"), "the login must travel as a portable copy: {names:?}");
+        assert!(!has("user-data/Default/Network/Cookies"), "the sealed database must not travel raw");
+        assert!(!has("user-data/Local State"), "Local State holds this machine's key and must not travel");
+        let mut portable = Vec::new();
+        z.by_name("portable/Cookies").unwrap().read_to_end(&mut portable).unwrap();
+        assert!(portable.windows(9).any(|w| w == b"100012345"), "the copy holds the plain value");
+        assert!(!sealed_on_a.windows(9).any(|w| w == b"100012345"), "while the original is sealed");
+
+        // Machine B: its own, empty data root (so its own key).
+        store::set_data_root(Some(b.clone()));
+        let mut stored_b = crate::profile::StoredProfile::default();
+        stored_b.meta.id = id.to_string();
+        crate::profile::save_raw(&mut stored_b).unwrap();
+        apply_bundle(id, &bytes).unwrap();
+        let got = cookies::export(id).expect("read the cookies back with B's own key");
+        let found = got.iter().find(|c| c.name == "c_user").map(|c| c.value.clone());
+
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+        assert_eq!(found.as_deref(), Some("100012345"), "the login must still be there on the second machine");
+    }
+
+    /// An older build sent `Local State` and the sealed databases raw. Taking them would put
+    /// the other machine's key over this one's, so a bundle's copies of them are ignored.
+    #[test]
+    fn an_older_bundles_raw_sealed_files_are_not_applied() {
+        let _g = TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let a = std::env::temp_dir().join(format!("hir-oldb-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&a).unwrap();
+        store::set_data_root(Some(a.clone()));
+        let id = "old-1";
+        let mut stored = crate::profile::StoredProfile::default();
+        stored.meta.id = id.to_string();
+        crate::profile::save_raw(&mut stored).unwrap();
+        let udd = store::user_data_root().unwrap().join(id);
+        std::fs::create_dir_all(udd.join("Default")).unwrap();
+        std::fs::write(udd.join("Local State"), "MY-OWN-KEY").unwrap();
+        std::fs::write(udd.join("Default/Bookmarks"), "old").unwrap();
+
+        let mut buf = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut buf);
+            let opts = zip::write::SimpleFileOptions::default();
+            zip.start_file("user-data/Local State", opts).unwrap();
+            zip.write_all(b"THEIR-KEY").unwrap();
+            zip.start_file("user-data/Default/Bookmarks", opts).unwrap();
+            zip.write_all(b"new").unwrap();
+            zip.finish().unwrap();
+        }
+        apply_bundle(id, &buf.into_inner()).unwrap();
+        let key = std::fs::read_to_string(udd.join("Local State")).unwrap();
+        let marks = std::fs::read_to_string(udd.join("Default/Bookmarks")).unwrap();
+
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&a);
+        assert_eq!(key, "MY-OWN-KEY", "this machine's key must survive a pull");
+        assert_eq!(marks, "new", "ordinary files still come across");
+    }
+
     /// Extensions ride inside the profile's own bundle: a machine that never had
     /// them installs them on pull, leaves identical ones alone, and replaces changed ones.
     #[test]
@@ -1573,7 +1750,10 @@ mod tests {
         stored.meta.id = "sess-1".into();
         stored.config.insert("name".into(), serde_json::json!("Session test"));
         crate::profile::save_raw(&mut stored).unwrap();
-        let cookies = store::user_data_root().unwrap().join("sess-1/Default/Cookies");
+        // Stand-in for "the login": a file that travels as it is. The real cookie and
+        // password databases are sealed per machine and travel as portable copies, which
+        // have their own tests (`logins_are_resealed_for_the_receiving_machine`).
+        let cookies = store::user_data_root().unwrap().join("sess-1/Default/Bookmarks");
         std::fs::create_dir_all(cookies.parent().unwrap()).unwrap();
         std::fs::write(&cookies, "logged-out").unwrap();
 
@@ -1589,7 +1769,7 @@ mod tests {
         let bytes = client().get(format!("{base}/profiles/sess-1/bundle")).bearer_auth(token)
             .send().await.unwrap().bytes().await.unwrap();
         let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).unwrap();
-        let mut f = z.by_name("user-data/Default/Cookies").unwrap();
+        let mut f = z.by_name("user-data/Default/Bookmarks").unwrap();
         let mut out = String::new();
         f.read_to_string(&mut out).unwrap();
         out

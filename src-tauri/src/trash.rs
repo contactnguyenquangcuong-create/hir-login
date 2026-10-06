@@ -16,6 +16,7 @@ const RETENTION_SECS: u64 = RETENTION_DAYS * 24 * 60 * 60;
 pub(crate) const KEEP: &[&str] = &[
     "Local State",
     "Default/Cookies",
+    "Default/Network/Cookies",
     "Default/Login Data",
     "Default/Login Data For Account",
     "Default/Web Data",
