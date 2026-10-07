@@ -44,11 +44,18 @@ fn tailscale_bin_uncached() -> Option<String> {
     if cmd("tailscale").arg("version").output().map(|o| o.status.success()).unwrap_or(false) {
         return Some("tailscale".into());
     }
-    for p in [
+    let home_app = dirs::home_dir().map(|h| h.join("Applications/Tailscale.app/Contents/MacOS/Tailscale").to_string_lossy().into_owned());
+    let candidates = [
         "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
         "/opt/homebrew/bin/tailscale",
         "/usr/local/bin/tailscale",
-    ] {
+        "C:\\Program Files\\Tailscale\\tailscale.exe",
+    ]
+    .map(String::from)
+    .into_iter()
+    .chain(home_app);
+    for p in candidates {
+        let p = p.as_str();
         if std::path::Path::new(p).exists() {
             // verify it actually runs
             if cmd(p).arg("version").output().map(|o| o.status.success()).unwrap_or(false) {
@@ -123,16 +130,76 @@ pub fn join_with_auth_key(auth_key: &str) -> anyhow::Result<()> {
         return Ok(());
     }
     let bin = tailscale_bin().ok_or_else(|| anyhow::anyhow!("chưa cài Tailscale — tải tại https://tailscale.com/download"))?;
-    let out = cmd(&bin)
-        .args(["up", "--authkey", auth_key.trim()])
-        .output()
-        .map_err(|e| anyhow::anyhow!("không chạy được tailscale: {e}"))?;
+    // `--reset`: a machine that was `up` before with other flags refuses a bare `up` ("requires
+    // mentioning all non-default flags"). `--timeout`: without it `up` waits forever when the
+    // Tailscale app is not running or wants an interactive sign-in, and the join hangs.
+    let out = run_with_timeout(
+        &bin,
+        &["up", "--authkey", auth_key.trim(), "--reset", "--timeout=30s"],
+        std::time::Duration::from_secs(45),
+    )
+    .map_err(|e| anyhow::anyhow!("không chạy được tailscale: {e}"))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         let out_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        anyhow::bail!("{}", if err.is_empty() { out_str } else { err });
+        anyhow::bail!("{}", explain_up_error(if err.is_empty() { &out_str } else { &err }));
     }
     Ok(())
+}
+
+/// `Command::output` with a ceiling: the child is killed when it outlives `limit`.
+fn run_with_timeout(program: &str, args: &[&str], limit: std::time::Duration) -> std::io::Result<std::process::Output> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = cmd(program).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    // Drained on their own threads so a chatty child cannot fill a pipe and stall.
+    let mut out_pipe = child.stdout.take();
+    let mut err_pipe = child.stderr.take();
+    let out_t = std::thread::spawn(move || { let mut b = Vec::new(); if let Some(p) = out_pipe.as_mut() { let _ = p.read_to_end(&mut b); } b });
+    let err_t = std::thread::spawn(move || { let mut b = Vec::new(); if let Some(p) = err_pipe.as_mut() { let _ = p.read_to_end(&mut b); } b });
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(s) = child.try_wait()? {
+            break s;
+        }
+        if started.elapsed() >= limit {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = out_t.join();
+            let _ = err_t.join();
+            return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, format!("tailscale không trả lời sau {} giây", limit.as_secs())));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    };
+    Ok(std::process::Output { status, stdout: out_t.join().unwrap_or_default(), stderr: err_t.join().unwrap_or_default() })
+}
+
+/// What `tailscale up` said, with a plain-language line in front when the cause is a
+/// known one. The raw text stays after it: it is what the person reads out when asking for help.
+fn explain_up_error(raw: &str) -> String {
+    let low = raw.to_lowercase();
+    let hint = if low.contains("failed to load preferences")
+        || low.contains("failed to connect to local")
+        || low.contains("doesn't appear to be running")
+        || low.contains("is stopped")
+        || low.contains("not running")
+        || low.contains("tailscaled")
+    {
+        Some("Ứng dụng Tailscale trên máy chưa chạy hoặc chưa bật — mở Tailscale (biểu tượng trên thanh menu / khay hệ thống), bật nó lên rồi thử lại")
+    } else if low.contains("requires mentioning all non-default flags") {
+        Some("Tailscale đang giữ cấu hình cũ — mở Tailscale và Log out, rồi thử lại")
+    } else if low.contains("timed out") || low.contains("timeout") || low.contains("context deadline") {
+        Some("Tailscale không vào được mạng của team (hết thời gian chờ) — kiểm tra Internet, hoặc mã mời đã hết hạn thì xin mã mới")
+    } else if low.contains("invalid key") || low.contains("key not valid") || low.contains("expired") {
+        Some("Mã mời (auth key) không hợp lệ hoặc đã hết hạn — xin quản trị viên tạo mã mời mới")
+    } else {
+        None
+    };
+    match hint {
+        Some(h) if !raw.is_empty() => format!("{h}. ({raw})"),
+        Some(h) => h.to_string(),
+        None => raw.to_string(),
+    }
 }
 
 // ---- OAuth client: mint a fresh reusable auth key on demand ----
@@ -451,5 +518,15 @@ mod oauth_tests {
         assert_eq!(norm("hirlogin"), "tag:hirlogin");
         assert_eq!(norm(""), "tag:hirlogin");
         assert_eq!(norm("  server  "), "tag:server");
+    }
+
+    #[test]
+    fn a_stopped_app_and_a_timeout_get_a_plain_line_in_front_of_the_raw_text() {
+        let stopped = explain_up_error("Error: The Tailscale CLI failed to start: Failed to load preferences.");
+        assert!(stopped.starts_with("Ứng dụng Tailscale trên máy chưa chạy"), "{stopped}");
+        assert!(stopped.contains("Failed to load preferences"), "the raw text stays: {stopped}");
+        assert!(explain_up_error("context deadline exceeded").contains("hết thời gian chờ"));
+        assert_eq!(explain_up_error("something unheard of"), "something unheard of");
+        assert_eq!(explain_up_error(""), "");
     }
 }

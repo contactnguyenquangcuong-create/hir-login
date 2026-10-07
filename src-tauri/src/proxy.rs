@@ -597,15 +597,27 @@ pub async fn geo_check(entry: &ProxyEntry, provider_override: Option<String>) ->
 /// profile on UTC. (The Test button could not tell either: it sends plain CONNECT
 /// for both kinds and said OK.) So an `Https` proxy that answers plain HTTP is used
 /// as `Http`; one that does not (a real TLS proxy, or unreachable) is left as it is.
+///
+/// The same goes for `Socks5`, the kind a pasted `host:port:user:pass` list gets when it
+/// says nothing: lists from HTTP-only providers land here, and the SOCKS handshake to
+/// such a port is never answered — the test timed out and the browser got no network
+/// although the proxy was live. A SOCKS5-labelled proxy that does not greet back like
+/// SOCKS5 but does answer plain HTTP is used as `Http`; a real SOCKS5 proxy answers
+/// its greeting at once and is left alone.
 pub async fn effective(entry: &ProxyEntry) -> ProxyEntry {
-    if !matches!(entry.kind, ProxyKind::Https) {
+    if matches!(entry.kind, ProxyKind::Http) {
         return entry.clone();
     }
     static PLAIN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
     let seen = PLAIN.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
     let key = format!("{}:{}", entry.host, entry.port);
     let known = seen.lock().map(|s| s.contains(&key)).unwrap_or(false);
-    if known || answers_plain_http(entry).await {
+    let plain = known
+        || match entry.kind {
+            ProxyKind::Socks5 => is_plain_http_not_socks(entry).await,
+            _ => answers_plain_http(entry).await,
+        };
+    if plain {
         if !known {
             if let Ok(mut s) = seen.lock() {
                 s.insert(key);
@@ -613,10 +625,38 @@ pub async fn effective(entry: &ProxyEntry) -> ProxyEntry {
         }
         let mut e = entry.clone();
         e.kind = ProxyKind::Http;
-        eprintln!("[proxy] {}:{} is labelled HTTPS but answers plain HTTP — using it as an HTTP proxy", entry.host, entry.port);
+        eprintln!("[proxy] {}:{} is labelled {} but answers plain HTTP — using it as an HTTP proxy", entry.host, entry.port, entry.kind.as_str());
         return e;
     }
     entry.clone()
+}
+
+/// True for a port that does not speak SOCKS5 but does speak plain HTTP proxying.
+/// Sends the SOCKS5 greeting first: a SOCKS5 server answers `05 xx` straight away, an
+/// HTTP proxy either says `HTTP/…` (a 400) or keeps waiting for a request line. Only
+/// the waiting / hanging-up cases are followed by a real CONNECT on a fresh connection.
+/// An unreachable port settles nothing, so it stays as labelled and costs one connect.
+async fn is_plain_http_not_socks(entry: &ProxyEntry) -> bool {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::time::{timeout, Duration};
+    let Ok(Ok(mut s)) = timeout(Duration::from_secs(6), tokio::net::TcpStream::connect((entry.host.as_str(), entry.port))).await else {
+        return false;
+    };
+    // Version 5, two methods offered: none (00) and username/password (02).
+    if s.write_all(&[0x05, 0x02, 0x00, 0x02]).await.is_err() {
+        return answers_plain_http(entry).await;
+    }
+    let mut first = [0u8; 1];
+    match timeout(Duration::from_secs(4), s.read(&mut first)).await {
+        Ok(Ok(1)) if first[0] == 0x05 => false,
+        Ok(Ok(1)) if first[0] == b'H' => true,
+        Ok(Ok(1)) => false,
+        // Silence or a closed connection: the other protocol may still answer.
+        _ => {
+            drop(s);
+            answers_plain_http(entry).await
+        }
+    }
 }
 
 /// Sends a CONNECT in the clear and sees whether an HTTP reply comes back. A TLS
@@ -1144,6 +1184,8 @@ mod effective_kind_tests {
                     match what {
                         "http" => { let _ = c.write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n").await; }
                         "tls" => { let _ = c.write_all(&[0x15, 0x03, 0x03, 0x00, 0x02, 0x02, 0x0a]).await; }
+                        // A SOCKS5 server picking "username/password" for the greeting.
+                        "socks" => { let _ = c.write_all(&[0x05, 0x02]).await; }
                         _ => {}
                     }
                 });
@@ -1163,7 +1205,62 @@ mod effective_kind_tests {
         let dead = { let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap(); l.local_addr().unwrap().port() };
         assert_eq!(effective(&entry(ProxyKind::Https, dead)).await.kind, ProxyKind::Https, "unreachable: nothing to conclude");
         assert_eq!(effective(&entry(ProxyKind::Http, plain)).await.kind, ProxyKind::Http);
-        assert_eq!(effective(&entry(ProxyKind::Socks5, plain)).await.kind, ProxyKind::Socks5);
+    }
+
+    /// A pasted `host:port:user:pass` list is read as SOCKS5, so an HTTP-only provider's
+    /// proxies arrive labelled SOCKS5 and never answer the SOCKS handshake. They are used
+    /// as HTTP; a real SOCKS5 server, a silent one and a dead one are left as labelled.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_socks5_label_on_a_plain_http_proxy_is_used_as_http() {
+        // Answers the greeting with an HTTP error line.
+        assert_eq!(effective(&entry(ProxyKind::Socks5, fake("http").await)).await.kind, ProxyKind::Http);
+        // Says nothing to the greeting, answers a CONNECT: the tunproxy shape.
+        assert_eq!(effective(&entry(ProxyKind::Socks5, fake_waiting().await)).await.kind, ProxyKind::Http);
+        // A real SOCKS5 server stays SOCKS5, and so do a silent and an unreachable port.
+        assert_eq!(effective(&entry(ProxyKind::Socks5, fake("socks").await)).await.kind, ProxyKind::Socks5);
+        assert_eq!(effective(&entry(ProxyKind::Socks5, fake("silent").await)).await.kind, ProxyKind::Socks5);
+        let dead = { let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap(); l.local_addr().unwrap().port() };
+        assert_eq!(effective(&entry(ProxyKind::Socks5, dead)).await.kind, ProxyKind::Socks5);
+    }
+
+    /// Not run by default: `HIR_PROXY_LIST` holds `host:port:user:pass` lines read as SOCKS5, as a
+    /// pasted list is, and each one must pass the Test button's probe once `effective` has had its say.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[ignore]
+    async fn live_list_from_the_environment_passes_the_probe() {
+        let list = std::env::var("HIR_PROXY_LIST").expect("set HIR_PROXY_LIST");
+        let mut bad = Vec::new();
+        for e in parse_bulk(&list, ProxyKind::Socks5) {
+            let used = effective(&e).await;
+            match probe(&used).await {
+                Ok(ms) => eprintln!("{}:{} labelled {} used as {} -> OK {ms} ms", e.host, e.port, e.kind.as_str(), used.kind.as_str()),
+                Err(err) => { eprintln!("{}:{} -> FAIL {err}", e.host, e.port); bad.push(e.host.clone()); }
+            }
+        }
+        assert!(bad.is_empty(), "failed: {bad:?}");
+    }
+
+    /// Reads the SOCKS greeting without a word, then answers an HTTP CONNECT on the next
+    /// connection — what an HTTP proxy does with bytes it cannot parse.
+    async fn fake_waiting() -> u16 {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut c, _)) = l.accept().await else { break };
+                tokio::spawn(async move {
+                    let mut b = [0u8; 256];
+                    let n = c.read(&mut b).await.unwrap_or(0);
+                    if b[..n].starts_with(b"CONNECT") {
+                        let _ = c.write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n").await;
+                    } else {
+                        // Hold the connection open, like a proxy waiting for a request line.
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    }
+                });
+            }
+        });
+        port
     }
 }
 

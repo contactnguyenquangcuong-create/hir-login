@@ -2509,6 +2509,8 @@ fn proxy_delete(id: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn proxy_check(entry: proxy::ProxyEntry) -> Result<u128, String> {
+    // Tested the way it will be used: an HTTP proxy pasted as SOCKS5 passes as HTTP.
+    let entry = proxy::effective(&entry).await;
     proxy::probe(&entry).await.map_err(|e| e.to_string())
 }
 
@@ -3275,12 +3277,29 @@ async fn team_invite_join(code: String) -> Result<Value, String> {
     // /health probe will give a clearer "không kết nối được" if the tailnet
     // is really unreachable, so the join is best-effort.
     let mut join_err: Option<String> = None;
-    if let Some(ak) = auth_key.as_deref().filter(|s| !s.is_empty()) {
+    let health_url = format!("{}/health", url.trim_end_matches('/'));
+    let probe = |secs: u64| {
+        let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(secs)).build();
+        let (u, t) = (health_url.clone(), token.clone());
+        async move {
+            match client {
+                Ok(c) => c.get(u).bearer_auth(t).send().await.map(|r| r.status().is_success()).unwrap_or(false),
+                Err(_) => false,
+            }
+        }
+    };
+    // Already reachable (right tailnet, LAN, public address): leave Tailscale alone. A machine
+    // that is signed in to the team's tailnet must not be asked to "up" again.
+    let reachable = probe(4).await;
+    // Signed in to *some* tailnet — if the team's server is still unreachable it is another one.
+    let mut other_tailnet = false;
+    if let Some(ak) = auth_key.as_deref().filter(|s| !s.is_empty()).filter(|_| !reachable) {
         // `tailscale up` blocks on a network round-trip to the coordination server
         // (can be several seconds); run it off the async runtime so a slow join
         // never stalls other commands or the background sync loop.
         let installed = tokio::task::spawn_blocking(tailscale::is_installed).await.unwrap_or(false);
         let connected = tokio::task::spawn_blocking(tailscale::is_connected).await.unwrap_or(false);
+        other_tailnet = connected;
         if !connected {
             if installed {
                 let ak_owned = ak.to_string();
@@ -3300,24 +3319,33 @@ async fn team_invite_join(code: String) -> Result<Value, String> {
             }
         }
     }
-    // Verify connectivity before saving
+    // Verify connectivity before saving. Right after a join the route to the server takes a few
+    // seconds to appear (on a Mac most of all), so a first miss is not yet an answer.
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|e| e.to_string())?;
-    let resp = match client
-        .get(format!("{}/health", url.trim_end_matches('/')))
-        .bearer_auth(&token)
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            if let Some(je) = join_err {
-                return Err(format!("không kết nối được tới máy chủ: {e} (Tailscale: {je})"));
-            }
-            return Err(format!("không kết nối được tới máy chủ: {e}"));
+    let mut resp = None;
+    let mut last_err = String::new();
+    for attempt in 0..4 {
+        match client.get(&health_url).bearer_auth(&token).send().await {
+            Ok(r) => { resp = Some(r); break; }
+            Err(e) => last_err = e.to_string(),
         }
+        if attempt < 3 && !reachable && join_err.is_none() {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        } else {
+            break;
+        }
+    }
+    let Some(resp) = resp else {
+        let mut why = format!("không kết nối được tới máy chủ: {last_err}");
+        if let Some(je) = join_err {
+            why.push_str(&format!(" (Tailscale: {je})"));
+        } else if other_tailnet {
+            why.push_str(" (Tailscale: máy này đang nối một mạng Tailscale khác, chưa vào mạng của team — mở Tailscale, đăng xuất hoặc chuyển sang tài khoản của team rồi tham gia lại)");
+        }
+        return Err(why);
     };
     if !resp.status().is_success() {
         return Err(format!("máy chủ trả về lỗi: {}", resp.status()));
