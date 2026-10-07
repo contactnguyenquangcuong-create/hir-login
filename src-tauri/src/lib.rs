@@ -3333,7 +3333,8 @@ async fn team_invite_join(code: String) -> Result<Value, String> {
                             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                         }
                         if !has_ip {
-                            join_err = Some("Tailscale đã nhận khóa nhưng sau 20 giây vẫn chưa có địa chỉ mạng — mở app Tailscale, bật công tắc ở thanh menu (nếu đỏ: System Settings → Privacy & Security → Allow) rồi tham gia lại".into());
+                            let why = tokio::task::spawn_blocking(tailscale::diagnose).await.unwrap_or_default();
+                            join_err = Some(format!("Tailscale đã nhận khóa nhưng sau 20 giây vẫn chưa có địa chỉ mạng — mở app Tailscale và bật nó lên (macOS: Cài đặt Hệ thống → Quyền riêng tư & Bảo mật → Cho phép) rồi tham gia lại [{why}]"));
                         } else {
                             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         }

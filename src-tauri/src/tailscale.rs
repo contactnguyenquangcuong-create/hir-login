@@ -40,6 +40,15 @@ fn tailscale_bin() -> Option<String> {
 }
 
 fn tailscale_bin_uncached() -> Option<String> {
+    // On a Mac the app's own binary comes before whatever `tailscale` is on PATH: a lone CLI
+    // from Homebrew has no daemon behind it, so `up` through it never starts the app's tunnel.
+    #[cfg(target_os = "macos")]
+    {
+        let app = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
+        if std::path::Path::new(app).exists() {
+            return Some(app.into());
+        }
+    }
     // Try PATH first
     if cmd("tailscale").arg("version").output().map(|o| o.status.success()).unwrap_or(false) {
         return Some("tailscale".into());
@@ -150,12 +159,46 @@ fn up_with_auth_key(auth_key: &str, force_reauth: bool) -> anyhow::Result<()> {
     }
     let out = run_with_timeout(&bin, &args, std::time::Duration::from_secs(45))
         .map_err(|e| anyhow::anyhow!("không chạy được tailscale: {e}"))?;
+    // Kept even when `up` says it succeeded: "succeeded" with no address afterwards is the case
+    // that needs the raw words to be understood. The key itself is never part of it.
+    remember_up(&out);
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         let out_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
         anyhow::bail!("{}", explain_up_error(if err.is_empty() { &out_str } else { &err }));
     }
     Ok(())
+}
+
+fn last_up() -> &'static Mutex<String> {
+    static CELL: OnceLock<Mutex<String>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(String::new()))
+}
+
+fn remember_up(out: &std::process::Output) {
+    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let one_line: String = said.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(240).collect();
+    let code = out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into());
+    *last_up().lock().unwrap_or_else(|e| e.into_inner()) = format!("up thoát mã {code}: {}", if one_line.is_empty() { "(không in gì)" } else { &one_line });
+}
+
+/// What a failed join leaves to go on: which binary was used and what it says right now. Short
+/// enough to sit in a toast and be read out; it is what turns "nothing happened" into a cause.
+pub fn diagnose() -> String {
+    let Some(bin) = tailscale_bin() else {
+        return "không tìm thấy chương trình tailscale".into();
+    };
+    let said = run_with_timeout(&bin, &["status"], std::time::Duration::from_secs(8))
+        .map(|o| {
+            let out = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            if out.is_empty() { err } else { out }
+        })
+        .unwrap_or_else(|e| e.to_string());
+    let said: String = said.lines().take(3).collect::<Vec<_>>().join(" | ");
+    let said: String = said.chars().take(220).collect();
+    let up = last_up().lock().unwrap_or_else(|e| e.into_inner()).clone();
+    format!("dùng {bin}; {up}; trạng thái: {}", if said.is_empty() { "(trống)" } else { &said })
 }
 
 /// Whether `ip` is this machine or one of its peers in the tailnet it is signed in to — `None`
