@@ -123,28 +123,65 @@ pub fn status() -> (bool, bool, Option<String>) {
 
 /// Try to join tailnet using a reusable auth key. Returns Ok(()) on success or already connected.
 pub fn join_with_auth_key(auth_key: &str) -> anyhow::Result<()> {
-    if auth_key.trim().is_empty() {
-        anyhow::bail!("auth key trống");
-    }
     if is_connected() {
         return Ok(());
+    }
+    up_with_auth_key(auth_key, false)
+}
+
+/// Moves this machine onto the tailnet the key belongs to, even when it is signed in to another
+/// one. A machine is in one tailnet at a time, so a Mac that already has its owner's Tailscale
+/// account never reaches a team server in a different tailnet until it is re-authenticated.
+pub fn switch_with_auth_key(auth_key: &str) -> anyhow::Result<()> {
+    up_with_auth_key(auth_key, true)
+}
+
+fn up_with_auth_key(auth_key: &str, force_reauth: bool) -> anyhow::Result<()> {
+    if auth_key.trim().is_empty() {
+        anyhow::bail!("auth key trống");
     }
     let bin = tailscale_bin().ok_or_else(|| anyhow::anyhow!("chưa cài Tailscale — tải tại https://tailscale.com/download"))?;
     // `--reset`: a machine that was `up` before with other flags refuses a bare `up` ("requires
     // mentioning all non-default flags"). `--timeout`: without it `up` waits forever when the
     // Tailscale app is not running or wants an interactive sign-in, and the join hangs.
-    let out = run_with_timeout(
-        &bin,
-        &["up", "--authkey", auth_key.trim(), "--reset", "--timeout=30s"],
-        std::time::Duration::from_secs(45),
-    )
-    .map_err(|e| anyhow::anyhow!("không chạy được tailscale: {e}"))?;
+    let mut args = vec!["up", "--authkey", auth_key.trim(), "--reset", "--timeout=30s"];
+    if force_reauth {
+        args.push("--force-reauth");
+    }
+    let out = run_with_timeout(&bin, &args, std::time::Duration::from_secs(45))
+        .map_err(|e| anyhow::anyhow!("không chạy được tailscale: {e}"))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         let out_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
         anyhow::bail!("{}", explain_up_error(if err.is_empty() { &out_str } else { &err }));
     }
     Ok(())
+}
+
+/// Whether `ip` is this machine or one of its peers in the tailnet it is signed in to — `None`
+/// when that cannot be read. Offline peers still count: they are known, just switched off. An
+/// address nobody here owns belongs to a different tailnet (or to no one).
+pub fn knows_address(ip: &str) -> Option<bool> {
+    let bin = tailscale_bin()?;
+    let out = run_with_timeout(&bin, &["status", "--json"], std::time::Duration::from_secs(10)).ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+    Some(addresses_in_status(&v).iter().any(|a| a == ip))
+}
+
+fn addresses_in_status(v: &serde_json::Value) -> Vec<String> {
+    let ips = |n: &serde_json::Value| -> Vec<String> {
+        n.get("TailscaleIPs").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect()).unwrap_or_default()
+    };
+    let mut all = v.get("Self").map(ips).unwrap_or_default();
+    if let Some(peers) = v.get("Peer").and_then(|p| p.as_object()) {
+        for p in peers.values() {
+            all.extend(ips(p));
+        }
+    }
+    all
 }
 
 /// `Command::output` with a ceiling: the child is killed when it outlives `limit`.
@@ -528,5 +565,20 @@ mod oauth_tests {
         assert!(explain_up_error("context deadline exceeded").contains("hết thời gian chờ"));
         assert_eq!(explain_up_error("something unheard of"), "something unheard of");
         assert_eq!(explain_up_error(""), "");
+    }
+
+    #[test]
+    fn status_addresses_cover_this_machine_and_offline_peers_only() {
+        let v: serde_json::Value = serde_json::from_str(r#"{
+            "Self": {"TailscaleIPs": ["100.121.218.2", "fd7a:115c:a1e0::1"]},
+            "Peer": {
+                "nodekey:a": {"TailscaleIPs": ["100.83.136.52"], "Online": false},
+                "nodekey:b": {"TailscaleIPs": ["100.126.170.5"], "Online": false}
+            }}"#).unwrap();
+        let all = addresses_in_status(&v);
+        assert!(all.iter().any(|a| a == "100.121.218.2"), "this machine");
+        assert!(all.iter().any(|a| a == "100.83.136.52"), "an offline peer is still known");
+        assert!(!all.iter().any(|a| a == "100.93.82.19"), "an address of another tailnet is not");
+        assert!(addresses_in_status(&serde_json::json!({})).is_empty(), "no Self, no Peer: nothing known");
     }
 }

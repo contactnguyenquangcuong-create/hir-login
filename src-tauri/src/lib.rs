@@ -3300,12 +3300,44 @@ async fn team_invite_join(code: String) -> Result<Value, String> {
         let installed = tokio::task::spawn_blocking(tailscale::is_installed).await.unwrap_or(false);
         let connected = tokio::task::spawn_blocking(tailscale::is_connected).await.unwrap_or(false);
         other_tailnet = connected;
-        if !connected {
+        // Signed in, yet the server's address is not this machine or any peer of it: the server
+        // is in a different tailnet (a Mac already logged in with its owner's own Tailscale
+        // account, say). The invite carries the team's key, so move this machine onto the team's
+        // tailnet. A server that is merely switched off is a known peer and is left alone.
+        let wrong_tailnet = connected
+            && installed
+            && match url::Url::parse(&url).ok().and_then(|u| u.host_str().map(String::from)) {
+                Some(host) if host.starts_with("100.") => {
+                    tokio::task::spawn_blocking(move || tailscale::knows_address(&host)).await.ok().flatten() == Some(false)
+                }
+                _ => false,
+            };
+        if !connected || wrong_tailnet {
             if installed {
                 let ak_owned = ak.to_string();
-                let joined = tokio::task::spawn_blocking(move || tailscale::join_with_auth_key(&ak_owned)).await;
+                let joined = tokio::task::spawn_blocking(move || {
+                    if wrong_tailnet { tailscale::switch_with_auth_key(&ak_owned) } else { tailscale::join_with_auth_key(&ak_owned) }
+                })
+                .await;
                 match joined {
-                    Ok(Ok(())) => { tokio::time::sleep(std::time::Duration::from_secs(2)).await; }
+                    Ok(Ok(())) => {
+                        // `up` can return before the tunnel exists — a Mac whose Tailscale was
+                        // signed out takes several seconds to start the network extension. Wait
+                        // for a real tailnet address instead of a fixed two seconds.
+                        let mut has_ip = false;
+                        for _ in 0..20 {
+                            if tokio::task::spawn_blocking(tailscale::tailscale_ip).await.ok().flatten().is_some() {
+                                has_ip = true;
+                                break;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        }
+                        if !has_ip {
+                            join_err = Some("Tailscale đã nhận khóa nhưng sau 20 giây vẫn chưa có địa chỉ mạng — mở app Tailscale, bật công tắc ở thanh menu (nếu đỏ: System Settings → Privacy & Security → Allow) rồi tham gia lại".into());
+                        } else {
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        }
+                    }
                     Ok(Err(e)) => {
                         join_err = Some(e.to_string());
                         eprintln!("[launcher] tailscale join failed (will still try /health): {join_err:?}");
@@ -3343,7 +3375,7 @@ async fn team_invite_join(code: String) -> Result<Value, String> {
         if let Some(je) = join_err {
             why.push_str(&format!(" (Tailscale: {je})"));
         } else if other_tailnet {
-            why.push_str(" (Tailscale: máy này đang nối một mạng Tailscale khác, chưa vào mạng của team — mở Tailscale, đăng xuất hoặc chuyển sang tài khoản của team rồi tham gia lại)");
+            why.push_str(" (Tailscale: máy này đã vào mạng của team nhưng máy chủ không trả lời — kiểm tra máy chủ có đang bật app Hir-Login và mục Làm máy chủ không)");
         }
         return Err(why);
     };
