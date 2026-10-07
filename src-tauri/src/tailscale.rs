@@ -80,7 +80,8 @@ fn tailscale_bin_uncached() -> Option<String> {
 fn has_100_ip() -> bool {
     #[cfg(unix)]
     {
-        if let Ok(out) = Command::new("sh").arg("-c").arg("ifconfig 2>/dev/null | grep -o '100\\.[0-9]*\\.[0-9]*\\.[0-9]*' | head -1").output() {
+        // Only Tailscale's own range (100.64.0.0/10): a bare "100." also matches other networks.
+        if let Ok(out) = Command::new("sh").arg("-c").arg("ifconfig 2>/dev/null | grep -Eo '100\\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\\.[0-9]+\\.[0-9]+' | head -1").output() {
             let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if s.starts_with("100.") && !s.is_empty() { return true; }
         }
@@ -111,7 +112,7 @@ pub fn tailscale_ip() -> Option<String> {
     probe_ip().or_else(|| {
         #[cfg(unix)]
         {
-            if let Ok(out) = Command::new("sh").arg("-c").arg("ifconfig 2>/dev/null | grep -o '100\\.[0-9]*\\.[0-9]*\\.[0-9]*' | head -1").output() {
+            if let Ok(out) = Command::new("sh").arg("-c").arg("ifconfig 2>/dev/null | grep -Eo '100\\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\\.[0-9]+\\.[0-9]+' | head -1").output() {
                 let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
                 if !s.is_empty() { return Some(s); }
             }
@@ -157,6 +158,15 @@ fn up_with_auth_key(auth_key: &str, force_reauth: bool) -> anyhow::Result<()> {
     if force_reauth {
         args.push("--force-reauth");
     }
+    // The Mac app's own binary refuses to act as a command-line tool when another program starts
+    // it ("The Tailscale GUI failed to start", yet exit code 0) — it only does so inside a real
+    // terminal. So there it is run in one: a Terminal window opened for the purpose.
+    #[cfg(target_os = "macos")]
+    {
+        if is_app_bundle(&bin) {
+            return up_in_terminal(&bin, auth_key.trim(), force_reauth);
+        }
+    }
     let out = run_with_timeout(&bin, &args, std::time::Duration::from_secs(45))
         .map_err(|e| anyhow::anyhow!("không chạy được tailscale: {e}"))?;
     // Kept even when `up` says it succeeded: "succeeded" with no address afterwards is the case
@@ -166,6 +176,85 @@ fn up_with_auth_key(auth_key: &str, force_reauth: bool) -> anyhow::Result<()> {
         let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         let out_str = String::from_utf8_lossy(&out.stdout).trim().to_string();
         anyhow::bail!("{}", explain_up_error(if err.is_empty() { &out_str } else { &err }));
+    }
+    Ok(())
+}
+
+/// The binary inside Tailscale.app, as opposed to a stand-alone command-line build.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn is_app_bundle(bin: &str) -> bool {
+    bin.contains(".app/Contents/MacOS/")
+}
+
+/// `'…'` for a POSIX shell, with any quote inside it closed and escaped.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// The `.command` file a Terminal window runs for the join. The result goes to `log` — the
+/// words `tailscale up` printed, then `exit=<code>` as the last line, which is how the app knows
+/// it is over. The file removes itself when done. `None` for a key that is not a plain
+/// token: it is written into a script, so nothing a shell would read as syntax gets through.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn terminal_script(bin: &str, key: &str, force_reauth: bool, log: &str) -> Option<String> {
+    if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return None;
+    }
+    let force = if force_reauth { " --force-reauth" } else { "" };
+    Some(format!(
+        "#!/bin/bash\n\
+         echo 'Hir-Login đang đưa máy này vào mạng của team — cửa sổ này tự xong, bạn có thể đóng nó.'\n\
+         {{ {bin} up --authkey {key} --reset --timeout=30s{force} 2>&1; echo \"exit=$?\"; }} > {log}\n\
+         echo 'Xong.'\n\
+         rm -f \"$0\"\n",
+        bin = shell_quote(bin),
+        key = shell_quote(key),
+        log = shell_quote(log),
+    ))
+}
+
+/// Runs the join in a Terminal window and waits for its result (up to a minute).
+#[cfg(target_os = "macos")]
+fn up_in_terminal(bin: &str, key: &str, force_reauth: bool) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = std::env::temp_dir().join(format!("hir-ts-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+    let script = dir.join("join.command");
+    let log = dir.join("join.log");
+    let _ = std::fs::remove_file(&log);
+    let body = terminal_script(bin, key, force_reauth, &log.to_string_lossy())
+        .ok_or_else(|| anyhow::anyhow!("auth key có ký tự lạ — xin quản trị viên tạo mã mời mới"))?;
+    std::fs::write(&script, body)?;
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700))?;
+    let opened = cmd("open").args(["-a", "Terminal"]).arg(&script).status();
+    if !matches!(opened, Ok(s) if s.success()) {
+        let _ = std::fs::remove_dir_all(&dir);
+        anyhow::bail!("không mở được cửa sổ Terminal để chạy Tailscale");
+    }
+    let started = std::time::Instant::now();
+    let said = loop {
+        if let Ok(t) = std::fs::read_to_string(&log) {
+            if t.contains("exit=") {
+                break t;
+            }
+        }
+        if started.elapsed() > std::time::Duration::from_secs(60) {
+            let _ = std::fs::remove_dir_all(&dir);
+            *last_up().lock().unwrap_or_else(|e| e.into_inner()) = "Terminal không trả kết quả sau 60 giây".into();
+            anyhow::bail!("cửa sổ Terminal không trả kết quả sau 60 giây — nếu nó đang hỏi gì đó thì trả lời rồi tham gia lại");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(400));
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    let code = said.rsplit("exit=").next().map(|c| c.trim().to_string()).unwrap_or_default();
+    let words = said.rsplit_once("exit=").map(|(w, _)| w.trim().to_string()).unwrap_or_default();
+    let one_line: String = words.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(240).collect();
+    *last_up().lock().unwrap_or_else(|e| e.into_inner()) =
+        format!("up (Terminal) thoát mã {code}: {}", if one_line.is_empty() { "(không in gì)" } else { &one_line });
+    if code != "0" {
+        anyhow::bail!("{}", explain_up_error(&words));
     }
     Ok(())
 }
@@ -258,7 +347,9 @@ fn run_with_timeout(program: &str, args: &[&str], limit: std::time::Duration) ->
 /// known one. The raw text stays after it: it is what the person reads out when asking for help.
 fn explain_up_error(raw: &str) -> String {
     let low = raw.to_lowercase();
-    let hint = if low.contains("failed to load preferences")
+    let hint = if low.contains("gui failed to start") {
+        Some("Tailscale trên Mac không chạy lệnh được khi bị app khác gọi — thử lại, cửa sổ Terminal sẽ tự mở")
+    } else if low.contains("failed to load preferences")
         || low.contains("failed to connect to local")
         || low.contains("doesn't appear to be running")
         || low.contains("is stopped")
@@ -623,5 +714,26 @@ mod oauth_tests {
         assert!(all.iter().any(|a| a == "100.83.136.52"), "an offline peer is still known");
         assert!(!all.iter().any(|a| a == "100.93.82.19"), "an address of another tailnet is not");
         assert!(addresses_in_status(&serde_json::json!({})).is_empty(), "no Self, no Peer: nothing known");
+    }
+
+    #[test]
+    fn the_terminal_script_quotes_everything_and_refuses_odd_keys() {
+        let sh = terminal_script("/Applications/Tailscale.app/Contents/MacOS/Tailscale", "tskey-auth-abc_123", true, "/tmp/hir ts/join.log").unwrap();
+        assert!(sh.starts_with("#!/bin/bash\n"));
+        assert!(sh.contains("'/Applications/Tailscale.app/Contents/MacOS/Tailscale' up --authkey 'tskey-auth-abc_123' --reset --timeout=30s --force-reauth"), "{sh}");
+        assert!(sh.contains("> '/tmp/hir ts/join.log'"), "a path with a space stays one word: {sh}");
+        assert!(sh.contains("echo \"exit=$?\"") && sh.contains("rm -f \"$0\""));
+        assert!(terminal_script("b", "tskey; rm -rf ~", false, "l").is_none(), "shell syntax in a key");
+        assert!(terminal_script("b", "", false, "l").is_none());
+        assert!(!terminal_script("b", "k", false, "l").unwrap().contains("--force-reauth"));
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn only_the_apps_own_binary_needs_a_terminal() {
+        assert!(is_app_bundle("/Applications/Tailscale.app/Contents/MacOS/Tailscale"));
+        assert!(!is_app_bundle("/opt/homebrew/bin/tailscale"));
+        assert!(!is_app_bundle("tailscale"));
+        assert!(explain_up_error("The Tailscale GUI failed to start: x").contains("Terminal sẽ tự mở"));
     }
 }
