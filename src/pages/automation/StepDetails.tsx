@@ -14,6 +14,7 @@ import { profileList } from "../../entities/profile/model/api";
 import type { ProfileMeta } from "../../entities/profile/model/types";
 import { MultiSelect, type MSOption } from "../../shared/ui/MultiSelect";
 import { useT } from "../../shared/i18n";
+import { SheetNextInfo } from "./SheetNextInfo";
 import {
   psCountries,
   psRegions,
@@ -830,6 +831,8 @@ export function StepDetails({ block, steps, multiCount = 0, onParam, onSecret, o
           </div>
         </label>
       ))}
+
+      {block.kind === "sheet.next" && <SheetNextInfo block={block} steps={steps} />}
 
       <div className="mt-1 flex flex-col gap-2 border-t border-stroke-soft-200 pt-2">
         <BranchField

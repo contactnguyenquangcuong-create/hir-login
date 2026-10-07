@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { openPath } from "@tauri-apps/plugin-opener";
 import { Button } from "@proxyshard/shardx-ui-kit";
 import { Topbar } from "../../shared/ui/Topbar";
 import { AddIcon, CloseIcon, DownloadIcon, PlayIcon, StopIcon } from "../../shared/icons";
@@ -554,7 +555,9 @@ export function ProjectEditor() {
               live={!!target}
             />
           </div>
-          <div hidden={rightTab !== "step"} className="flex min-h-0 flex-col gap-2">
+          {/* shrink-0: when the step's settings run long (the Excel step explains itself) the
+              column scrolls; letting this block shrink made them spill over the run log below. */}
+          <div hidden={rightTab !== "step"} className="flex shrink-0 flex-col gap-2">
             <StepDetails
               multiCount={project.run.targets?.length ?? 0}
               block={project.blocks.find((b) => b.id === openStep) ?? null}
@@ -566,7 +569,7 @@ export function ProjectEditor() {
             />
           </div>
           {run && (
-            <div className="mt-auto border-t border-stroke-soft-200 pt-2">
+            <div className="mt-auto shrink-0 border-t border-stroke-soft-200 pt-2">
               <div className="mb-1 flex items-center justify-between">
                 <span className="text-subheading-2xs text-text-soft-400">{t("projectEditor.runLog")}</span>
                 <span className="text-paragraph-xs text-text-soft-400">
@@ -579,6 +582,48 @@ export function ProjectEditor() {
                   })}
                 </span>
               </div>
+              {/* How far the Excel list is, and what came of the rows so far — what to look at
+                  to know whether a long run is doing its job. */}
+              {run.list && (
+                <div className="mb-2 flex flex-col gap-1 rounded-8 bg-bg-weak-50 p-2 text-paragraph-xs text-text-sub-600">
+                  <div className="h-1.5 overflow-hidden rounded-full bg-stroke-soft-200">
+                    <div
+                      className="h-full rounded-full bg-primary-base transition-[width]"
+                      style={{
+                        width: `${run.list.total ? Math.round(((run.list.total - run.list.left) / run.list.total) * 100) : 0}%`,
+                      }}
+                    />
+                  </div>
+                  <div className="text-text-strong-950">
+                    {t("projectEditor.listProgress", {
+                      done: run.list.total - run.list.left,
+                      total: run.list.total,
+                      left: run.list.left,
+                    })}
+                  </div>
+                  {!run.running && run.list.left === 0 && (
+                    <div className="text-success-base">{t("projectEditor.listFinished")}</div>
+                  )}
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span>
+                      {t("projectEditor.rowsResult", { ok: run.rows_ok ?? 0, failed: run.rows_failed ?? 0 })}
+                    </span>
+                    {run.results_file && (
+                      <button
+                        type="button"
+                        className="text-primary-base hover:underline"
+                        onClick={() =>
+                          openPath(run.results_file as string).catch((e) =>
+                            toast.err(t("projectEditor.openResultsFailed", { err: String(e) })),
+                          )
+                        }
+                      >
+                        {t("projectEditor.openResults")}
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
               <div className="max-h-[150px] overflow-y-auto font-mono text-[10px] text-text-sub-600">
                 {run.log.length === 0 ? (
                   <div className="text-text-soft-400">{t("projectEditor.logEmpty")}</div>

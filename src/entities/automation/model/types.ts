@@ -175,6 +175,21 @@ export type RunState = {
   running: boolean;
   workers: WorkerState[];
   log: string[];
+  /** The Excel/CSV list the run takes rows from, when it uses one. */
+  list?: ListProgress | null;
+  /** Rows that ran through without a failed step / rows with at least one. */
+  rows_ok?: number;
+  rows_failed?: number;
+  /** The CSV beside the list that records what came of each row. */
+  results_file?: string | null;
+};
+
+export type ListProgress = {
+  path: string;
+  /** Distinct values in the column. */
+  total: number;
+  /** Not yet taken; at 0 the run ends by itself. */
+  left: number;
 };
 
 export type NeedsSecret = { block_id: string; label: string; params: string[] };

@@ -14,6 +14,11 @@ export const automationAvailable = () => invoke<boolean>("automation_available")
 export type TableColumn = { value: string; label: string };
 /** The columns of an Excel/CSV file, for the column picker. */
 export const tableColumns = (path: string) => invoke<TableColumn[]>("table_columns", { path });
+/** How many rows a list column holds and how many no run has taken yet (reads, takes nothing). */
+export const automationSheetCounts = (path: string, column: string) =>
+  invoke<{ total: number; left: number }>("automation_sheet_counts", { path, column });
+/** Forgets which rows were taken, so the next run starts the list from the top. */
+export const automationSheetReset = (path: string) => invoke("automation_sheet_reset", { path });
 export const automationList = () => invoke<Project[]>("automation_list");
 export const automationCreate = (name: string) => invoke<Project>("automation_create", { name });
 export const automationSave = (project: Project) => invoke<Project>("automation_save", { project });

@@ -972,6 +972,41 @@ fn automation_run_status(project_id: String) -> Option<serde_json::Value> {
     }
 }
 
+/// How far through a spreadsheet's column the runs have got: `{ total, left }`, read without
+/// taking anything. For the step panel, before a run, so the operator sees how many rows are
+/// still to do (and that the run stops by itself when `left` reaches 0).
+#[tauri::command]
+fn automation_sheet_counts(path: String, column: String) -> Result<serde_json::Value, String> {
+    #[cfg(feature = "automation")]
+    {
+        let (total, left) = runner::sheet_counts(path.trim(), &column).map_err(|e| e.to_string())?;
+        return Ok(serde_json::json!({ "total": total, "left": left }));
+    }
+    #[cfg(not(feature = "automation"))]
+    {
+        let _ = (path, column);
+        Err("automation is not compiled into this build".into())
+    }
+}
+
+/// Starts a list over: forgets which rows were taken. Refused while a run is going, which would
+/// otherwise hand out rows another worker already has.
+#[tauri::command]
+fn automation_sheet_reset(path: String) -> Result<(), String> {
+    #[cfg(feature = "automation")]
+    {
+        if runner::all().iter().any(|r| r.running) {
+            return Err("a run is going — stop it first".into());
+        }
+        return runner::sheet_reset(path.trim()).map_err(|e| e.to_string());
+    }
+    #[cfg(not(feature = "automation"))]
+    {
+        let _ = path;
+        Err("automation is not compiled into this build".into())
+    }
+}
+
 /// Every run going right now — what the fleet window shows.
 #[tauri::command]
 fn automation_fleet() -> Vec<serde_json::Value> {
@@ -3889,6 +3924,8 @@ pub fn run() {
             automation_run,
             automation_run_stop,
             automation_run_status,
+            automation_sheet_counts,
+            automation_sheet_reset,
             automation_fleet,
             automation_fleet_window,
             automation_display,

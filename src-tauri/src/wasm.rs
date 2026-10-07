@@ -1204,6 +1204,9 @@ mod tests {
     /// and running them in parallel would have them fight over it.
     #[test]
     fn what_a_module_remembers_survives_and_is_bounded() {
+        // The state lives under the data root, which other tests move while they run: without
+        // this lock the directory changed mid-test and the assertions below failed at random.
+        let _root = crate::cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let id = "modstate-selftest";
         let dir = match data_dir(id) {
             Ok(d) => d,

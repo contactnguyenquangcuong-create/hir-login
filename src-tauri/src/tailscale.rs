@@ -206,8 +206,10 @@ fn terminal_script(bin: &str, key: &str, force_reauth: bool, log: &str) -> Optio
         "#!/bin/bash\n\
          echo 'Hir-Login đang đưa máy này vào mạng của team — cửa sổ này tự xong, bạn có thể đóng nó.'\n\
          {{ {bin} up --authkey {key} --reset --timeout=30s{force} 2>&1; echo \"exit=$?\"; }} > {log}\n\
-         echo 'Xong.'\n\
-         rm -f \"$0\"\n",
+         rm -f \"$0\"\n\
+         MYTTY=$(tty)\n\
+         osascript -e \"tell application \\\"Terminal\\\" to close (every window whose tty is \\\"$MYTTY\\\")\" >/dev/null 2>&1 &\n\
+         exit 0\n",
         bin = shell_quote(bin),
         key = shell_quote(key),
         log = shell_quote(log),
@@ -723,6 +725,9 @@ mod oauth_tests {
         assert!(sh.contains("'/Applications/Tailscale.app/Contents/MacOS/Tailscale' up --authkey 'tskey-auth-abc_123' --reset --timeout=30s --force-reauth"), "{sh}");
         assert!(sh.contains("> '/tmp/hir ts/join.log'"), "a path with a space stays one word: {sh}");
         assert!(sh.contains("echo \"exit=$?\"") && sh.contains("rm -f \"$0\""));
+        // The window closes itself: Terminal is told to close the window of its own tty.
+        assert!(sh.contains("MYTTY=$(tty)") && sh.contains("every window whose tty is \\\"$MYTTY\\\""), "{sh}");
+        assert!(sh.trim_end().ends_with("exit 0"), "{sh}");
         assert!(terminal_script("b", "tskey; rm -rf ~", false, "l").is_none(), "shell syntax in a key");
         assert!(terminal_script("b", "", false, "l").is_none());
         assert!(!terminal_script("b", "k", false, "l").unwrap().contains("--force-reauth"));

@@ -1,17 +1,20 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Button, Input, SegmentControl, cn } from "@proxyshard/shardx-ui-kit";
-import { AddIcon, ChevronDownIcon } from "../../../shared/icons";
+import { AddIcon, ChevronDownIcon, EditIcon } from "../../../shared/icons";
 import { toast } from "../../../shared/model/toast";
 import { proxyBulkParse, proxySave, proxyFullTest, type ProxyEntry } from "../../../entities/proxy";
 import { useProfile } from "../../../entities/profile";
 import { storeBus } from "../../../shared/lib/storeBus";
 import { useT } from "../../../shared/i18n";
+import { ProxyEditor } from "../../manage-proxies";
 
+// The type is always shown: it is what decides whether a proxy works, and a list pasted
+// without one is read as SOCKS5 until the first test finds out otherwise.
 const label = (p: ProxyEntry) =>
   p.name && p.name !== `${p.host}:${p.port}`
-    ? `${p.name} · ${p.host}:${p.port}${p.country ? ` · ${p.country}` : ""}`
-    : `${p.host}:${p.port} · ${p.country || p.kind}`;
+    ? `${p.name} · ${p.host}:${p.port} · ${p.kind.toUpperCase()}${p.country ? ` · ${p.country}` : ""}`
+    : `${p.host}:${p.port} · ${p.kind.toUpperCase()}${p.country ? ` · ${p.country}` : ""}`;
 
 type Coords = { left: number; width: number; top?: number; bottom?: number; maxHeight: number };
 
@@ -56,6 +59,8 @@ export function ProxySelect({
   const t = useT();
   const [open, setOpen] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const reloadProfiles = useProfile((s) => s.reload);
   const [q, setQ] = useState("");
   const trigger = useRef<HTMLButtonElement>(null);
   const coords = useAnchoredCoords(open, trigger);
@@ -156,19 +161,44 @@ export function ProxySelect({
 
   return (
     <>
-      <button
-        ref={trigger}
-        type="button"
-        onClick={() => (open ? close() : setOpen(true))}
-        className="flex h-9 w-full items-center gap-2 rounded-lg bg-bg-white-0 px-2.5 text-left text-paragraph-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 transition-colors hover:bg-bg-weak-50"
-      >
-        <span className={cn("min-w-0 flex-1 truncate", !selected && "text-text-soft-400")}>
-          {selected ? label(selected) : directLabel}
-        </span>
-        <ChevronDownIcon
-          className={cn("size-4 shrink-0 text-icon-soft-400 transition-transform", open && "rotate-180")}
+      <div className="flex items-center gap-1.5">
+        <button
+          ref={trigger}
+          type="button"
+          onClick={() => (open ? close() : setOpen(true))}
+          className="flex h-9 min-w-0 flex-1 items-center gap-2 rounded-lg bg-bg-white-0 px-2.5 text-left text-paragraph-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 transition-colors hover:bg-bg-weak-50"
+        >
+          <span className={cn("min-w-0 flex-1 truncate", !selected && "text-text-soft-400")}>
+            {selected ? label(selected) : directLabel}
+          </span>
+          <ChevronDownIcon
+            className={cn("size-4 shrink-0 text-icon-soft-400 transition-transform", open && "rotate-180")}
+          />
+        </button>
+        {/* Fix the host, port, login or type right here instead of leaving for the Proxies page. */}
+        {selected && (
+          <button
+            type="button"
+            title={t("proxySelect.editProxy")}
+            aria-label={t("proxySelect.editProxy")}
+            onClick={() => { close(); setEditing(true); }}
+            className="grid size-9 shrink-0 place-items-center rounded-lg bg-bg-white-0 text-icon-sub-600 ring-1 ring-inset ring-stroke-soft-200 transition-colors hover:bg-bg-weak-50 hover:text-text-strong-950"
+          >
+            <EditIcon className="size-4" />
+          </button>
+        )}
+      </div>
+      {editing && selected && (
+        <ProxyEditor
+          initial={selected}
+          onClose={() => setEditing(false)}
+          onSaved={() => {
+            // The Proxies page and the profile store each keep their own copy of the list.
+            storeBus.emit("proxies");
+            void reloadProfiles();
+          }}
         />
-      </button>
+      )}
       {open && coords && createPortal(
         <>
           <div className="fixed inset-0 z-[999]" onClick={close} />

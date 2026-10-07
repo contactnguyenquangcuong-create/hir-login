@@ -16,6 +16,17 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 mod fb;
+mod rowlog;
+
+/// How far through an Excel/CSV list a run is.
+#[derive(Debug, Clone, Serialize)]
+pub struct ListProgress {
+    pub path: String,
+    /// Distinct values in the column, used or not.
+    pub total: u32,
+    /// Values not yet taken. At 0 the run ends by itself.
+    pub left: u32,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WorkerState {
@@ -38,6 +49,13 @@ pub struct RunState {
     pub running: bool,
     pub workers: Vec<WorkerState>,
     pub log: Vec<String>,
+    /// The Excel/CSV list this run takes rows from, when it uses one.
+    pub list: Option<ListProgress>,
+    /// Rows that ran start to finish without a step failing, and rows with at least one failure.
+    pub rows_ok: u32,
+    pub rows_failed: u32,
+    /// The CSV that records, per row, what came of it (beside the list). Set once a row is done.
+    pub results_file: Option<String>,
 }
 
 struct Run {
@@ -770,7 +788,15 @@ pub(crate) fn sheet_take_row(path: &str, column: &str, mode: &str, also: &str) -
         .map(|(i, r)| (cell(r, idx), i))
         .filter(|(v, _)| !v.is_empty() && !used.contains(v) && seen.insert(v.clone()))
         .collect();
+    let total = rows
+        .iter()
+        .skip(first_data)
+        .map(|r| cell(r, idx))
+        .filter(|v| !v.is_empty())
+        .collect::<std::collections::HashSet<_>>()
+        .len();
     if left.is_empty() {
+        note_progress(path, total, 0);
         return Err(anyhow!("{path} has no unused rows left"));
     }
     let pick = if random {
@@ -782,6 +808,7 @@ pub(crate) fn sheet_take_row(path: &str, column: &str, mode: &str, also: &str) -
     let (value, row_index) = left[pick].clone();
     let other = resolve(also).map(|ci| cell(&rows[row_index], ci));
     if peek {
+        note_progress(path, total, left.len());
         return Ok((value, other));
     }
     use std::io::Write;
@@ -791,7 +818,49 @@ pub(crate) fn sheet_take_row(path: &str, column: &str, mode: &str, also: &str) -
         .open(&used_path)
         .with_context(|| format!("open {used_path}"))?;
     writeln!(f, "{value}")?;
+    note_progress(path, total, left.len() - 1);
     Ok((value, other))
+}
+
+/// What `sheet_take_row` last saw of each list: (distinct values, values still unused).
+fn progress_map() -> &'static Mutex<HashMap<String, (usize, usize)>> {
+    static M: OnceLock<Mutex<HashMap<String, (usize, usize)>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn note_progress(path: &str, total: usize, left: usize) {
+    if let Ok(mut m) = progress_map().lock() {
+        m.insert(path.to_string(), (total, left));
+    }
+}
+
+/// Forgets which rows of a list were taken (deletes the `.used.txt` beside it), so the next run
+/// starts from the top. The operator's own file, and the results file, are left alone.
+pub(crate) fn sheet_reset(path: &str) -> Result<()> {
+    let _g = sheet_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let used = format!("{path}.used.txt");
+    match std::fs::remove_file(&used) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(anyhow!("could not clear {used}: {e}")),
+    }
+    if let Ok(mut m) = progress_map().lock() {
+        m.remove(path);
+    }
+    Ok(())
+}
+
+/// (total, left) for a list: how many distinct values the column holds and how many of them no
+/// run has taken yet. Reads the list without taking anything, so it is safe to call from the
+/// editor before a run.
+pub(crate) fn sheet_counts(path: &str, column: &str) -> Result<(usize, usize)> {
+    match sheet_take_row(path, column, "peek", "") {
+        Ok(_) => {}
+        Err(e) if e.to_string().contains("no unused rows left") => {}
+        Err(e) => return Err(e),
+    }
+    let m = progress_map().lock().map_err(|_| anyhow!("progress lock poisoned"))?;
+    m.get(path).copied().ok_or_else(|| anyhow!("no progress for {path}"))
 }
 
 /// What a block did. `EndPass` ends the rest of this pass; `Else` is a
@@ -1723,7 +1792,30 @@ async fn run_block(
             let into = check_var_name(param(p, "into").context("no name to save into")?)?;
             let mode = param(p, "mode").map(|m| expand(m, vars)).unwrap_or_default();
             let also = expand(param(p, "comment_column").unwrap_or(""), vars);
-            let (value, other) = sheet_take_row(&path, &column, &mode, &also)?;
+            let taken = sheet_take_row(&path, &column, &mode, &also);
+            // A list that is already spent still tells the run how things stand (4 of 4 done),
+            // so the panel can say the run ended because the list did.
+            if matches!(&taken, Err(e) if e.to_string().contains("no unused rows left")) {
+                if let Some((total, left)) = progress_map().lock().ok().and_then(|m| m.get(&path).copied()) {
+                    if let Ok(mut s) = run.state.lock() {
+                        s.list = Some(ListProgress { path: path.clone(), total: total as u32, left: left as u32 });
+                    }
+                }
+            }
+            let (value, other) = taken?;
+            // A "peek" is a trial that takes nothing, so it is not a row of the run either.
+            if mode != "peek" {
+                // The worker reads these at the end of the pass to write the row's result.
+                vars.insert("hir_row_path".into(), path.clone());
+                vars.insert("hir_row_value".into(), value.clone());
+                vars.insert("hir_row_comment".into(), other.clone().unwrap_or_default());
+            }
+            if let Some((total, left)) = progress_map().lock().ok().and_then(|m| m.get(&path).copied()) {
+                run.log(format!("list: {} taken, {left} of {total} left", total - left));
+                if let Ok(mut s) = run.state.lock() {
+                    s.list = Some(ListProgress { path: path.clone(), total: total as u32, left: left as u32 });
+                }
+            }
             run.log(format!("{into} = {value}"));
             vars.insert(into, value);
             if !also.trim().is_empty() {
@@ -2756,6 +2848,13 @@ async fn run_worker(
         }
         pass += 1;
         vars.insert("pass".into(), pass.to_string());
+        // The row of the previous pass is done with; this pass takes its own (or none).
+        for k in ["hir_row_path", "hir_row_value", "hir_row_comment"] {
+            vars.remove(k);
+        }
+        // Step number -> what went wrong there. A step that failed and then went through on a
+        // retry is taken out again, so a recovered hiccup does not mark the row as failed.
+        let mut pass_errors: std::collections::BTreeMap<usize, String> = std::collections::BTreeMap::new();
         run.worker(idx, |w| {
             w.pass = pass;
             w.step = 0;
@@ -2799,13 +2898,21 @@ async fn run_worker(
             }
             let outcome = run_block(&mut bound, block, &mut vars, &run, &mut ctx).await;
             let branch = match &outcome {
-                Ok(Flow::Next) => block.on_done.clone(),
-                Ok(Flow::EndPass) => automation::Branch::EndPass,
+                Ok(Flow::Next) => {
+                    pass_errors.remove(&at);
+                    block.on_done.clone()
+                }
+                Ok(Flow::EndPass) => {
+                    pass_errors.remove(&at);
+                    automation::Branch::EndPass
+                }
                 // A false condition is not a failure — it just takes the "when
                 // it fails" branch (the else path).
                 Ok(Flow::Else) => block.on_fail.clone(),
                 Err(e) => {
                     run.log(format!("step {} — {e}", at + 1));
+                    let what = if block.label.is_empty() { block.kind.clone() } else { block.label.clone() };
+                    pass_errors.insert(at, format!("step {} ({what}): {e}", at + 1));
                     block.on_fail.clone()
                 }
             };
@@ -2862,6 +2969,10 @@ async fn run_worker(
             }
         }
 
+        // Every way out of the pass lands here: record what came of the row it took, if any.
+        let errors: Vec<String> = pass_errors.values().cloned().collect();
+        record_row_result(&run, idx, &vars, &errors, run.stop.load(Ordering::Relaxed));
+
         if end_run {
             break;
         }
@@ -2881,6 +2992,51 @@ async fn run_worker(
         }
         let _ = profile::delete(&id);
         run.log(format!("cleaned up temporary profile {id}"));
+    }
+}
+
+/// What a row came to: "OK", "LỖI" (a step failed and was not recovered) or "DỪNG" (the run was
+/// stopped while the row was in progress, so it was taken from the list but may be unfinished).
+fn row_verdict(errors: &[String], stopped: bool) -> &'static str {
+    if !errors.is_empty() {
+        "LỖI"
+    } else if stopped {
+        "DỪNG"
+    } else {
+        "OK"
+    }
+}
+
+/// Writes the result of the row this pass took, when it took one: a line in the `.results.csv`
+/// beside the list, a line in the log, and the run's counters. Passes with no row (no list, or
+/// a list that had run out) leave nothing behind.
+fn record_row_result(run: &Run, idx: usize, vars: &HashMap<String, String>, errors: &[String], stopped: bool) {
+    let Some(list) = vars.get("hir_row_path").filter(|p| !p.is_empty()) else { return };
+    let value = vars.get("hir_row_value").map(String::as_str).unwrap_or("");
+    let comment = vars.get("hir_row_comment").map(String::as_str).unwrap_or("");
+    let verdict = row_verdict(errors, stopped);
+    let detail: String = errors.join(" | ").chars().take(400).collect();
+    let profile = run
+        .state
+        .lock()
+        .ok()
+        .and_then(|s| s.workers.get(idx).map(|w| w.profile_name.clone()))
+        .unwrap_or_default();
+    let when = rowlog::local_stamp(now());
+    let written = rowlog::append(list, &[&when, &profile, value, comment, verdict, &detail]);
+    if let Ok(mut s) = run.state.lock() {
+        if verdict == "OK" {
+            s.rows_ok += 1;
+        } else {
+            s.rows_failed += 1;
+        }
+        if written.is_ok() {
+            s.results_file = Some(rowlog::results_path(list));
+        }
+    }
+    match written {
+        Ok(()) => run.log(format!("row result: {verdict} — {value}")),
+        Err(e) => run.log(format!("row result: {verdict} — {value} (the results file could not be written: {e})")),
     }
 }
 
@@ -2994,6 +3150,10 @@ pub async fn start(project_id: &str) -> Result<()> {
             running: true,
             workers,
             log: Vec::new(),
+            list: None,
+            rows_ok: 0,
+            rows_failed: 0,
+            results_file: None,
         }),
         stop: Arc::new(AtomicBool::new(false)),
         rules: project.rules.clone(),
@@ -3112,6 +3272,10 @@ mod tests {
                 running: true,
                 workers: Vec::new(),
                 log: Vec::new(),
+                list: None,
+                rows_ok: 0,
+                rows_failed: 0,
+                results_file: None,
             }),
             stop: Arc::new(AtomicBool::new(false)),
             rules: Vec::new(),
@@ -3588,6 +3752,133 @@ mod tests {
             assert_eq!(vars.get("post").map(String::as_str), Some("https://b/1"));
             assert!(run_block(&mut bound, &blk, &mut vars, &run, &mut ctx).await.is_err());
             let _ = std::fs::remove_dir_all(&d);
+        }
+
+        /// The editor shows "how many rows are left" before anything runs: reading it takes
+        /// nothing, taking moves it, and "start over" puts it back.
+        #[test]
+        fn the_counts_follow_the_rows_taken_and_start_over_resets_them() {
+            let d = tmpdir();
+            let f = d.join("counts.xlsx");
+            write_xlsx(&f, &[&["link"], &["https://c/1"], &["https://c/2"], &["https://c/3"], &["https://c/3"]]);
+            let p = f.to_str().unwrap();
+            assert_eq!(sheet_counts(p, "link").unwrap(), (3, 3), "a repeated link counts once; reading takes nothing");
+            assert_eq!(sheet_counts(p, "link").unwrap(), (3, 3));
+            sheet_take(p, "link", "next").unwrap();
+            assert_eq!(sheet_counts(p, "link").unwrap(), (3, 2));
+            sheet_take(p, "link", "next").unwrap();
+            sheet_take(p, "link", "next").unwrap();
+            assert_eq!(sheet_counts(p, "link").unwrap(), (3, 0), "spent is a count, not an error");
+            sheet_reset(p).unwrap();
+            assert_eq!(sheet_counts(p, "link").unwrap(), (3, 3));
+            assert_eq!(sheet_take(p, "link", "next").unwrap(), "https://c/1", "from the top again");
+            sheet_reset(p).unwrap();
+            sheet_reset(p).unwrap(); // nothing to forget is not a failure
+            assert!(sheet_counts(p, "nope").is_err(), "an unknown column is reported");
+            let _ = std::fs::remove_dir_all(&d);
+        }
+
+        fn steps_in_order(mut blocks: Vec<automation::Block>) -> Vec<automation::Block> {
+            for (i, b) in blocks.iter_mut().enumerate() {
+                b.y = (i as f64) * 120.0;
+            }
+            blocks
+        }
+
+        /// A whole list through a worker, no browser needed: every row leaves a line in the
+        /// results file, the counters follow, and running out of rows ends the run by itself.
+        #[tokio::test]
+        async fn a_list_is_worked_through_row_by_row_and_ends_the_run_when_spent() {
+            let d = tmpdir();
+            let f = d.join("posts.xlsx");
+            write_xlsx(&f, &[&["link", "comment"], &["https://p/1", "hay quá"], &["https://p/2", "đẹp"], &["https://p/3", ""]]);
+            let path = f.to_str().unwrap().to_string();
+            let _ = std::fs::remove_file(rowlog::results_path(&path));
+            let blocks = steps_in_order(vec![
+                block("sheet.next", json!({ "path": path, "column": "link", "comment_column": "comment", "into": "link", "comment_into": "comment" })),
+                // A step that needs no browser, standing in for the real work.
+                block("var.set", json!({ "name": "working_on", "value": "{{link}}" })),
+            ]);
+            let mut p = project("rows-ok", "rows-ok", blocks);
+            p.run.loops = 999;
+            let run = a_run(vec![]);
+            // One worker, so the result line can name its profile.
+            run.state.lock().unwrap().workers.push(WorkerState {
+                profile_id: "p1".into(), profile_name: "Nick A".into(), pass: 0, step: 0, steps_total: 0, status: "queued".into(), note: String::new(),
+            });
+            let run = Arc::new(run);
+            run_worker(run.clone(), 0, None, p, None).await;
+
+            let st = run.state.lock().unwrap().clone();
+            assert_eq!(st.workers[0].status, "done", "{:?}", st.log);
+            assert_eq!(st.workers[0].note, "list finished");
+            assert_eq!((st.rows_ok, st.rows_failed), (3, 0), "{:?}", st.log);
+            let list = st.list.expect("the run knows its list");
+            assert_eq!((list.total, list.left), (3, 0));
+            assert_eq!(st.results_file.as_deref(), Some(rowlog::results_path(&path).as_str()));
+
+            let csv = std::fs::read(rowlog::results_path(&path)).unwrap();
+            let text = String::from_utf8(csv[3..].to_vec()).unwrap();
+            let lines: Vec<&str> = text.lines().collect();
+            assert_eq!(lines.len(), 4, "a header and one line per row: {text}");
+            assert!(lines[1].contains("https://p/1") && lines[1].contains("hay quá") && lines[1].contains("Nick A") && lines[1].contains("\"OK\""), "{}", lines[1]);
+            assert!(lines[3].contains("https://p/3") && lines[3].contains("\"OK\""), "{}", lines[3]);
+
+            // Run it again on the spent list: nothing is taken and nothing is added to the results,
+            // but the panel is still told the list stands at 3 of 3 — it ended because of that.
+            let again = Arc::new(a_run(vec![]));
+            let mut p2 = project(
+                "rows-ok-2",
+                "rows-ok-2",
+                steps_in_order(vec![block("sheet.next", json!({ "path": path, "column": "link", "into": "link" }))]),
+            );
+            p2.run.loops = 999;
+            run_worker(again.clone(), 0, None, p2, None).await;
+            let st2 = again.state.lock().unwrap().clone();
+            assert_eq!((st2.rows_ok, st2.rows_failed), (0, 0));
+            let spent = st2.list.expect("a spent list still reports where it stands");
+            assert_eq!((spent.total, spent.left), (3, 0));
+            assert_eq!(std::fs::read(rowlog::results_path(&path)).unwrap().iter().filter(|b| **b == b'\n').count(), 4, "no new result line");
+            let _ = std::fs::remove_dir_all(&d);
+        }
+
+        /// A row whose step fails is marked LỖI with the step and the reason, the run carries on
+        /// with the next row, and the counters say so.
+        #[tokio::test]
+        async fn a_failing_step_marks_its_row_and_the_run_goes_on_to_the_next() {
+            let d = tmpdir();
+            let f = d.join("posts.csv");
+            std::fs::write(&f, "link\nhttps://q/1\nhttps://q/2\n").unwrap();
+            let path = f.to_str().unwrap().to_string();
+            let _ = std::fs::remove_file(rowlog::results_path(&path));
+            let mut failing = block("fail", json!({ "text": "boom {{link}}" }));
+            failing.label = "Bình luận".into();
+            failing.on_fail = automation::Branch::Next;
+            let blocks = steps_in_order(vec![
+                block("sheet.next", json!({ "path": path, "column": "link", "into": "link" })),
+                failing,
+            ]);
+            let mut p = project("rows-bad", "rows-bad", blocks);
+            p.run.loops = 999;
+            let run = Arc::new(a_run(vec![]));
+            run_worker(run.clone(), 0, None, p, None).await;
+
+            let st = run.state.lock().unwrap().clone();
+            assert_eq!((st.rows_ok, st.rows_failed), (0, 2), "{:?}", st.log);
+            let csv = std::fs::read(rowlog::results_path(&path)).unwrap();
+            let text = String::from_utf8(csv[3..].to_vec()).unwrap();
+            let lines: Vec<&str> = text.lines().collect();
+            assert_eq!(lines.len(), 3, "{text}");
+            assert!(lines[1].contains("LỖI") && lines[1].contains("Bình luận") && lines[1].contains("boom https://q/1"), "{}", lines[1]);
+            let _ = std::fs::remove_dir_all(&d);
+        }
+
+        #[test]
+        fn a_row_stopped_halfway_is_neither_ok_nor_an_error() {
+            assert_eq!(row_verdict(&[], false), "OK");
+            assert_eq!(row_verdict(&[], true), "DỪNG");
+            assert_eq!(row_verdict(&["step 2: x".to_string()], false), "LỖI");
+            assert_eq!(row_verdict(&["step 2: x".to_string()], true), "LỖI", "a failure is still a failure when the run was stopped later");
         }
     }
 
