@@ -158,6 +158,10 @@ struct SyncState {
     /// so the next open must not pull the server's older copy over it.
     #[serde(default)]
     pending: std::collections::HashSet<String>,
+    /// Proxies that arrived with a team profile (their logins travel inside the bundle). Removed
+    /// with the profiles when this machine leaves the team or is removed from it.
+    #[serde(default)]
+    team_proxies: std::collections::HashSet<String>,
 }
 
 fn state_lock() -> &'static Mutex<()> {
@@ -243,6 +247,12 @@ fn active_config() -> Result<Option<(SyncConfig, String, String)>> {
 /// What the team server said no to, as a message the UI can translate.
 async fn denied(resp: reqwest::Response, what: &str) -> anyhow::Error {
     let code = resp.status().as_u16();
+    // Whatever the request was, a 401 means this machine's token is no longer valid. Opening a
+    // profile (the lock request) used to take that for an ordinary failure, so a removed member
+    // only found out at the next background round.
+    if code == 401 {
+        kicked_out();
+    }
     let body = resp.json::<serde_json::Value>().await.ok();
     let text = |k: &str| body.as_ref()
         .and_then(|v| v.get(k).and_then(|r| r.as_str().map(String::from)))
@@ -282,6 +292,73 @@ fn kicked_out() {
         use tauri::Emitter;
         let _ = app.emit("team:kicked-out", ());
     }
+    // Being removed from the team takes the team's profiles with it: switching sync off alone left
+    // every profile that had been downloaded fully usable on the machine of someone who no longer
+    // has any right to it.
+    tauri::async_runtime::spawn(async {
+        let n = wipe_team_data().await;
+        slog!("this machine was removed from the team — {n} team profiles were deleted from it");
+    });
+}
+
+/// Whether this machine may open `id`. A profile that came from a team is opened only while this
+/// machine is in that team (or runs the team's server): once it has left, been removed, or had
+/// sync switched off in the settings, it is not. Without this check, "no longer a member" changed
+/// nothing about the profiles already on the disk.
+///
+/// This stops the app from opening them; it cannot stop someone who copies files out of a profile
+/// folder while they are still a member. Machines that never joined a team are unaffected.
+pub fn ensure_access(id: &str) -> Result<()> {
+    let Ok(s) = settings::load() else { return Ok(()) };
+    let hosts_a_team = s.server_host.token.as_deref().is_some_and(|t| !t.trim().is_empty());
+    if s.sync.enabled || hosts_a_team {
+        return Ok(());
+    }
+    let st = load_state();
+    if st.items.contains_key(id) || st.pending.contains(id) {
+        anyhow::bail!("profile này thuộc nhóm, mà máy này không còn kết nối với nhóm nên không mở được — tham gia lại nhóm bằng mã mới để dùng tiếp");
+    }
+    Ok(())
+}
+
+/// Deletes from this machine every profile that came from (or went to) the team, with its browser
+/// data, its copy in the trash, and the proxies that arrived with them; stops any of them that is
+/// running first; forgets the sync state. Local-only profiles are left alone. Returns how many
+/// profiles were deleted. Nothing is reported to the server — it already has them.
+pub async fn wipe_team_data() -> usize {
+    let st = load_state();
+    let mut ids: Vec<String> = st.items.keys().cloned().collect();
+    ids.extend(st.pending.iter().cloned());
+    ids.sort();
+    ids.dedup();
+    let mut gone = 0;
+    for id in &ids {
+        if crate::process::Tracker::shared().is_running(id) {
+            let _ = crate::process::Tracker::shared().kill(id).await;
+            crate::cdp::detach(id);
+        }
+        let existed = crate::profile::load_raw(id).is_ok();
+        let _ = crate::profile::delete(id);
+        let _ = trash::purge(id);
+        if existed {
+            gone += 1;
+        }
+    }
+    for pid in &st.team_proxies {
+        let _ = crate::proxy::delete(pid);
+    }
+    update_state(|s| {
+        s.items.clear();
+        s.pending.clear();
+        s.team_proxies.clear();
+    });
+    if let Some(app) = crate::app_handle() {
+        use tauri::Emitter;
+        let _ = app.emit("team:wiped", gone);
+    }
+    crate::notify_store_changed("profiles");
+    crate::notify_store_changed("proxies");
+    gone
 }
 
 /// A call to the team server's member/permission API with this machine's token.
@@ -440,24 +517,57 @@ fn build_bundle(id: &str) -> Result<Vec<u8>> {
                 }
             }
             // The login: cookies and saved passwords, as copies another machine can re-seal.
+            //
+            // What goes up is this machine's login *united with* the one the server gave us at the
+            // last pull, the more recent row of each winning. A machine that could not restore the
+            // login (or never had it) used to send up a bundle without it, and the server's copy —
+            // the one every new machine starts from — lost it for everybody. Now a machine can only
+            // add to what the server holds, never take from it.
             for (rel, name, kind) in SEALED {
                 let src = if *kind == cookies::Sealed::Cookies { cookies::cookie_db(&udd) } else { udd.join(rel) };
-                if !src.is_file() {
-                    continue;
-                }
-                match cookies::portable_copy(&udd, &src, *kind) {
-                    Ok((bytes, st)) => {
-                        zip.start_file(*name, opts)?;
-                        zip.write_all(&bytes)?;
-                        let note = if st.dropped > 0 && st.portable == 0 {
-                            " — NONE could be opened with this machine's key, so no login travels"
-                        } else {
-                            ""
-                        };
-                        slog!("{id}: {name}: {} rows, {} made portable, {} dropped{note}", st.rows, st.portable, st.dropped);
+                let local = if src.is_file() {
+                    match cookies::portable_copy(&udd, &src, *kind) {
+                        Ok((bytes, st)) => {
+                            let note = if st.dropped > 0 && st.portable == 0 {
+                                " — NONE could be opened with this machine's key, so no login travels"
+                            } else {
+                                ""
+                            };
+                            slog!("{id}: {name}: {} rows, {} made portable, {} dropped{note}", st.rows, st.portable, st.dropped);
+                            Some(bytes)
+                        }
+                        Err(e) => {
+                            slog!("{id}: could not prepare {rel} for another machine: {e:#}");
+                            None
+                        }
                     }
-                    Err(e) => slog!("{id}: could not prepare {rel} for another machine: {e:#}"),
-                }
+                } else {
+                    None
+                };
+                let held = cache_load(id, name);
+                let outgoing = match (local, held) {
+                    (Some(mine), Some(theirs)) => match union_portable(&mine, &theirs, *kind) {
+                        Ok((united, added)) => {
+                            if added > 0 {
+                                slog!("{id}: {name}: {added} values the server already had were missing here and were kept in what is sent");
+                            }
+                            united
+                        }
+                        Err(e) => {
+                            slog!("{id}: {name}: could not unite with the server's copy ({e:#}) — sending this machine's own");
+                            mine
+                        }
+                    },
+                    (Some(mine), None) => mine,
+                    (None, Some(theirs)) => {
+                        slog!("{id}: {name}: this machine has none — the server's copy is sent back unchanged");
+                        theirs
+                    }
+                    (None, None) => continue,
+                };
+                cache_save(id, name, &outgoing);
+                zip.start_file(*name, opts)?;
+                zip.write_all(&outgoing)?;
             }
         }
         // The extensions this profile uses travel with it, so it never depends on
@@ -603,6 +713,7 @@ fn apply_bundle_with(id: &str, bytes: &[u8], keep_local_session: bool) -> Result
         if let Some((dest, _, kind)) = SEALED.iter().find(|(_, name, _)| *name == rel_str).map(|(d, n, k)| (*d, *n, *k)) {
             // A login travelling as a portable copy: seal it with this machine's key, then put it in place.
             saw_portable.push(rel_str.clone());
+            cache_save(id, &rel_str, &buf);
             if !keep_local_session {
                 match install_portable(&udd, dest, &buf, kind) {
                     Ok(n) => slog!("{id}: restored {dest}: {n} values sealed for this machine"),
@@ -644,6 +755,8 @@ fn apply_bundle_with(id: &str, bytes: &[u8], keep_local_session: bool) -> Result
                         p.country = existing.country;
                     }
                     if let Ok(saved) = crate::proxy::upsert(p) {
+                        let pid = saved.id.clone();
+                        update_state(|st| { st.team_proxies.insert(pid); });
                         local.meta.proxy_id = Some(saved.id);
                     }
                 }
@@ -653,6 +766,44 @@ fn apply_bundle_with(id: &str, bytes: &[u8], keep_local_session: bool) -> Result
         }
     }
     Ok(())
+}
+
+/// Where the portable login the server last gave this machine is kept (see `build_bundle`).
+fn cache_file(id: &str, name: &str) -> Option<std::path::PathBuf> {
+    let leaf = name.rsplit('/').next().unwrap_or(name);
+    store::user_files_root().ok().map(|r| r.join("sync-cache").join(id).join(format!("{leaf}.portable")))
+}
+
+fn cache_save(id: &str, name: &str, bytes: &[u8]) {
+    if let Some(p) = cache_file(id, name) {
+        if let Some(dir) = p.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        let tmp = p.with_extension("portable.tmp");
+        if fs::write(&tmp, bytes).is_ok() {
+            let _ = crate::winfs::rename_replace(&tmp, &p);
+        }
+    }
+}
+
+fn cache_load(id: &str, name: &str) -> Option<Vec<u8>> {
+    fs::read(cache_file(id, name)?).ok()
+}
+
+/// `mine` with every row of `theirs` that it lacks (or has an older version of) added: the union of
+/// two portable logins. Returns the result and how many rows came from `theirs`.
+fn union_portable(mine: &[u8], theirs: &[u8], kind: cookies::Sealed) -> Result<(Vec<u8>, usize)> {
+    let dir = std::env::temp_dir().join(format!("hir-union-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&dir)?;
+    let (a, b) = (dir.join("mine.db"), dir.join("theirs.db"));
+    let result = (|| -> Result<(Vec<u8>, usize)> {
+        fs::write(&a, mine)?;
+        fs::write(&b, theirs)?;
+        let added = cookies::merge_sealed(&a, &b, kind)?;
+        Ok((fs::read(&a)?, added))
+    })();
+    let _ = fs::remove_dir_all(&dir);
+    result
 }
 
 /// Seals a portable copy with this machine's key and puts it where the browser expects it.
@@ -2026,6 +2177,286 @@ mod tests {
         }).await;
     }
 
+    /// The admin removes a member. Before, the member's machine merely switched sync off and every
+    /// profile it had downloaded stayed fully usable. Now the first call that comes back 401 deletes
+    /// the team's profiles from that machine — browser data, trash copy, the proxies that came with
+    /// them — and leaves what was only ever local.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn removing_a_member_takes_the_team_profiles_off_their_machine() {
+        with_synced_profile(|base, admin_token, _cookies| async move {
+            // A staff member, and this machine becomes theirs.
+            let c = reqwest::Client::new();
+            let made: serde_json::Value = c.put(format!("{base}/admin/members")).bearer_auth(&admin_token)
+                .json(&serde_json::json!({"name": "staff", "role": "admin"})).send().await.unwrap().json().await.unwrap();
+            let (staff_token, staff_id) = (made["token"].as_str().unwrap().to_string(), made["id"].as_str().unwrap().to_string());
+            let mut s = settings::load().unwrap();
+            s.sync.token = Some(staff_token);
+            settings::save(&s).unwrap();
+
+            // A team profile on this machine (it syncs), a local-only one, and a team proxy.
+            checkout("sess-1").await.expect("the member opens a team profile");
+            checkin("sess-1").await.expect("and closes it");
+            let mut local_only = crate::profile::StoredProfile::default();
+            local_only.meta.id = "mine-only".into();
+            crate::profile::save_raw(&mut local_only).unwrap();
+            let team_proxy = crate::proxy::upsert(crate::proxy::ProxyEntry {
+                id: String::new(), name: "from the team".into(), kind: crate::proxy::ProxyKind::Http,
+                host: "203.0.113.5".into(), port: 3128, username: "u".into(), password: "p".into(),
+                country: String::new(), notes: String::new(),
+            }).unwrap();
+            update_state(|st| { st.team_proxies.insert(team_proxy.id.clone()); });
+            assert!(crate::profile::load_raw("sess-1").is_ok());
+
+            // The admin removes the member.
+            let gone = c.post(format!("{base}/admin/members/{staff_id}/delete")).bearer_auth(&admin_token).send().await.unwrap();
+            assert!(gone.status().is_success(), "{}", gone.status());
+
+            // The next thing the machine does is refused, and that is enough.
+            assert!(checkout("sess-1").await.is_err(), "the removed member's token is refused");
+            let started = std::time::Instant::now();
+            while crate::profile::load_raw("sess-1").is_ok() && started.elapsed() < Duration::from_secs(10) {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+
+            let udd = store::user_data_root().unwrap().join("sess-1");
+            assert!(crate::profile::load_raw("sess-1").is_err(), "the team profile is gone from this machine");
+            assert!(!udd.exists(), "and so is its browser data");
+            assert!(crate::profile::load_raw("mine-only").is_ok(), "a profile that was only ever local stays");
+            assert!(crate::proxy::get(&team_proxy.id).unwrap().is_none(), "the proxy that came with the team is removed");
+            let st = load_state();
+            assert!(st.items.is_empty() && st.pending.is_empty() && st.team_proxies.is_empty(), "no trace of the team's profiles in the sync state");
+            let s = settings::load().unwrap();
+            assert!(!s.sync.enabled && s.sync.token.is_none(), "sync is off and the token gone");
+            assert!(log_tail(10).contains("removed from the team"), "{}", log_tail(10));
+        }).await;
+    }
+
+    /// The same wipe when the member leaves on their own (the Disconnect button): team profiles
+    /// deleted, sync state forgotten.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wiping_the_team_deletes_its_profiles_and_forgets_the_sync_state() {
+        with_synced_profile(|_base, _token, _cookies| async move {
+            checkout("sess-1").await.expect("open");
+            checkin("sess-1").await.expect("close");
+            assert!(crate::profile::load_raw("sess-1").is_ok());
+            let n = wipe_team_data().await;
+            assert_eq!(n, 1);
+            assert!(crate::profile::load_raw("sess-1").is_err());
+            assert!(load_state().items.is_empty());
+        }).await;
+    }
+
+    /// A team profile is opened only while this machine is in the team (or hosts it). A machine that
+    /// has left, was removed, or just switched sync off in the settings keeps the files but not the
+    /// right to open them from the app.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_team_profile_is_not_opened_by_a_machine_that_is_out_of_the_team() {
+        let _g = TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-access-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        store::set_data_root(Some(tmp.clone()));
+        update_state(|st| {
+            st.items.insert("team-1".into(), StateItem { remote: "v".into(), at: 1, at_ms: 1, proxy: String::new(), fmt: SYNC_FMT });
+        });
+        let mut s = settings::load().unwrap();
+        s.sync.enabled = false;
+        s.server_host.token = None;
+        settings::save(&s).unwrap();
+
+        let out_of_team = ensure_access("team-1").is_err();
+        let local_is_free = ensure_access("never-synced").is_ok();
+        let launch = crate::launch::launch_profile_synced("team-1", false, false, None, 0, "").await;
+
+        let mut in_team = settings::load().unwrap();
+        in_team.sync.enabled = true;
+        settings::save(&in_team).unwrap();
+        let member_ok = ensure_access("team-1").is_ok();
+
+        let mut host = settings::load().unwrap();
+        host.sync.enabled = false;
+        host.server_host.token = Some("the-servers-own-token".into());
+        settings::save(&host).unwrap();
+        let host_ok = ensure_access("team-1").is_ok();
+
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(out_of_team, "out of the team: refused");
+        assert!(local_is_free, "a profile that never came from a team is nobody's business");
+        let refused = launch.err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(refused.contains("thuộc nhóm"), "the launch is refused with a reason: {refused:?}");
+        assert!(member_ok, "in the team: allowed");
+        assert!(host_ok, "the machine that hosts the team: allowed");
+    }
+
+    // ---- a long day across several machines ----
+
+    fn at(root: &std::path::Path) {
+        store::set_data_root(Some(root.to_path_buf()));
+    }
+
+    fn sim_cookie(name: &str, value: &str) -> cookies::Cookie {
+        serde_json::from_value(serde_json::json!({
+            "domain": ".facebook.com", "name": name, "value": value, "path": "/", "expires": 1893456000.0, "secure": true
+        })).unwrap()
+    }
+
+    /// The login this machine's profile holds: the number inside its `c_user` cookie ("u-7" → 7).
+    fn sim_login(id: &str) -> Option<u32> {
+        let all = cookies::export(id).ok()?;
+        all.iter().find(|c| c.name == "c_user").and_then(|c| c.value.strip_prefix("u-")).and_then(|v| v.parse().ok())
+    }
+
+    /// The site's own storage (a stand-in for Local Storage): "tok-7" → 7.
+    fn sim_token(id: &str) -> Option<u32> {
+        let f = store::user_data_root().ok()?.join(id).join("Default/Local Storage/leveldb/000003.log");
+        std::fs::read_to_string(f).ok()?.strip_prefix("tok-")?.trim().parse().ok()
+    }
+
+    async fn sim_login_on(root: &std::path::Path, id: &str, k: u32) {
+        at(root);
+        checkout(id).await.expect("open");
+        cookies::import(id, &[sim_cookie("c_user", &format!("u-{k}")), sim_cookie("xs", &format!("x-{k}"))]).unwrap();
+        let tok = store::user_data_root().unwrap().join(id).join("Default/Local Storage/leveldb/000003.log");
+        std::fs::create_dir_all(tok.parent().unwrap()).unwrap();
+        std::fs::write(tok, format!("tok-{k}")).unwrap();
+        checkin(id).await.expect("close");
+    }
+
+    async fn sim_visit_on(root: &std::path::Path, id: &str) {
+        at(root);
+        checkout(id).await.expect("open");
+        checkin(id).await.expect("close");
+    }
+
+    /// A machine whose login cannot be restored (what a Mac whose browser seals with another key
+    /// looks like to the launcher): it opens the profile, finds no cookies it can use, and closes.
+    async fn sim_broken_visit_on(root: &std::path::Path, id: &str) {
+        at(root);
+        checkout(id).await.expect("open");
+        let udd = store::user_data_root().unwrap().join(id);
+        let _ = std::fs::remove_file(udd.join("Default/Network/Cookies"));
+        let _ = std::fs::remove_file(udd.join("Default/Cookies"));
+        checkin(id).await.expect("close");
+    }
+
+    /// Several machines share one profile through the team server for a long, random stretch: logins
+    /// on two healthy machines, visits, background rounds, and a third machine that cannot restore
+    /// the login and keeps pushing what it has. A healthy machine must never lose a login it had
+    /// (or see an older one come back over a newer), and a machine added at the end must start from
+    /// the latest login — the server's copy must not have been emptied by the broken machine.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_long_day_of_logins_and_syncs_never_costs_a_healthy_machine_its_login() {
+        let _g = TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-sim-{}", uuid::Uuid::new_v4()));
+        for d in ["srv", "A", "B", "C", "W"] {
+            std::fs::create_dir_all(tmp.join(d)).unwrap();
+        }
+        // Puts everything back even if an assertion below stops the test: left in place, the
+        // server and its data folder would bleed into every test that runs after this one.
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = crate::team_server::stop();
+                crate::team_server::set_server_dir_for_tests(None);
+                store::set_data_root(None);
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(tmp.clone());
+        crate::team_server::set_server_dir_for_tests(Some(tmp.join("srv")));
+        at(&tmp.join("srv"));
+        let token = "sim-token-123456789";
+        let port = crate::team_server::start(0, token.to_string()).await.expect("start");
+        let base = format!("http://127.0.0.1:{port}");
+        let id = "sim-1";
+        let setup = |name: &str| {
+            at(&tmp.join(name));
+            let mut s = settings::load().unwrap();
+            s.sync.enabled = true;
+            s.sync.server_url = Some(base.clone());
+            s.sync.token = Some(token.to_string());
+            s.sync.device_name = Some(format!("machine-{name}"));
+            s.sync.slim_local = false;
+            settings::save(&s).unwrap();
+        };
+        for m in ["A", "B", "C"] {
+            setup(m);
+        }
+        at(&tmp.join("A"));
+        let mut stored = crate::profile::StoredProfile::default();
+        stored.meta.id = id.to_string();
+        stored.config.insert("name".into(), serde_json::json!("Shared account"));
+        crate::profile::save_raw(&mut stored).unwrap();
+
+        let mut x: u64 = 0x5eed_1234_abcd_0001;
+        let mut next = move |n: u32| {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((x >> 33) as u32) % n
+        };
+        let (a, b, c) = (tmp.join("A"), tmp.join("B"), tmp.join("C"));
+        let mut latest = 1u32;
+        sim_login_on(&a, id, latest).await;
+        // What each healthy machine has held, so a step backwards is caught.
+        let mut seen: std::collections::HashMap<&str, (u32, u32)> = std::collections::HashMap::new();
+        let mut trail: Vec<String> = vec!["A logs in (1)".into()];
+
+        for step in 0..120 {
+            let who = ["A", "B", "C"][next(3) as usize];
+            let root = tmp.join(who);
+            let what = match next(10) {
+                0 | 1 if who != "B" => {
+                    latest += 1;
+                    sim_login_on(&root, id, latest).await;
+                    format!("{who} logs in ({latest})")
+                }
+                2..=5 => {
+                    if who == "B" { sim_broken_visit_on(&root, id).await } else { sim_visit_on(&root, id).await }
+                    format!("{who} opens and closes")
+                }
+                _ => {
+                    at(&root);
+                    let _ = sync_round().await;
+                    format!("{who} background round")
+                }
+            };
+            trail.push(format!("{step}: {what}"));
+            tokio::time::sleep(Duration::from_millis(3)).await;
+
+            // Healthy machines only.
+            for (m, root) in [("A", &a), ("C", &c)] {
+                at(root);
+                let (login, token) = (sim_login(id), sim_token(id));
+                if let Some((had_login, had_token)) = seen.get(m).copied() {
+                    assert!(login.is_some_and(|k| k >= had_login), "{m} lost or went back on its login (had {had_login}, now {login:?}) after: {}", trail.join(" | "));
+                    assert!(token.is_some_and(|k| k >= had_token), "{m}'s site storage went back (had {had_token}, now {token:?}) after: {}", trail.join(" | "));
+                }
+                if let (Some(l), Some(t)) = (login, token) {
+                    let e = seen.entry(m).or_insert((0, 0));
+                    *e = (e.0.max(l), e.1.max(t));
+                }
+            }
+        }
+
+        // The broken machine pushes last, and then a machine that has never seen the profile joins.
+        sim_login_on(&a, id, latest + 1).await;
+        latest += 1;
+        sim_broken_visit_on(&b, id).await;
+        sim_visit_on(&c, id).await;
+        at(&c);
+        let c_after = (sim_login(id), sim_token(id));
+        setup("W");
+        at(&tmp.join("W"));
+        checkout(id).await.expect("a new machine opens the profile");
+        let w_login = sim_login(id);
+        let w_token = sim_token(id);
+        let _ = checkin(id).await;
+
+        assert_eq!(c_after.0, Some(latest), "a healthy machine ends on the latest login");
+        assert_eq!(c_after.1, Some(latest), "and the latest site storage");
+        assert_eq!(w_login, Some(latest), "a machine added at the end starts logged in: the broken machine's pushes did not empty the server's copy");
+        assert_eq!(w_token, Some(latest));
+    }
+
     /// "Why am I logged out on this machine?" has an answer in the sync log: how many cookies a
     /// bundle was made with, how many were restored here, and — the case that left a Mac logged
     /// out with nothing to show for it — when a bundle carried no login at all.
@@ -2328,6 +2759,17 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("hir-sess-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&tmp).unwrap();
         store::set_data_root(Some(tmp.clone()));
+        // A body that stops on a failed assertion must still stop the server and put the data
+        // root back, or the tests that run after it start against a server that is already up.
+        struct Teardown(std::path::PathBuf);
+        impl Drop for Teardown {
+            fn drop(&mut self) {
+                let _ = crate::team_server::stop();
+                store::set_data_root(None);
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _teardown = Teardown(tmp.clone());
         let token = "session-test-token-1234".to_string();
         let port = crate::team_server::start(0, token.clone()).await.expect("start");
         let base = format!("http://127.0.0.1:{port}");
@@ -2350,10 +2792,6 @@ mod tests {
         std::fs::write(&cookies, "logged-out").unwrap();
 
         body(base, token, cookies).await;
-
-        let _ = crate::team_server::stop();
-        store::set_data_root(None);
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// The cookie file inside the bundle the server currently holds.

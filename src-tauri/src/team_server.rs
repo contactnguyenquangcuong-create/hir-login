@@ -17,8 +17,25 @@ use tokio::sync::oneshot;
 
 const MAX_BUNDLE_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
+/// Tests only: where the server keeps its data, regardless of which data root the machine under
+/// test has switched to (several "machines" share one process there, one server serves them all).
+#[cfg(test)]
+static TEST_SERVER_DIR: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn set_server_dir_for_tests(dir: Option<PathBuf>) {
+    *TEST_SERVER_DIR.lock().unwrap_or_else(|e| e.into_inner()) = dir;
+}
+
 fn server_data_dir() -> Result<PathBuf> {
-    let dir = crate::store::data_root()?.join("team-sync");
+    #[cfg(test)]
+    let fixed = TEST_SERVER_DIR.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    #[cfg(not(test))]
+    let fixed: Option<PathBuf> = None;
+    let dir = match fixed {
+        Some(d) => d,
+        None => crate::store::data_root()?.join("team-sync"),
+    };
     std::fs::create_dir_all(dir.join("bundles"))?;
     Ok(dir)
 }
@@ -553,14 +570,10 @@ async fn put_bundle(
     let meta_path = match meta_path() { Ok(p) => p, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok":false,"error":e.to_string()}))).into_response() };
     let mut meta = load_json(&meta_path, json!({}));
     let meta_map = meta.as_object_mut().unwrap();
-    // ISO 8601 UTC
-    let now_iso = {
-        let secs = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-        // simple ISO without chrono dep
-        let dt = time_format(secs);
-        dt
-    };
-    meta_map.insert(id.clone(), json!({"updatedAt": now_iso, "updatedBy": holder, "sizeBytes": body.len(), "folder": new_folder, "sig": new_sig, "sig_np": new_sig_np}));
+    // ISO 8601 UTC, to the millisecond and strictly after this profile's previous version.
+    let prev_ms = meta_map.get(&id).and_then(|m| m.get("verMs")).and_then(|v| v.as_u64()).unwrap_or(0);
+    let (now_iso, ver_ms) = next_version(prev_ms);
+    meta_map.insert(id.clone(), json!({"updatedAt": now_iso, "verMs": ver_ms, "updatedBy": holder, "sizeBytes": body.len(), "folder": new_folder, "sig": new_sig, "sig_np": new_sig_np}));
     let _ = save_json_atomic(&meta_path, &meta);
     // refresh lock TTL
     if let Some(map) = locks.as_object_mut() {
@@ -614,10 +627,13 @@ async fn delete_profile(
     if let Ok(mp) = meta_path() {
         let mut meta = load_json(&mp, json!({}));
         if let Some(m) = meta.as_object_mut() {
+            let prev_ms = m.get(&id).and_then(|e| e.get("verMs")).and_then(|v| v.as_u64()).unwrap_or(0);
+            let (stamp, ver_ms) = next_version(prev_ms);
             m.insert(id.clone(), json!({
                 "deleted": true,
                 "folder": folder,
-                "updatedAt": time_format(SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs()),
+                "updatedAt": stamp,
+                "verMs": ver_ms,
                 "updatedBy": by,
             }));
         }
@@ -1044,6 +1060,17 @@ async fn admin_audit(
     Json(json!({"ok": true, "entries": lines})).into_response()
 }
 
+/// The `updatedAt` of a profile's next version: ISO time to the millisecond, and never equal to
+/// (or before) the profile's previous one — `prev_ms` is that previous one in milliseconds. With
+/// whole seconds, two uploads by different machines within one second carried the same stamp, a
+/// client holding the first believed it already had the second, skipped the download and sent its
+/// older copy back over the newer. Returns the stamp and its value in milliseconds.
+fn next_version(prev_ms: u64) -> (String, u64) {
+    let ms = now_ms().max(prev_ms + 1);
+    let iso = time_format(ms / 1000);
+    (format!("{}.{:03}Z", iso.trim_end_matches('Z'), ms % 1000), ms)
+}
+
 fn time_format(secs: u64) -> String {
     // Format as ISO 8601 using simple calculation — avoid extra dep
     // Use chrono-like output: 2026-09-26T12:34:56Z
@@ -1303,11 +1330,19 @@ mod permission_tests {
         assert!(same.bytes().await.unwrap().is_empty(), "a 304 carries no bundle");
         assert_eq!(get(Some("\"1999-01-01T00:00:00Z\"")).await.unwrap().status().as_u16(), 200);
 
-        // After a new upload the old version no longer matches (versions are whole seconds).
-        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        // After a new upload the old version no longer matches — even when it follows straight on,
+        // inside the same second: the versions are not whole seconds and never repeat.
         assert_eq!(status(&c, admin, "PUT", format!("{base}/profiles/ev1/bundle"), Some(bundle("", "ua2")), "m").await, 200);
         let stale = get(Some(&format!("\"{ver}\""))).await.unwrap();
         assert_eq!(stale.status().as_u16(), 200, "the version the client holds is out of date");
+        let newest = stale.headers().get("etag").and_then(|h| h.to_str().ok()).map(String::from).unwrap();
+        assert_ne!(newest.trim_matches('"'), ver, "a new upload is a new version");
+        for _ in 0..5 {
+            assert_eq!(status(&c, admin, "PUT", format!("{base}/profiles/ev1/bundle"), Some(bundle("", "ua3")), "m").await, 200);
+        }
+        let after_many: Value = lock().await.unwrap().json().await.unwrap();
+        let last = after_many["updatedAt"].as_str().unwrap().to_string();
+        assert!(last.as_str() > newest.trim_matches('"'), "versions only move forward: {newest} then {last}");
 
         let _ = stop();
         crate::store::set_data_root(None);

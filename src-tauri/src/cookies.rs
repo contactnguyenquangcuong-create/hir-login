@@ -359,6 +359,7 @@ fn cookies_db_path(udd: &Path) -> PathBuf {
 
 /// Export decrypted cookies.
 pub fn export(profile_id: &str) -> Result<Vec<Cookie>> {
+    crate::cloud_sync::ensure_access(profile_id)?;
     let udd = profile::user_data_dir(profile_id)?;
     let path = cookies_db_path(&udd);
     if !path.exists() {

@@ -3199,6 +3199,22 @@ fn team_invite_parse(code: String) -> Result<Value, String> {
     Ok(serde_json::json!({"url": url, "token": token}))
 }
 
+/// Leaves the team: sync is switched off and every profile that came from the team is deleted
+/// from this machine (see `cloud_sync::wipe_team_data`). A machine that runs the team's own server
+/// is refused — it holds the originals. Answers how many profiles were deleted.
+#[tauri::command]
+async fn team_leave() -> Result<usize, String> {
+    let mut s = settings::load().map_err(|e| e.to_string())?;
+    if s.server_host.token.as_deref().is_some_and(|t| !t.trim().is_empty()) {
+        return Err("Máy này là máy chủ của nhóm, nó giữ bản gốc — dùng “Tắt máy chủ” thay vì rời nhóm".into());
+    }
+    s.sync.enabled = false;
+    s.sync.server_url = None;
+    s.sync.token = None;
+    settings::save(&s).map_err(|e| e.to_string())?;
+    Ok(cloud_sync::wipe_team_data().await)
+}
+
 /// The last lines of the sync log, for the Team tab: what was pulled, what was made portable,
 /// what could not be restored — the answer to "why am I logged out on this machine".
 #[tauri::command]
@@ -3944,6 +3960,7 @@ pub fn run() {
             automation_sheet_reset,
             sync_log_tail,
             sync_push_all,
+            team_leave,
             automation_fleet,
             automation_fleet_window,
             automation_display,

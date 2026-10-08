@@ -82,6 +82,8 @@ pub async fn launch_profile_synced(
     // No-op unless Settings > Team Sync is configured; otherwise locks the
     // profile on the sync server and pulls its latest state down first.
     let t_start = std::time::Instant::now();
+    // A team profile is not opened by a machine that is no longer in the team.
+    crate::cloud_sync::ensure_access(profile_id)?;
     crate::cloud_sync::checkout(profile_id).await?;
     let t_sync = t_start.elapsed();
     let bin = resolve_binary()?;

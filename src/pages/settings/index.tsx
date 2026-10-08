@@ -6,10 +6,11 @@ import { DownloadIcon } from "../../shared/icons";
 import { Topbar } from "../../shared/ui/Topbar";
 import { CopyField } from "../../shared/ui/CopyField";
 import { toast } from "../../shared/model/toast";
+import { confirmModal } from "../../shared/model/confirm";
 import { withUtm } from "../../shared/lib/utils";
 import type { Settings, ApiInfo } from "../../entities/settings";
 import { HELPER_KINDS } from "../../entities/settings";
-import { settingsGet, settingsSave, settingsLoadError, apiInfo, apiRegenerateToken, mcpDownload } from "../../entities/settings";
+import { settingsGet, settingsSave, settingsLoadError, apiInfo, apiRegenerateToken, mcpDownload, teamLeave } from "../../entities/settings";
 import { DataRootCard } from "../../features/manage-profiles/ui/DataRootCard";
 import { useT, useLang, LANG_OPTIONS, type Lang } from "../../shared/i18n";
 import type { LicenseInfo } from "../../entities/license";
@@ -86,13 +87,25 @@ export function SettingsPage() {
   // click. Persist it at once and drop the cached role right away, or the
   // Nhân sự list (built from the old, still-saved token) keeps showing.
   const disconnect = async () => {
+    // Leaving the team takes its profiles with it: they belong to the team, not to this machine.
+    const ok = await confirmModal({
+      title: "Rời nhóm",
+      message: "Rời nhóm sẽ XOÁ khỏi máy này tất cả profile của nhóm đã tải về (dữ liệu trên server vẫn còn). Profile chỉ tạo riêng trên máy này không bị ảnh hưởng. Tham gia lại bằng mã mới sẽ tải về lại.",
+      buttons: [
+        { label: "Huỷ", value: false },
+        { label: "Rời nhóm và xoá", value: true, danger: true },
+      ],
+    });
+    if (!ok) return;
+    let removed = 0;
+    try { removed = await teamLeave(); }
+    catch (e) { toast.err(String(e)); return; }
     const next = { ...s, sync: { ...s.sync!, enabled: false, server_url: null, token: null } };
     setS(next);
-    try { await settingsSave(next); setSaved(JSON.stringify(next)); }
-    catch (e) { toast.err(String(e)); return; }
+    setSaved(JSON.stringify(next));
     useTeam.setState({ role: null, name: "", id: "", isServerAdmin: false, folderNames: null });
     try { localStorage.removeItem("hir.teamRole"); } catch { /* ignore */ }
-    toast.ok("Đã ngắt kết nối");
+    toast.ok(`Đã rời nhóm — đã xoá ${removed} profile của nhóm khỏi máy này`);
   };
 
   const TABS: { id: Tab; label: string }[] = [

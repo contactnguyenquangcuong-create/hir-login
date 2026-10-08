@@ -102,8 +102,11 @@ export function startTeamRole() {
   };
   void tick();
   void listen("team:kicked-out", () => {
-    toast.err("Tài khoản của bạn đã bị thu hồi quyền hoặc mã đã hết hiệu lực. Cần mã mới từ người cấp trên.");
+    toast.err("Tài khoản của bạn đã bị thu hồi quyền hoặc mã đã hết hiệu lực. Các profile của nhóm đã bị xoá khỏi máy này. Cần mã mới từ người cấp trên.");
     void useTeam.getState().refresh();
+  });
+  void listen<number>("team:wiped", (e) => {
+    toast.err(`Đã xoá ${e.payload} profile của nhóm khỏi máy này vì quyền truy cập đã bị thu hồi.`);
   });
   // A profile closed but its state (logins included) did not reach the server.
   // Never silent: the copy on this machine is kept and saved on the next close.

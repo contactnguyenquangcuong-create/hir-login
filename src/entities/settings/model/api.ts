@@ -38,6 +38,8 @@ export const teamSyncPull = () => invoke<number>("team_sync_pull");
 export const syncLogTail = (lines = 120) => invoke<string>("sync_log_tail", { lines });
 /** Sends every profile on this machine to the team now, login included. */
 export const syncPushAll = () => invoke<{ sent: number; skipped: number }>("sync_push_all");
+/** Leaves the team: sync off and every profile that came from the team deleted from this machine. */
+export const teamLeave = () => invoke<number>("team_leave");
 export const tailscaleStatus = () => invoke<{ installed: boolean; connected: boolean; ip: string | null }>("tailscale_status");
 export const autostartGet = () => invoke<boolean>("autostart_get");
 export const autostartSet = (enabled: boolean) => invoke<void>("autostart_set", { enabled });

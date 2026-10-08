@@ -576,6 +576,7 @@ pub struct ImportReport {
 /// holding only the account-carrying files — the same set the trash and team
 /// sync keep, never the cache.
 fn export_one(id: &str, stored: &StoredProfile, out_dir: &Path) -> Result<()> {
+    crate::cloud_sync::ensure_access(id)?;
     fs::create_dir_all(out_dir)?;
     fs::write(out_dir.join("profile.json"), serde_json::to_string_pretty(stored)?)?;
     let proxy = stored
