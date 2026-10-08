@@ -828,6 +828,21 @@ pub(crate) fn merge_sealed(into: &Path, from: &Path, kind: Sealed) -> Result<usi
     Ok(changed)
 }
 
+/// Of the sealed rows already in the database at `db` (written by this machine's own browser),
+/// how many can be opened with the key this launcher believes the browser uses: (looked at,
+/// opened). Looks at up to 300. `opened == 0` while `looked at > 0` means the assumption about
+/// the key is wrong on this machine, and no login written with it will ever be read.
+pub(crate) fn readable_rows(udd: &Path, db: &Path, kind: Sealed) -> Option<(usize, usize)> {
+    let (table, column) = kind.table_column();
+    let conn = rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    let crypt = Crypt::open(udd).ok()?;
+    let mut st = conn.prepare(&format!("SELECT {column} FROM {table} WHERE length({column}) > 3 LIMIT 300")).ok()?;
+    let blobs: Vec<Vec<u8>> = st.query_map([], |r| r.get::<_, Vec<u8>>(0)).ok()?.filter_map(|r| r.ok()).collect();
+    let sealed: Vec<&Vec<u8>> = blobs.iter().filter(|b| b.starts_with(b"v10")).collect();
+    let opened = sealed.iter().filter(|b| crypt.decrypt_blob(b, kind == Sealed::Cookies).is_some()).count();
+    Some((sealed.len(), opened))
+}
+
 /// How many rows the sealed database at `db` holds (`None` when it cannot be read).
 pub(crate) fn row_count(db: &Path, kind: Sealed) -> Option<i64> {
     let (table, _) = kind.table_column();

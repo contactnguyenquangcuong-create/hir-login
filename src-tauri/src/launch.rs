@@ -95,6 +95,8 @@ pub async fn launch_profile_synced(
         .as_deref()
         .and_then(|pid| proxy::get(pid).ok().flatten())
         .or_else(|| stored.meta.inline_proxy.clone());
+    // Whether this proxy was already checked before this open (for the launch log).
+    let was_verified = bound_proxy.as_ref().map(proxy::proxy_is_verified);
     // A proxy labelled HTTPS that really speaks plain HTTP is used as an HTTP proxy.
     let bound_proxy = match bound_proxy {
         Some(p) => Some(proxy::effective(&p).await),
@@ -442,8 +444,12 @@ pub async fn launch_profile_synced(
     // Where the time went before the browser even started — the answer to "why does opening a
     // profile take seconds" — is kept in the sync log so it can be read off a slow machine.
     let ms = |d: std::time::Duration| d.as_millis();
+    let proxy_note = bound_proxy
+        .as_ref()
+        .map(|p| format!("{} {}:{} ({})", p.kind.as_str(), p.host, p.port, if p.id.is_empty() { "not a saved proxy" } else if was_verified == Some(true) { "from the saved check" } else { "checked now" }))
+        .unwrap_or_else(|| "none".into());
     crate::cloud_sync::log_line(&format!(
-        "launch {profile_id}: ready to start the browser after {} ms — sync {} ms, proxy {} ms, UDP check {} ms, location lookup {} ms, the rest {} ms",
+        "launch {profile_id}: proxy {proxy_note}; ready to start the browser after {} ms — sync {} ms, proxy {} ms, UDP check {} ms, location lookup {} ms, the rest {} ms",
         ms(t_start.elapsed()),
         ms(t_sync),
         ms(t_proxy - t_sync),

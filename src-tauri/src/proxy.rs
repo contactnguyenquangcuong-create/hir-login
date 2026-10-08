@@ -682,21 +682,18 @@ enum Sniff {
     Silent,
 }
 
-/// Opens a connection, sends `payload` and returns what comes back first.
-async fn sniff(entry: &ProxyEntry, payload: &[u8]) -> Sniff {
+/// Opens a connection, sends `payload` and returns what comes back first, waiting up to `wait`.
+async fn sniff(entry: &ProxyEntry, payload: &[u8], wait: std::time::Duration) -> Sniff {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::time::{timeout, Duration};
-    let Ok(Ok(mut s)) = timeout(Duration::from_secs(5), tokio::net::TcpStream::connect((entry.host.as_str(), entry.port))).await else {
+    let Ok(Ok(mut s)) = timeout(Duration::from_secs(8), tokio::net::TcpStream::connect((entry.host.as_str(), entry.port))).await else {
         return Sniff::Unreachable;
     };
     if s.write_all(payload).await.is_err() {
         return Sniff::Silent;
     }
     let mut buf = [0u8; 16];
-    // A SOCKS5 server answers its greeting at once, and so does an HTTP proxy a CONNECT. An HTTP
-    // proxy that is handed a SOCKS greeting says nothing, so this wait is the whole cost of the
-    // first look at a proxy whose list labelled it wrongly — kept short for that reason.
-    match timeout(Duration::from_millis(2500), s.read(&mut buf)).await {
+    match timeout(wait, s.read(&mut buf)).await {
         Ok(Ok(n)) if n > 0 => Sniff::Reply(buf[..n].to_vec()),
         _ => Sniff::Silent,
     }
@@ -704,21 +701,38 @@ async fn sniff(entry: &ProxyEntry, payload: &[u8]) -> Sniff {
 
 /// The protocol `entry` really speaks: the declared one if it answers, else the other of
 /// SOCKS5 / plain HTTP if that answers, else `None`.
+///
+/// How long to wait depends on what silence means. A SOCKS5 server answers its greeting at
+/// once, and an HTTP proxy handed that greeting says nothing — so for the SOCKS question a short
+/// wait is right, and it is also the whole cost of the first look at a mislabelled proxy. For the
+/// HTTP question the wait must be long: a proxy that answers is the *positive* result, and cheap
+/// proxies take seconds to answer (one measured at 4–9 s a request). Waiting 2.5 s there made the
+/// verdict depend on how fast the proxy happened to be that moment — recognised one time, taken
+/// for dead the next, which is a proxy that works "sometimes".
 async fn detect_kind(entry: &ProxyEntry) -> Option<ProxyKind> {
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
     // Version 5, two methods offered: none (00) and username/password (02).
     const SOCKS_GREETING: &[u8] = &[0x05, 0x02, 0x00, 0x02];
-    const HTTP_CONNECT: &[u8] = b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n";
+    // The CONNECT carries the proxy's login when it has one: a proxy that wants to see who is
+    // asking answers (407) either way, but one that counts unauthenticated tries against an
+    // address would be counting these.
+    let mut http = String::from("CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n");
+    if !entry.username.is_empty() || !entry.password.is_empty() {
+        let creds = STANDARD.encode(format!("{}:{}", entry.username, entry.password));
+        http.push_str(&format!("Proxy-Authorization: Basic {creds}\r\n"));
+    }
+    http.push_str("\r\n");
     let order = if matches!(entry.kind, ProxyKind::Socks5) {
         [ProxyKind::Socks5, ProxyKind::Http]
     } else {
         [ProxyKind::Http, ProxyKind::Socks5]
     };
     for kind in order {
-        let (payload, is_it): (&[u8], fn(&[u8]) -> bool) = match kind {
-            ProxyKind::Socks5 => (SOCKS_GREETING, |b| b.first() == Some(&0x05)),
-            _ => (HTTP_CONNECT, |b| b.len() >= 5 && b[..5].eq_ignore_ascii_case(b"HTTP/")),
+        let (payload, wait, is_it): (&[u8], std::time::Duration, fn(&[u8]) -> bool) = match kind {
+            ProxyKind::Socks5 => (SOCKS_GREETING, std::time::Duration::from_millis(2500), |b| b.first() == Some(&0x05)),
+            _ => (http.as_bytes(), std::time::Duration::from_secs(10), |b| b.len() >= 5 && b[..5].eq_ignore_ascii_case(b"HTTP/")),
         };
-        match sniff(entry, payload).await {
+        match sniff(entry, payload, wait).await {
             Sniff::Unreachable => return None,
             Sniff::Reply(b) if is_it(&b) => return Some(kind),
             _ => {}
@@ -941,6 +955,11 @@ fn remember_udp(entry: &ProxyEntry, r: &Result<u128, String>) {
 /// nothing needs to be sent to it to open a profile.
 fn is_verified(entry: &ProxyEntry) -> bool {
     geo_record(entry).is_some()
+}
+
+/// `is_verified`, for the launch log.
+pub fn proxy_is_verified(entry: &ProxyEntry) -> bool {
+    is_verified(entry)
 }
 
 /// Checks the proxy again without making anyone wait: a profile opened on a record older than
@@ -1640,6 +1659,39 @@ mod effective_kind_tests {
             }
         }
         assert!(bad.is_empty(), "failed: {bad:?}");
+    }
+
+    /// The cheap proxies this is used with answer in seconds, not milliseconds. One that takes four
+    /// seconds to answer a CONNECT is still an HTTP proxy, and a list that called it SOCKS5 must not
+    /// leave it that way just because it was slow this time.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_slow_http_proxy_labelled_socks5_is_still_recognised_as_http() {
+        let l = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut c, _)) = l.accept().await else { break };
+                tokio::spawn(async move {
+                    let mut b = [0u8; 512];
+                    let n = c.read(&mut b).await.unwrap_or(0);
+                    if b[..n].starts_with(b"CONNECT") {
+                        // A slow node: the answer comes after four seconds, and carries a 407
+                        // when no login was sent, a 200 when it was.
+                        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+                        let ok = String::from_utf8_lossy(&b[..n]).contains("Proxy-Authorization: Basic");
+                        let reply: &[u8] = if ok { b"HTTP/1.1 200 Connection established\r\n\r\n" } else { b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n" };
+                        let _ = c.write_all(reply).await;
+                    } else {
+                        // The SOCKS greeting: not understood, so not answered.
+                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    }
+                });
+            }
+        });
+        let started = std::time::Instant::now();
+        let got = detect_kind(&entry(ProxyKind::Socks5, port)).await;
+        assert_eq!(got, Some(ProxyKind::Http), "slow is not dead");
+        assert!(started.elapsed() < std::time::Duration::from_secs(12), "{:?}", started.elapsed());
     }
 
     /// Reads the SOCKS greeting without a word, then answers an HTTP CONNECT on the next

@@ -665,6 +665,18 @@ fn install_portable(udd: &Path, dest_rel: &str, bytes: &[u8], kind: cookies::Sea
     fs::write(&tmp, bytes)?;
     let done = cookies::localize_file(udd, &tmp, kind).and_then(|sealed| {
         let here = cookies::row_count(&dest, kind).unwrap_or(0);
+        // Can the key this launcher assumes open what this machine's own browser wrote? If not,
+        // nothing sealed with it will ever be read here, whatever else is right.
+        if let Some((looked, opened)) = cookies::readable_rows(udd, &dest, kind) {
+            if looked > 0 {
+                let verdict = if opened == 0 {
+                    " — NONE of them: the browser here seals with a different key than the one assumed, so a login written by this launcher is never read"
+                } else {
+                    ""
+                };
+                slog!("{dest_rel}: of this machine's own {looked} sealed values, {opened} can be opened with the key assumed here{verdict}");
+            }
+        }
         let swapped = if here > 0 {
             // This machine already has a login of its own. It is merged with the incoming one,
             // not replaced by it: whichever of the two is more recent stays for each cookie, and
@@ -1889,6 +1901,7 @@ mod tests {
         cookies::import(id, &[ck("c_user", "from-B-newer"), ck("only_b", "b")]).unwrap();
         apply_bundle(id, &from_a).unwrap();
         let newer_here_wins = (value_of("c_user"), value_of("only_a"), value_of("only_b"));
+        let key_check = log_tail(30);
 
         // 2. The other way round: the incoming c_user is the newer one.
         make(&b);
@@ -1915,6 +1928,10 @@ mod tests {
         store::set_data_root(None);
         let _ = std::fs::remove_dir_all(&a);
         let _ = std::fs::remove_dir_all(&b);
+        assert!(
+            key_check.contains("of this machine's own 2 sealed values, 2 can be opened with the key assumed here") && !key_check.contains("NONE of them"),
+            "the log says the assumed key opens this machine's own cookies: {key_check}"
+        );
         assert_eq!(newer_here_wins.0.as_deref(), Some("from-B-newer"), "an older incoming cookie must not replace a newer one");
         assert_eq!(newer_here_wins.1.as_deref(), Some("a"), "a cookie only the incoming copy has is added");
         assert_eq!(newer_here_wins.2.as_deref(), Some("b"), "a cookie only this machine has is kept");
