@@ -138,7 +138,16 @@ struct StateItem {
     /// Signature of the bound proxy then; a different one now is an unsynced change.
     #[serde(default)]
     proxy: String,
+    /// What the login was restored by when this was recorded (`SYNC_FMT`; 0 from an older build).
+    /// Only a copy restored the current way may skip the download on the next open: one restored
+    /// by an earlier build may have the login in the wrong place or sealed with the wrong key, and
+    /// "nothing new on the server" would keep it that way.
+    #[serde(default)]
+    fmt: u32,
 }
+
+/// Bumped whenever the way a login is restored changes in a way old copies need to be redone.
+const SYNC_FMT: u32 = 2;
 
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct SyncState {
@@ -200,7 +209,7 @@ async fn mark_synced(id: &str) {
     let Some(row) = remote.into_iter().find(|r| r.id == id) else { return };
     if let Some(updated) = row.updated_at {
         update_state(|st| {
-            st.items.insert(id.to_string(), StateItem { remote: updated, at: unix_now(), at_ms: unix_now_ms(), proxy: proxy_signature(id) });
+            st.items.insert(id.to_string(), StateItem { remote: updated, at: unix_now(), at_ms: unix_now_ms(), proxy: proxy_signature(id), fmt: SYNC_FMT });
         });
     }
 }
@@ -684,6 +693,12 @@ fn install_portable(udd: &Path, dest_rel: &str, bytes: &[u8], kind: cookies::Sea
             // can therefore add what was missing and take nothing away.
             let merged = dest.with_extension("hir-merged");
             fs::copy(&dest, &merged)?;
+            // Rows here that this machine's key cannot open are dropped first (see `purge_unreadable`).
+            match cookies::purge_unreadable(udd, &merged, kind) {
+                Ok(0) => {}
+                Ok(n) => slog!("{dest_rel}: {n} of this machine's own values could not be opened with the key used here (sealed by another key) and were dropped before merging"),
+                Err(e) => slog!("{dest_rel}: could not check this machine's own values: {e:#}"),
+            }
             let result = cookies::merge_sealed(&merged, &tmp, kind);
             let _ = fs::remove_file(&tmp);
             match result {
@@ -867,7 +882,7 @@ pub async fn checkout(profile_id: &str) -> Result<()> {
         .items
         .get(profile_id)
         .filter(|k| {
-            if keep_session || k.at_ms == 0 {
+            if keep_session || k.at_ms == 0 || k.fmt != SYNC_FMT {
                 return false;
             }
             let newest = local_data_time_ms(profile_id);
@@ -965,7 +980,7 @@ pub async fn checkout(profile_id: &str) -> Result<()> {
             Some(v) => {
                 let (id, v) = (profile_id.to_string(), v.clone());
                 update_state(|st| {
-                    st.items.insert(id.clone(), StateItem { remote: v, at: unix_now(), at_ms: unix_now_ms(), proxy: proxy_signature(&id) });
+                    st.items.insert(id.clone(), StateItem { remote: v, at: unix_now(), at_ms: unix_now_ms(), proxy: proxy_signature(&id), fmt: SYNC_FMT });
                 });
             }
             // An older server does not: look it up, but not while the person waits for the browser.
@@ -1506,7 +1521,7 @@ pub async fn sync_round() -> Result<usize> {
                 }
             }
             if let Some(u) = r.updated_at.clone() {
-                update_state(|st| { st.items.insert(id.to_string(), StateItem { remote: u, at: unix_now(), at_ms: 0, proxy: String::new() }); });
+                update_state(|st| { st.items.insert(id.to_string(), StateItem { remote: u, at: unix_now(), at_ms: 0, proxy: String::new(), fmt: SYNC_FMT }); });
             }
             continue;
         }
@@ -1539,7 +1554,7 @@ pub async fn sync_round() -> Result<usize> {
             // Existed before auto-sync: adopt the server's current version as the
             // baseline rather than overwriting anything.
             if let Some(u) = r.updated_at.clone() {
-                update_state(|st| { st.items.insert(id.to_string(), StateItem { remote: u, at: unix_now(), at_ms: 0, proxy: proxy_signature(id) }); });
+                update_state(|st| { st.items.insert(id.to_string(), StateItem { remote: u, at: unix_now(), at_ms: 0, proxy: proxy_signature(id), fmt: SYNC_FMT }); });
             }
             continue;
         };
@@ -1937,6 +1952,78 @@ mod tests {
         assert_eq!(newer_here_wins.2.as_deref(), Some("b"), "a cookie only this machine has is kept");
         assert_eq!(newer_incoming_wins.as_deref(), Some("from-A-newer"), "a newer incoming cookie does replace an older one");
         assert_eq!(after_empty.as_deref(), Some("from-A-newer"), "an empty login takes nothing away");
+    }
+
+    /// A row this machine's key cannot open (sealed by another key: what a Mac browser writes with
+    /// its Keychain key, before it is told to use the fixed one) used to win the merge whenever it
+    /// was the newer, and the cookie that could be opened never got in. Such rows are dropped first.
+    /// (Only meaningful where keys differ from one data folder to the next: Windows.)
+    #[cfg(windows)]
+    #[test]
+    fn a_newer_row_this_machine_cannot_open_does_not_block_the_one_that_arrives() {
+        let _g = TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let a = std::env::temp_dir().join(format!("hir-purge-a-{}", uuid::Uuid::new_v4()));
+        let b = std::env::temp_dir().join(format!("hir-purge-b-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let id = "purge-1";
+        let cookie: cookies::Cookie = serde_json::from_value(serde_json::json!({
+            "domain": ".facebook.com", "name": "c_user", "value": "100555", "path": "/", "expires": 1893456000.0, "secure": true
+        })).unwrap();
+
+        // The machine that is logged in; its raw (sealed with ITS key) database is kept aside.
+        store::set_data_root(Some(a.clone()));
+        let mut st = crate::profile::StoredProfile::default();
+        st.meta.id = id.to_string();
+        crate::profile::save_raw(&mut st).unwrap();
+        cookies::import(id, &[cookie]).unwrap();
+        let udd_a = store::user_data_root().unwrap().join(id);
+        let foreign_db = std::fs::read(cookies::cookie_db(&udd_a)).unwrap();
+        let bundle = build_bundle(id).unwrap();
+
+        // This machine: the same cookie, same age, but sealed with a key that is not this machine's.
+        store::set_data_root(Some(b.clone()));
+        let mut st_b = crate::profile::StoredProfile::default();
+        st_b.meta.id = id.to_string();
+        crate::profile::save_raw(&mut st_b).unwrap();
+        let live = store::user_data_root().unwrap().join(id).join("Default/Network/Cookies");
+        std::fs::create_dir_all(live.parent().unwrap()).unwrap();
+        std::fs::write(&live, &foreign_db).unwrap();
+
+        apply_bundle(id, &bundle).unwrap();
+        let got = cookies::export(id).unwrap().into_iter().find(|c| c.name == "c_user").map(|c| c.value);
+        let log = log_tail(30);
+
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+        assert_eq!(got.as_deref(), Some("100555"), "the cookie that arrives must be the one that can be read: {log}");
+        assert!(log.contains("could not be opened with the key used here"), "and the log says what was dropped: {log}");
+    }
+
+    /// A copy that was restored by an earlier build may have its login in the wrong place or sealed
+    /// with the wrong key. "Nothing new on the server" must not keep it that way: the first open after
+    /// the upgrade takes the full copy once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_copy_restored_by_an_older_build_is_pulled_in_full_once_before_it_may_be_skipped() {
+        with_synced_profile(|_base, _token, cookies| async move {
+            checkout("sess-1").await.expect("open");
+            std::fs::write(&cookies, "logged-in").unwrap();
+            checkin("sess-1").await.expect("close");
+            tokio::time::sleep(Duration::from_millis(30)).await;
+
+            // As written by a build before SYNC_FMT existed.
+            update_state(|st| { st.items.get_mut("sess-1").unwrap().fmt = 0; });
+            checkout("sess-1").await.expect("reopen");
+            let last = log_tail(1);
+            assert!(last.contains("download") && !last.contains("already up to date"), "{last}");
+            checkin("sess-1").await.expect("close");
+            tokio::time::sleep(Duration::from_millis(30)).await;
+
+            // Recorded the current way, it may skip again.
+            checkout("sess-1").await.expect("reopen again");
+            assert!(log_tail(1).contains("already up to date"), "{}", log_tail(1));
+        }).await;
     }
 
     /// "Why am I logged out on this machine?" has an answer in the sync log: how many cookies a

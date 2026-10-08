@@ -224,6 +224,16 @@ pub async fn launch_profile_synced(
         cmd.arg(format!("--shardx-profile-pill-color={c}"));
     }
     cmd.arg("--no-first-run");
+    // On a Mac the browser seals cookies and saved passwords with a key it gets from the login
+    // Keychain ("Chromium Safe Storage") — different on every machine, so nothing the launcher
+    // writes into a profile (a login arriving from another machine) can ever be opened by it, and
+    // a profile logged in on one Mac is logged out on the next. With this switch the key is the
+    // same fixed one everywhere, which is the key the launcher seals with; it also ends the
+    // Keychain prompts. (Where the engine already behaves this way the switch changes nothing.)
+    #[cfg(target_os = "macos")]
+    {
+        cmd.arg("--use-mock-keychain");
+    }
 
     // Extensions from the library. Chromium loads only what
     // --disable-extensions-except allows, so the two lists have to match.

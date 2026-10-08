@@ -843,6 +843,33 @@ pub(crate) fn readable_rows(udd: &Path, db: &Path, kind: Sealed) -> Option<(usiz
     Some((sealed.len(), opened))
 }
 
+/// Deletes the sealed rows of the database at `db` that this machine's key cannot open, and
+/// returns how many. Such a row is no use to anyone: the browser here will not read it either, and
+/// it only gets in the way of a good one arriving — a merge keeps whichever of two rows is newer,
+/// and a newer row that cannot be opened would beat the one that can.
+pub(crate) fn purge_unreadable(udd: &Path, db: &Path, kind: Sealed) -> Result<usize> {
+    let (table, column) = kind.table_column();
+    let crypt = Crypt::open(udd)?;
+    let conn = rusqlite::Connection::open(db).with_context(|| format!("open {}", db.display()))?;
+    let rows: Vec<(i64, Vec<u8>)> = {
+        let mut st = conn.prepare(&format!("SELECT rowid, {column} FROM {table}"))?;
+        let it = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?;
+        it.filter_map(|r| r.ok()).collect()
+    };
+    let mut gone = 0;
+    for (rowid, blob) in rows {
+        // Empty or stored in the clear: not sealed, so nothing to be unable to open.
+        if !blob.starts_with(b"v10") {
+            continue;
+        }
+        if crypt.decrypt_blob(&blob, kind == Sealed::Cookies).is_none() {
+            conn.execute(&format!("DELETE FROM {table} WHERE rowid = ?1"), [rowid])?;
+            gone += 1;
+        }
+    }
+    Ok(gone)
+}
+
 /// How many rows the sealed database at `db` holds (`None` when it cannot be read).
 pub(crate) fn row_count(db: &Path, kind: Sealed) -> Option<i64> {
     let (table, _) = kind.table_column();
