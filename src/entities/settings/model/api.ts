@@ -34,6 +34,10 @@ export const teamInviteGenerate = (serverUrl: string, token: string) => invoke<s
 export const teamInviteGenerateWithAuth = (serverUrl: string, token: string, authKey: string) => invoke<string>("team_invite_generate_with_auth", { serverUrl, token, authKey });
 export const teamInviteJoin = (code: string) => invoke<{ url: string; token: string }>("team_invite_join", { code });
 export const teamSyncPull = () => invoke<number>("team_sync_pull");
+/** The last lines of the sync log: what was pulled, made portable, restored or could not be. */
+export const syncLogTail = (lines = 120) => invoke<string>("sync_log_tail", { lines });
+/** Sends every profile on this machine to the team now, login included. */
+export const syncPushAll = () => invoke<{ sent: number; skipped: number }>("sync_push_all");
 export const tailscaleStatus = () => invoke<{ installed: boolean; connected: boolean; ip: string | null }>("tailscale_status");
 export const autostartGet = () => invoke<boolean>("autostart_get");
 export const autostartSet = (enabled: boolean) => invoke<void>("autostart_set", { enabled });

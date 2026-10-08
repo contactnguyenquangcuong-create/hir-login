@@ -18,6 +18,50 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::time::Duration;
 
+// ---- the sync log ----
+//
+// What the sync did, in a file a person can read. A packaged app has no console, so a sync that
+// quietly restored nothing (a login that did not come across, say) left no trace anywhere.
+
+/// `sync.log` beside the settings. Kept short: past 400 KB the older half goes.
+fn sync_log_path() -> Option<std::path::PathBuf> {
+    store::user_files_root().ok().map(|r| r.join("sync.log"))
+}
+
+fn sync_log(line: &str) {
+    eprintln!("[sync] {line}");
+    let Some(path) = sync_log_path() else { return };
+    static LOCK: Mutex<()> = Mutex::new(());
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if fs::metadata(&path).map(|m| m.len() > 400_000).unwrap_or(false) {
+        if let Ok(text) = fs::read_to_string(&path) {
+            let keep: String = text.chars().skip(text.chars().count() / 2).collect();
+            let keep = keep.split_once('\n').map(|(_, rest)| rest.to_string()).unwrap_or(keep);
+            let _ = fs::write(&path, keep);
+        }
+    }
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(f, "{} {line}", crate::localtime::now_local());
+    }
+}
+
+/// One line into the sync log from outside this module (the launch timings).
+pub(crate) fn log_line(line: &str) {
+    sync_log(line);
+}
+
+macro_rules! slog {
+    ($($arg:tt)*) => { sync_log(&format!($($arg)*)) };
+}
+
+/// The last `lines` lines of the sync log, newest last. Empty when nothing was logged yet.
+pub fn log_tail(lines: usize) -> String {
+    let Some(path) = sync_log_path() else { return String::new() };
+    let text = fs::read_to_string(path).unwrap_or_default();
+    let all: Vec<&str> = text.lines().collect();
+    all[all.len().saturating_sub(lines)..].join("\n")
+}
+
 // ---- activity + state ----
 
 use std::collections::HashMap;
@@ -87,6 +131,10 @@ struct StateItem {
     remote: String,
     /// Unix seconds of that moment; a local edit newer than this is unsynced.
     at: u64,
+    /// The same moment in milliseconds (0 in state written by an older build). Whole seconds
+    /// cannot tell "changed just after the sync" from "unchanged since it".
+    #[serde(default)]
+    at_ms: u64,
     /// Signature of the bound proxy then; a different one now is an unsynced change.
     #[serde(default)]
     proxy: String,
@@ -132,6 +180,13 @@ fn update_state(f: impl FnOnce(&mut SyncState)) {
     }
 }
 
+fn unix_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -145,7 +200,7 @@ async fn mark_synced(id: &str) {
     let Some(row) = remote.into_iter().find(|r| r.id == id) else { return };
     if let Some(updated) = row.updated_at {
         update_state(|st| {
-            st.items.insert(id.to_string(), StateItem { remote: updated, at: unix_now(), proxy: proxy_signature(id) });
+            st.items.insert(id.to_string(), StateItem { remote: updated, at: unix_now(), at_ms: unix_now_ms(), proxy: proxy_signature(id) });
         });
     }
 }
@@ -382,11 +437,17 @@ fn build_bundle(id: &str) -> Result<Vec<u8>> {
                     continue;
                 }
                 match cookies::portable_copy(&udd, &src, *kind) {
-                    Ok(bytes) => {
+                    Ok((bytes, st)) => {
                         zip.start_file(*name, opts)?;
                         zip.write_all(&bytes)?;
+                        let note = if st.dropped > 0 && st.portable == 0 {
+                            " — NONE could be opened with this machine's key, so no login travels"
+                        } else {
+                            ""
+                        };
+                        slog!("{id}: {name}: {} rows, {} made portable, {} dropped{note}", st.rows, st.portable, st.dropped);
                     }
-                    Err(e) => eprintln!("[sync] {id}: could not prepare {rel} for another machine: {e:#}"),
+                    Err(e) => slog!("{id}: could not prepare {rel} for another machine: {e:#}"),
                 }
             }
         }
@@ -479,6 +540,8 @@ fn apply_bundle_with(id: &str, bytes: &[u8], keep_local_session: bool) -> Result
     let mut proxy_in_bundle: Option<Option<crate::proxy::ProxyEntry>> = None;
     // extension id -> (relative path, bytes) of every file the bundle carries for it
     let mut bundled_ext: HashMap<String, Vec<(String, Vec<u8>)>> = HashMap::new();
+    // The portable files this bundle carried (cookies, saved passwords), by name.
+    let mut saw_portable: Vec<String> = Vec::new();
     for i in 0..zip.len() {
         let mut f = zip.by_index(i)?;
         let Some(rel) = f.enclosed_name() else { continue };
@@ -530,9 +593,11 @@ fn apply_bundle_with(id: &str, bytes: &[u8], keep_local_session: bool) -> Result
         }
         if let Some((dest, _, kind)) = SEALED.iter().find(|(_, name, _)| *name == rel_str).map(|(d, n, k)| (*d, *n, *k)) {
             // A login travelling as a portable copy: seal it with this machine's key, then put it in place.
+            saw_portable.push(rel_str.clone());
             if !keep_local_session {
-                if let Err(e) = install_portable(&udd, dest, &buf, kind) {
-                    eprintln!("[sync] {id}: could not restore {dest}: {e:#}");
+                match install_portable(&udd, dest, &buf, kind) {
+                    Ok(n) => slog!("{id}: restored {dest}: {n} values sealed for this machine"),
+                    Err(e) => slog!("{id}: could not restore {dest}: {e:#}"),
                 }
             }
             continue;
@@ -548,6 +613,11 @@ fn apply_bundle_with(id: &str, bytes: &[u8], keep_local_session: bool) -> Result
             fs::create_dir_all(parent)?;
         }
         fs::write(out, buf)?;
+    }
+    if keep_local_session {
+        slog!("{id}: kept this machine's own login (its last close had not reached the server)");
+    } else if !saw_portable.iter().any(|n| n == "portable/Cookies") {
+        slog!("{id}: this bundle carries no portable cookies — it was made by an older version, or the profile had none — so the login is NOT restored here. Open and close the profile on the machine that is logged in, or use \"Đẩy lại đăng nhập\" there");
     }
     install_bundled_extensions(bundled_ext);
     // A bundle from an older build may carry random-id extensions; fold them into
@@ -577,13 +647,14 @@ fn apply_bundle_with(id: &str, bytes: &[u8], keep_local_session: bool) -> Result
 }
 
 /// Seals a portable copy with this machine's key and puts it where the browser expects it.
-fn install_portable(udd: &Path, dest_rel: &str, bytes: &[u8], kind: cookies::Sealed) -> Result<()> {
-    // A cookie database lives at Network/Cookies on current engines. Follow wherever this
-    // profile already keeps one; on a machine that has never opened it, use the engine's own
-    // place — the old Default/Cookies would not be read, nor migrated.
+fn install_portable(udd: &Path, dest_rel: &str, bytes: &[u8], kind: cookies::Sealed) -> Result<usize> {
+    // Current engines read cookies from Network/Cookies and from nowhere else. A profile can
+    // also carry the old Default/Cookies beside it (a Mac profile had 5 stale rows there and 76
+    // live ones in Network/Cookies): writing into whichever file existed first put the restored
+    // login where the browser never looks. So it always goes to the live place, and any old file
+    // is left exactly as it is.
     let dest = if kind == cookies::Sealed::Cookies {
-        let existing = cookies::cookie_db(udd);
-        if existing.exists() { existing } else { udd.join("Default/Network/Cookies") }
+        udd.join("Default/Network/Cookies")
     } else {
         udd.join(dest_rel)
     };
@@ -592,18 +663,43 @@ fn install_portable(udd: &Path, dest_rel: &str, bytes: &[u8], kind: cookies::Sea
     }
     let tmp = dest.with_extension("hir-incoming");
     fs::write(&tmp, bytes)?;
-    let done = cookies::localize_file(udd, &tmp, kind).and_then(|n| {
+    let done = cookies::localize_file(udd, &tmp, kind).and_then(|sealed| {
+        let here = cookies::row_count(&dest, kind).unwrap_or(0);
+        let swapped = if here > 0 {
+            // This machine already has a login of its own. It is merged with the incoming one,
+            // not replaced by it: whichever of the two is more recent stays for each cookie, and
+            // nothing this machine has is lost. A copy pushed by a machine that had gone logged out
+            // can therefore add what was missing and take nothing away.
+            let merged = dest.with_extension("hir-merged");
+            fs::copy(&dest, &merged)?;
+            let result = cookies::merge_sealed(&merged, &tmp, kind);
+            let _ = fs::remove_file(&tmp);
+            match result {
+                Ok(changed) => {
+                    slog!("{dest_rel}: merged with this machine's own — {changed} of the incoming values were new or newer, the {here} already here were kept where they were as recent");
+                    Ok(merged)
+                }
+                Err(e) => {
+                    let _ = fs::remove_file(&merged);
+                    Err(e)
+                }
+            }
+        } else {
+            Ok(tmp.clone())
+        };
+        let source = swapped?;
         for suffix in ["-journal", "-wal", "-shm"] {
             let mut o = dest.as_os_str().to_owned();
             o.push(suffix);
             let _ = fs::remove_file(std::path::PathBuf::from(o));
         }
-        crate::winfs::rename_replace(&tmp, &dest).map(|_| n).map_err(Into::into)
+        crate::winfs::rename_replace(&source, &dest).map(|_| sealed).map_err(Into::into)
     });
     if done.is_err() {
         let _ = fs::remove_file(&tmp);
+        let _ = fs::remove_file(dest.with_extension("hir-merged"));
     }
-    done.map(|_| ())
+    done
 }
 
 /// Puts the extensions that came in a bundle into this machine's extension
@@ -710,7 +806,7 @@ fn keep_lock_alive(profile_id: &str, holder: &str) {
             }
             let Ok(Some((_cfg, base, token))) = active_config() else { break };
             if let Err(e) = relock(&client(), &base, &token, &id, &holder).await {
-                eprintln!("[sync] renewing the lock on {id}: {e:#}");
+                slog!("renewing the lock on {id}: {e:#}");
             }
         }
         if let Ok(mut s) = set.lock() {
@@ -735,18 +831,53 @@ fn report_checkin_failed(profile_id: &str, err: &anyhow::Error) {
 /// no-op when sync isn't configured.
 pub async fn checkout(profile_id: &str) -> Result<()> {
     let Some((cfg, base, token)) = active_config()? else { return Ok(()) };
+    let started = std::time::Instant::now();
     let _busy = begin_wait(profile_id, "pull").await;
     let holder = device_name(&cfg);
     let c = client();
 
-    let resp = c
+    // The last close never reached the server, so this machine's browser data is
+    // the newer copy. Pulling it would replace it — the login included — with the
+    // older one still on the server, so the session stays; the next close saves
+    // it. The configuration still comes from the server: whoever may change it
+    // (an admin switching a phone profile to desktop, say) must reach this
+    // machine even when it cannot push its own version back.
+    let state = load_state();
+    let keep_session = state.pending.contains(profile_id);
+    if keep_session {
+        slog!("{profile_id}: last close was not saved to the server — keeping this machine's session");
+    }
+
+    // The version this machine last synced, when nothing it would send has changed since:
+    // then the server need not send the bundle again (it answers 304 if it still holds that
+    // version). Reopening a profile on the machine that closed it last costs one round trip.
+    let unchanged_since: Option<String> = state
+        .items
+        .get(profile_id)
+        .filter(|k| {
+            if keep_session || k.at_ms == 0 {
+                return false;
+            }
+            let newest = local_data_time_ms(profile_id);
+            newest > 0 && newest <= k.at_ms
+        })
+        .map(|k| k.remote.clone());
+
+    // The lock and the bundle are asked for together: they are independent until the lock is
+    // refused, and asking one after the other put a whole round trip to a far-away server
+    // between "open" and the browser appearing. A refused lock simply drops the bundle.
+    let lock_req = c
         .post(format!("{base}/profiles/{profile_id}/lock"))
         .bearer_auth(&token)
         .json(&serde_json::json!({ "holder": holder }))
         .timeout(Duration::from_secs(25))
-        .send()
-        .await
-        .context("contact sync server")?;
+        .send();
+    let mut bundle_req = c.get(format!("{base}/profiles/{profile_id}/bundle")).bearer_auth(&token);
+    if let Some(v) = &unchanged_since {
+        bundle_req = bundle_req.header("If-None-Match", format!("\"{v}\""));
+    }
+    let (lock_res, bundle_res) = tokio::join!(lock_req, bundle_req.send());
+    let resp = lock_res.context("contact sync server")?;
 
     if resp.status().as_u16() == 409 {
         let body: serde_json::Value = resp.json().await.unwrap_or_default();
@@ -757,43 +888,127 @@ pub async fn checkout(profile_id: &str) -> Result<()> {
         return Err(denied(resp, "lock request").await);
     }
     keep_lock_alive(profile_id, &holder);
+    // A newer server says which version of the bundle this lock sits on.
+    let lock_version: Option<String> = resp
+        .json::<serde_json::Value>()
+        .await
+        .ok()
+        .and_then(|v| v.get("updatedAt").and_then(|x| x.as_str().map(String::from)))
+        .filter(|s| !s.is_empty());
+    let lock_ms = started.elapsed().as_millis();
 
-    // The last close never reached the server, so this machine's browser data is
-    // the newer copy. Pulling it would replace it — the login included — with the
-    // older one still on the server, so the session stays; the next close saves
-    // it. The configuration still comes from the server: whoever may change it
-    // (an admin switching a phone profile to desktop, say) must reach this
-    // machine even when it cannot push its own version back.
-    let keep_session = load_state().pending.contains(profile_id);
-    if keep_session {
-        eprintln!("[sync] {profile_id}: last close was not saved to the server — keeping this machine's session");
+    let bundle = bundle_res.context("download profile bundle")?;
+    let status = bundle.status();
+
+    if status.as_u16() == 304 {
+        slog!("{profile_id}: opened here in {} ms — already up to date with the server, nothing downloaded", started.elapsed().as_millis());
+        return Ok(());
     }
 
-    let resp = c
-        .get(format!("{base}/profiles/{profile_id}/bundle"))
-        .bearer_auth(&token)
-        .send()
-        .await
-        .context("download profile bundle")?;
-
-    if resp.status().is_success() {
-        let bytes = resp.bytes().await.context("read bundle body")?;
+    let mut download_ms = 0u128;
+    let mut apply_ms = 0u128;
+    let mut kb = 0usize;
+    if status.is_success() {
+        let etag = bundle
+            .headers()
+            .get("etag")
+            .and_then(|h| h.to_str().ok())
+            .map(|s| s.trim().trim_matches('"').to_string());
+        let t = std::time::Instant::now();
+        let mut bytes = bundle.bytes().await.context("read bundle body")?;
+        // A push that landed between the two requests would leave the lock on one version and
+        // the bundle on another. Both say which they are; if they differ, take the bundle again.
+        if let (Some(lv), Some(ev)) = (&lock_version, &etag) {
+            if lv != ev {
+                slog!("{profile_id}: the bundle changed while it was being fetched ({ev} → {lv}) — fetching it again");
+                let again = c
+                    .get(format!("{base}/profiles/{profile_id}/bundle"))
+                    .bearer_auth(&token)
+                    .send()
+                    .await
+                    .context("download profile bundle")?;
+                if again.status().is_success() {
+                    bytes = again.bytes().await.context("read bundle body")?;
+                }
+            }
+        }
+        download_ms = t.elapsed().as_millis();
+        kb = bytes.len() / 1024;
+        let t = std::time::Instant::now();
         if let Err(e) = apply_bundle_with(profile_id, &bytes, keep_session) {
             // Best effort: don't strand the lock on a corrupt bundle.
             let _ = unlock(&base, &token, profile_id, &holder).await;
             return Err(e.context("apply downloaded bundle"));
         }
-    } else if resp.status().as_u16() != 404 {
+        apply_ms = t.elapsed().as_millis();
+    } else if status.as_u16() != 404 {
         let _ = unlock(&base, &token, profile_id, &holder).await;
-        return Err(denied(resp, "download").await);
+        return Err(denied(bundle, "download").await);
     }
     // 404 = no remote copy yet (first time this profile syncs) — fine, the
     // local copy becomes the first version on checkin.
     if !keep_session {
-        mark_synced(profile_id).await;
+        match &lock_version {
+            // The server told us the version: record it now, no further question asked.
+            Some(v) => {
+                let (id, v) = (profile_id.to_string(), v.clone());
+                update_state(|st| {
+                    st.items.insert(id.clone(), StateItem { remote: v, at: unix_now(), at_ms: unix_now_ms(), proxy: proxy_signature(&id) });
+                });
+            }
+            // An older server does not: look it up, but not while the person waits for the browser.
+            None => {
+                let id = profile_id.to_string();
+                tokio::spawn(async move { mark_synced(&id).await });
+            }
+        }
     }
+    slog!(
+        "{profile_id}: opened here in {} ms — lock {lock_ms} ms, download {kb} KB in {download_ms} ms, apply {apply_ms} ms",
+        started.elapsed().as_millis()
+    );
 
     Ok(())
+}
+
+/// The newest modification time, in milliseconds, of anything a bundle of this profile would
+/// carry (the synced folders and files, and the profile's own settings file). Compared with the
+/// moment of the last sync it answers "has this machine changed the profile since?".
+fn local_data_time_ms(id: &str) -> u64 {
+    fn ms(m: &fs::Metadata) -> u64 {
+        m.modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+    fn walk(p: &Path, newest: &mut u64, seen: &mut usize) {
+        let Ok(m) = fs::metadata(p) else { return };
+        *newest = (*newest).max(ms(&m));
+        if m.is_dir() && *seen < 20_000 {
+            if let Ok(rd) = fs::read_dir(p) {
+                for e in rd.flatten() {
+                    *seen += 1;
+                    walk(&e.path(), newest, seen);
+                }
+            }
+        }
+    }
+    let Ok(root) = store::user_data_root() else { return 0 };
+    let udd = root.join(id);
+    let (mut newest, mut seen) = (0u64, 0usize);
+    for rel in synced_paths() {
+        walk(&udd.join(rel), &mut newest, &mut seen);
+    }
+    if newest == 0 {
+        return 0; // nothing of it here at all: not "unchanged", simply absent
+    }
+    if let Ok(dir) = store::profiles_dir() {
+        if let Ok(m) = fs::metadata(dir.join(format!("{id}.json"))) {
+            newest = newest.max(ms(&m));
+        }
+    }
+    newest
 }
 
 /// Call after the browser exits. Pushes the current bundle up and releases
@@ -843,6 +1058,44 @@ pub async fn checkin(profile_id: &str) -> Result<()> {
         slim_local_copy(profile_id);
     }
     Ok(())
+}
+
+/// Sends every profile on this machine to the server now, login included. For the machine that
+/// holds the logged-in copies, after an update changed what travels: a profile is otherwise only
+/// sent when it is opened and closed here or edited, so the server can keep holding bundles
+/// made before the login could cross between machines — which arrive elsewhere logged out.
+/// Returns (sent, skipped); a profile that is running here, busy, or locked by another machine
+/// is skipped, not failed.
+pub async fn push_all_local() -> Result<(usize, usize)> {
+    let Some((cfg, base, token)) = active_config()? else {
+        anyhow::bail!("Team Sync is not switched on on this machine");
+    };
+    let holder = device_name(&cfg);
+    let ids: Vec<String> = crate::profile::list_all()?.into_iter().map(|p| p.id).collect();
+    let (mut sent, mut skipped) = (0usize, 0usize);
+    let mut touched: Vec<String> = Vec::new();
+    slog!("push all: {} profiles on this machine", ids.len());
+    for id in ids {
+        if crate::process::Tracker::shared().is_running(&id) {
+            slog!("push all: {id} is running here — skipped");
+            skipped += 1;
+            continue;
+        }
+        let Some(_guard) = try_begin(&id, "push") else { skipped += 1; continue };
+        match push_profile(&base, &token, &holder, &id).await {
+            Ok(true) => { sent += 1; touched.push(id.clone()); }
+            Ok(false) => { slog!("push all: {id} is locked by another machine — skipped"); skipped += 1; }
+            Err(e) => { slog!("push all: {id}: {e:#}"); skipped += 1; }
+        }
+    }
+    for id in &touched {
+        mark_synced(id).await;
+    }
+    if sent > 0 {
+        GENERATION.fetch_add(1, Ordering::Relaxed);
+    }
+    slog!("push all: {sent} sent, {skipped} skipped");
+    Ok((sent, skipped))
 }
 
 /// Chromium cache directories that are safe to delete: none of them carries
@@ -922,12 +1175,12 @@ pub async fn pull_missing() -> Result<usize> {
             .await
             .context("download bundle")?;
         if !resp.status().is_success() {
-            eprintln!("[sync] pull {} failed: {}", r.id, resp.status());
+            slog!("pull {} failed: {}", r.id, resp.status());
             continue;
         }
         let bytes = resp.bytes().await.context("read bundle")?;
         if let Err(e) = apply_bundle(&r.id, &bytes) {
-            eprintln!("[sync] apply {} failed: {e}", r.id);
+            slog!("apply {} failed: {e}", r.id);
             continue;
         }
         pulled += 1;
@@ -1011,8 +1264,8 @@ async fn report_deleted(id: String) {
         .await;
     match res {
         Ok(r) if r.status().is_success() => mark_synced(&id).await,
-        Ok(r) => eprintln!("[sync] delete report {id}: {}", r.status()),
-        Err(e) => eprintln!("[sync] delete report {id}: {e}"),
+        Ok(r) => slog!("delete report {id}: {}", r.status()),
+        Err(e) => slog!("delete report {id}: {e}"),
     }
 }
 
@@ -1035,7 +1288,7 @@ pub fn on_restored(id: &str) {
         let Some(_guard) = try_begin(&id, "push") else { return };
         match push_profile(&base, &token, &holder, &id).await {
             Ok(_) => mark_synced(&id).await,
-            Err(e) => eprintln!("[sync] republish {id}: {e:#}"),
+            Err(e) => slog!("republish {id}: {e:#}"),
         }
     });
 }
@@ -1098,7 +1351,7 @@ async fn sync_library(base: &str, token: &str) -> usize {
         for id in crate::fingerprints::custom_ids().iter().filter(|id| !remote.contains(*id)) {
             if let Ok(bytes) = fs::read(dir.join(format!("{id}.json"))) {
                 if let Err(e) = library_put(base, token, "fingerprints", id, bytes).await {
-                    eprintln!("[sync] fingerprint {id} up: {e:#}");
+                    slog!("fingerprint {id} up: {e:#}");
                 }
             }
         }
@@ -1114,7 +1367,7 @@ async fn sync_library(base: &str, token: &str) -> usize {
                         installed += 1;
                     }
                 }
-                Err(e) => eprintln!("[sync] fingerprint {id} down: {e:#}"),
+                Err(e) => slog!("fingerprint {id} down: {e:#}"),
             }
         }
     }
@@ -1237,11 +1490,11 @@ pub async fn sync_round() -> Result<usize> {
                 }
                 match res {
                     Ok(_) => changed += 1,
-                    Err(e) => eprintln!("[sync] trash {id}: {e:#}"),
+                    Err(e) => slog!("trash {id}: {e:#}"),
                 }
             }
             if let Some(u) = r.updated_at.clone() {
-                update_state(|st| { st.items.insert(id.to_string(), StateItem { remote: u, at: unix_now(), proxy: String::new() }); });
+                update_state(|st| { st.items.insert(id.to_string(), StateItem { remote: u, at: unix_now(), at_ms: 0, proxy: String::new() }); });
             }
             continue;
         }
@@ -1261,10 +1514,11 @@ pub async fn sync_round() -> Result<usize> {
                     continue;
                 }
             }
+            slog!("round: {id} is not on this machine yet — pulling it");
             match pull_profile(&base, &token, id).await {
                 Ok(true) => { changed += 1; touched.push(id.to_string()); }
                 Ok(false) => {}
-                Err(e) => eprintln!("[sync] pull {id}: {e:#}"),
+                Err(e) => slog!("pull {id}: {e:#}"),
             }
             continue;
         }
@@ -1273,7 +1527,7 @@ pub async fn sync_round() -> Result<usize> {
             // Existed before auto-sync: adopt the server's current version as the
             // baseline rather than overwriting anything.
             if let Some(u) = r.updated_at.clone() {
-                update_state(|st| { st.items.insert(id.to_string(), StateItem { remote: u, at: unix_now(), proxy: proxy_signature(id) }); });
+                update_state(|st| { st.items.insert(id.to_string(), StateItem { remote: u, at: unix_now(), at_ms: 0, proxy: proxy_signature(id) }); });
             }
             continue;
         };
@@ -1282,12 +1536,15 @@ pub async fn sync_round() -> Result<usize> {
         // copy (a fresh login): send it up rather than pulling the older one over it.
         let unsaved = state.pending.contains(id);
         if !unsaved && r.updated_at.as_deref().is_some_and(|u| u != known.remote) {
+            slog!("round: {id} changed on the server (by {}, {} → {}) — taking it", r.updated_by.as_deref().unwrap_or("?"), known.remote, r.updated_at.as_deref().unwrap_or("?"));
             match pull_profile(&base, &token, id).await {
                 Ok(true) => { changed += 1; touched.push(id.to_string()); }
                 Ok(false) => {}
-                Err(e) => eprintln!("[sync] update {id}: {e:#}"),
+                Err(e) => slog!("update {id}: {e:#}"),
             }
         } else if unsaved || local_edit_time(id) > known.at || proxy_signature(id) != known.proxy {
+            let why = if unsaved { "its last close was not saved" } else if proxy_signature(id) != known.proxy { "its proxy changed here" } else { "its settings were edited here" };
+            slog!("round: sending {id} to the server — {why}");
             match push_profile(&base, &token, &holder, id).await {
                 Ok(true) => {
                     touched.push(id.to_string());
@@ -1296,7 +1553,7 @@ pub async fn sync_round() -> Result<usize> {
                     }
                 }
                 Ok(false) => {}
-                Err(e) => eprintln!("[sync] push {id}: {e:#}"),
+                Err(e) => slog!("push {id}: {e:#}"),
             }
         }
     }
@@ -1311,7 +1568,7 @@ pub async fn sync_round() -> Result<usize> {
         match push_profile(&base, &token, &holder, id).await {
             Ok(true) => touched.push(id.clone()),
             Ok(false) => {}
-            Err(e) => eprintln!("[sync] first upload {id}: {e:#}"),
+            Err(e) => slog!("first upload {id}: {e:#}"),
         }
     }
 
@@ -1375,12 +1632,12 @@ pub async fn run_forever() {
         };
         // Catch up on anything missed while offline, then listen from "now".
         if let Err(e) = sync_round().await {
-            eprintln!("[sync] round failed: {e:#}");
+            slog!("round failed: {e:#}");
         }
         let mut pos = match wait_for_events(&base, &token, None).await {
             Ok((seq, _)) => seq,
             Err(e) => {
-                eprintln!("[sync] cannot listen: {e:#}");
+                slog!("cannot listen: {e:#}");
                 tokio::time::sleep(Duration::from_secs(5)).await;
                 continue;
             }
@@ -1398,20 +1655,20 @@ pub async fn run_forever() {
                         pos = seq;
                         if !ids.is_empty() {
                             if let Err(e) = sync_round().await {
-                                eprintln!("[sync] round failed: {e:#}");
+                                slog!("round failed: {e:#}");
                             }
                             last_full = std::time::Instant::now();
                         }
                     }
                     Err(e) => {
-                        eprintln!("[sync] listen dropped: {e:#}");
+                        slog!("listen dropped: {e:#}");
                         tokio::time::sleep(Duration::from_secs(5)).await;
                         break; // reconnect and catch up
                     }
                 },
                 _ = kick_cell().notified() => {
                     if let Err(e) = sync_round().await {
-                        eprintln!("[sync] round failed: {e:#}");
+                        slog!("round failed: {e:#}");
                     }
                     last_full = std::time::Instant::now();
                 }
@@ -1484,6 +1741,237 @@ mod tests {
         let _ = std::fs::remove_dir_all(&a);
         let _ = std::fs::remove_dir_all(&b);
         assert_eq!(found.as_deref(), Some("100012345"), "the login must still be there on the second machine");
+    }
+
+    /// A profile can hold two cookie databases: the one the browser reads (Network/Cookies) and
+    /// an old leftover (Default/Cookies) — a Mac had 76 rows in the first and 5 stale ones in
+    /// the second. The restored login used to go into whichever existed first, the old file, and
+    /// the profile came up logged out. It must land in the live one and leave the old one alone.
+    #[test]
+    fn a_restored_login_lands_in_the_cookie_file_the_browser_reads_not_a_stale_old_one() {
+        let _g = TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let a = std::env::temp_dir().join(format!("hir-stale-a-{}", uuid::Uuid::new_v4()));
+        let b = std::env::temp_dir().join(format!("hir-stale-b-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let id = "stale-1";
+        let cookie = |name: &str, value: &str| -> cookies::Cookie {
+            serde_json::from_value(serde_json::json!({
+                "domain": ".facebook.com", "name": name, "value": value, "path": "/", "expires": 1893456000.0, "secure": true
+            })).unwrap()
+        };
+        let count = |db: &std::path::Path, name: &str| -> i64 {
+            let conn = rusqlite::Connection::open(db).unwrap();
+            conn.query_row("SELECT count(1) FROM cookies WHERE name = ?1", [name], |r| r.get(0)).unwrap()
+        };
+
+        // The machine that is logged in.
+        store::set_data_root(Some(a.clone()));
+        let mut stored = crate::profile::StoredProfile::default();
+        stored.meta.id = id.to_string();
+        crate::profile::save_raw(&mut stored).unwrap();
+        cookies::import(id, &[cookie("c_user", "100012345")]).unwrap();
+        let bytes = build_bundle(id).unwrap();
+
+        // The other one: it has opened the profile (its own live database, a guest cookie in it)
+        // and an old file lies beside it.
+        store::set_data_root(Some(b.clone()));
+        let mut stored_b = crate::profile::StoredProfile::default();
+        stored_b.meta.id = id.to_string();
+        crate::profile::save_raw(&mut stored_b).unwrap();
+        cookies::import(id, &[cookie("guest", "1")]).unwrap();
+        let udd_b = store::user_data_root().unwrap().join(id);
+        let live = udd_b.join("Default/Network/Cookies");
+        let old = udd_b.join("Default/Cookies");
+        assert!(live.is_file(), "the import went to the live place");
+        std::fs::write(&old, b"stale leftover").unwrap();
+
+        // Which file the profile means by "its cookies" with both there: the live one.
+        assert_eq!(cookies::cookie_db(&udd_b), live);
+        apply_bundle(id, &bytes).unwrap();
+        let in_live = count(&live, "c_user");
+        let old_after = std::fs::read(&old).unwrap();
+
+        // And with only the old file there (a profile the new engine has not opened yet): the
+        // login still goes to the live place, which the old file does not stop.
+        let only_old = udd_b.parent().unwrap().join("only-old");
+        std::fs::create_dir_all(only_old.join("Default")).unwrap();
+        std::fs::write(only_old.join("Default/Cookies"), b"stale leftover").unwrap();
+        let mut stored_c = crate::profile::StoredProfile::default();
+        stored_c.meta.id = "only-old".to_string();
+        crate::profile::save_raw(&mut stored_c).unwrap();
+        apply_bundle("only-old", &bytes).unwrap();
+        let live_c = only_old.join("Default/Network/Cookies");
+        let in_live_c = if live_c.is_file() { count(&live_c, "c_user") } else { -1 };
+        let old_c_after = std::fs::read(only_old.join("Default/Cookies")).unwrap();
+
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+        assert_eq!(in_live, 1, "the login must be in the file the browser reads");
+        assert_eq!(old_after, b"stale leftover", "the old file is left exactly as it was");
+        assert_eq!(in_live_c, 1, "with only an old file around, the login still goes to the live place");
+        assert_eq!(old_c_after, b"stale leftover");
+    }
+
+    /// A login that arrives empty must not wipe one that is there: that is what a machine sends
+    /// when it could not read its own cookies, and taking it logs the receiver out too.
+    #[test]
+    fn an_empty_incoming_login_does_not_replace_the_one_already_here() {
+        let _g = TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let a = std::env::temp_dir().join(format!("hir-empty-a-{}", uuid::Uuid::new_v4()));
+        let b = std::env::temp_dir().join(format!("hir-empty-b-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let id = "empty-1";
+        let cookie: cookies::Cookie = serde_json::from_value(serde_json::json!({
+            "domain": ".facebook.com", "name": "c_user", "value": "100077", "path": "/", "expires": 1893456000.0, "secure": true
+        })).unwrap();
+
+        // A machine whose cookie database is there but empty.
+        store::set_data_root(Some(a.clone()));
+        let mut stored = crate::profile::StoredProfile::default();
+        stored.meta.id = id.to_string();
+        crate::profile::save_raw(&mut stored).unwrap();
+        cookies::import(id, &[]).unwrap();
+        let empty_bundle = build_bundle(id).unwrap();
+
+        // One that is logged in.
+        store::set_data_root(Some(b.clone()));
+        let mut stored_b = crate::profile::StoredProfile::default();
+        stored_b.meta.id = id.to_string();
+        crate::profile::save_raw(&mut stored_b).unwrap();
+        cookies::import(id, &[cookie]).unwrap();
+        apply_bundle(id, &empty_bundle).unwrap();
+        let kept = cookies::export(id).unwrap();
+        let log = log_tail(20);
+
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+        assert_eq!(kept.iter().find(|c| c.name == "c_user").map(|c| c.value.as_str()), Some("100077"), "the login must survive an empty one arriving");
+        assert!(log.contains("merged with this machine's own"), "and the log says what was done: {log}");
+    }
+
+    /// The login that arrives is merged with the one that is here: for each cookie the more recent
+    /// one stays, a cookie only one side has is kept, and nothing is lost. Before, the incoming
+    /// database replaced the local one, so a machine that had gone logged out and pushed that state
+    /// took the login away from every other machine on its next background pull.
+    #[test]
+    fn an_arriving_login_is_merged_and_the_newer_cookie_wins_in_both_directions() {
+        let _g = TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let a = std::env::temp_dir().join(format!("hir-merge-a-{}", uuid::Uuid::new_v4()));
+        let b = std::env::temp_dir().join(format!("hir-merge-b-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let id = "merge-1";
+        let ck = |name: &str, value: &str| -> cookies::Cookie {
+            serde_json::from_value(serde_json::json!({
+                "domain": ".facebook.com", "name": name, "value": value, "path": "/", "expires": 1893456000.0, "secure": true
+            })).unwrap()
+        };
+        let make = |root: &std::path::Path| {
+            store::set_data_root(Some(root.to_path_buf()));
+            let mut st = crate::profile::StoredProfile::default();
+            st.meta.id = id.to_string();
+            crate::profile::save_raw(&mut st).unwrap();
+        };
+        let value_of = |name: &str| cookies::export(id).unwrap().into_iter().find(|c| c.name == name).map(|c| c.value);
+        let pause = || std::thread::sleep(Duration::from_millis(30));
+
+        // 1. This machine (B) has the newer c_user; the incoming copy (A) has an older one and a
+        //    cookie B lacks.
+        make(&a);
+        cookies::import(id, &[ck("c_user", "from-A-older"), ck("only_a", "a")]).unwrap();
+        let from_a = build_bundle(id).unwrap();
+        pause();
+        make(&b);
+        cookies::import(id, &[ck("c_user", "from-B-newer"), ck("only_b", "b")]).unwrap();
+        apply_bundle(id, &from_a).unwrap();
+        let newer_here_wins = (value_of("c_user"), value_of("only_a"), value_of("only_b"));
+
+        // 2. The other way round: the incoming c_user is the newer one.
+        make(&b);
+        let _ = std::fs::remove_dir_all(store::user_data_root().unwrap().join(id));
+        cookies::import(id, &[ck("c_user", "from-B-older")]).unwrap();
+        pause();
+        make(&a);
+        let _ = std::fs::remove_dir_all(store::user_data_root().unwrap().join(id));
+        cookies::import(id, &[ck("c_user", "from-A-newer")]).unwrap();
+        let from_a2 = build_bundle(id).unwrap();
+        make(&b);
+        apply_bundle(id, &from_a2).unwrap();
+        let newer_incoming_wins = value_of("c_user");
+
+        // 3. An empty incoming login takes nothing away.
+        make(&a);
+        let _ = std::fs::remove_dir_all(store::user_data_root().unwrap().join(id));
+        cookies::import(id, &[]).unwrap();
+        let empty = build_bundle(id).unwrap();
+        make(&b);
+        apply_bundle(id, &empty).unwrap();
+        let after_empty = value_of("c_user");
+
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+        assert_eq!(newer_here_wins.0.as_deref(), Some("from-B-newer"), "an older incoming cookie must not replace a newer one");
+        assert_eq!(newer_here_wins.1.as_deref(), Some("a"), "a cookie only the incoming copy has is added");
+        assert_eq!(newer_here_wins.2.as_deref(), Some("b"), "a cookie only this machine has is kept");
+        assert_eq!(newer_incoming_wins.as_deref(), Some("from-A-newer"), "a newer incoming cookie does replace an older one");
+        assert_eq!(after_empty.as_deref(), Some("from-A-newer"), "an empty login takes nothing away");
+    }
+
+    /// "Why am I logged out on this machine?" has an answer in the sync log: how many cookies a
+    /// bundle was made with, how many were restored here, and — the case that left a Mac logged
+    /// out with nothing to show for it — when a bundle carried no login at all.
+    #[test]
+    fn the_sync_log_says_what_travelled_and_what_was_missing() {
+        let _g = TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let a = std::env::temp_dir().join(format!("hir-loga-{}", uuid::Uuid::new_v4()));
+        let b = std::env::temp_dir().join(format!("hir-logb-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let id = "trail-1";
+
+        store::set_data_root(Some(a.clone()));
+        let mut stored = crate::profile::StoredProfile::default();
+        stored.meta.id = id.to_string();
+        crate::profile::save_raw(&mut stored).unwrap();
+        let cookie: cookies::Cookie = serde_json::from_value(serde_json::json!({
+            "domain": ".facebook.com", "name": "c_user", "value": "100099", "path": "/", "expires": 1893456000.0, "secure": true
+        })).unwrap();
+        cookies::import(id, &[cookie]).unwrap();
+        let bytes = build_bundle(id).unwrap();
+        let made = log_tail(50);
+
+        // Another machine takes it: the login is restored, and the log counts it.
+        store::set_data_root(Some(b.clone()));
+        let mut stored_b = crate::profile::StoredProfile::default();
+        stored_b.meta.id = id.to_string();
+        crate::profile::save_raw(&mut stored_b).unwrap();
+        apply_bundle(id, &bytes).unwrap();
+        let restored = log_tail(50);
+
+        // A bundle from before logins could travel: nothing to restore, and the log says so.
+        let mut old = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut old);
+            zip.start_file("user-data/Default/Bookmarks", zip::write::SimpleFileOptions::default()).unwrap();
+            zip.write_all(b"x").unwrap();
+            zip.finish().unwrap();
+        }
+        apply_bundle(id, &old.into_inner()).unwrap();
+        let after_old = log_tail(50);
+
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+
+        assert!(made.contains("portable/Cookies: 1 rows, 1 made portable, 0 dropped"), "{made}");
+        assert!(restored.contains("restored Default/Network/Cookies: 1 values sealed for this machine"), "{restored}");
+        assert!(!restored.contains("carries no portable cookies"), "a bundle with a login must not say it has none: {restored}");
+        assert!(after_old.contains("carries no portable cookies") && after_old.contains("NOT restored"), "{after_old}");
     }
 
     /// An older build sent `Local State` and the sealed databases raw. Taking them would put
@@ -1870,6 +2358,53 @@ mod tests {
             checkin("sess-1").await.expect("close saves now");
             assert_eq!(server_cookie(&base, &token).await, "logged-in");
             assert!(!load_state().pending.contains("sess-1"));
+        }).await;
+    }
+
+    /// Opening a profile used to download the whole bundle every time, even on the machine that
+    /// closed it a minute ago — seconds spent fetching what was already there. A machine whose
+    /// copy is untouched since its last sync now gets "304, nothing new" and goes straight on; a
+    /// copy that changed here since is still replaced by the server's, as before.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reopening_where_it_was_closed_downloads_nothing_and_a_local_change_pulls_again() {
+        with_synced_profile(|_base, _token, cookies| async move {
+            checkout("sess-1").await.expect("open");
+            std::fs::write(&cookies, "logged-in").unwrap();
+            checkin("sess-1").await.expect("close");
+            tokio::time::sleep(Duration::from_millis(30)).await;
+
+            // Nothing changed on this machine since the close: nothing is downloaded or applied.
+            checkout("sess-1").await.expect("reopen");
+            let log = log_tail(40);
+            assert!(log.contains("already up to date"), "{log}");
+            assert_eq!(std::fs::read_to_string(&cookies).unwrap(), "logged-in");
+            checkin("sess-1").await.expect("close again");
+            tokio::time::sleep(Duration::from_millis(30)).await;
+
+            // A change made here and never saved: the next open still takes the server's copy.
+            std::fs::write(&cookies, "edited-and-never-saved").unwrap();
+            checkout("sess-1").await.expect("reopen after a local change");
+            assert_eq!(std::fs::read_to_string(&cookies).unwrap(), "logged-in", "the server's copy came back");
+            let log = log_tail(40);
+            assert!(log.contains("download") && log.contains("apply"), "{log}");
+        }).await;
+    }
+
+    /// A server older than this build knows nothing of versions: its lock names none and its bundle
+    /// carries no ETag. The client must open the profile exactly as before — whole bundle, applied.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_missing_version_means_the_whole_bundle_is_taken_as_before() {
+        with_synced_profile(|base, token, cookies| async move {
+            checkout("sess-1").await.expect("open");
+            std::fs::write(&cookies, "logged-in").unwrap();
+            checkin("sess-1").await.expect("close");
+            // This machine has no record of a version it could name (what an older build's state
+            // looks like): the bundle is fetched in full, with no If-None-Match.
+            update_state(|st| { st.items.remove("sess-1"); });
+            std::fs::write(&cookies, "logged-out").unwrap();
+            checkout("sess-1").await.expect("reopen");
+            assert_eq!(std::fs::read_to_string(&cookies).unwrap(), "logged-in");
+            assert_eq!(server_cookie(&base, &token).await, "logged-in");
         }).await;
     }
 

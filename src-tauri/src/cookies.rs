@@ -339,16 +339,22 @@ fn samesite_from_str(s: Option<&str>) -> i64 {
 }
 
 /// Path to the profile's Cookies SQLite DB; Default/ or Default/Network/.
+/// The cookie database this profile's browser actually reads and writes. Current engines keep it
+/// at `Default/Network/Cookies`; `Default/Cookies` is the old place, and a profile can have both —
+/// a stale leftover next to the live one (seen on a Mac: 5 rows in the old file, 76 in the live
+/// one). The old file used to win here, so a login restored on that machine went into a file the
+/// browser never opens and the profile came up logged out. The live place wins; the old one is
+/// only used when it is all there is.
 fn cookies_db_path(udd: &Path) -> PathBuf {
-    let primary = udd.join("Default").join("Cookies");
-    if primary.exists() {
-        return primary;
+    let live = udd.join("Default").join("Network").join("Cookies");
+    if live.exists() {
+        return live;
     }
-    let alt = udd.join("Default").join("Network").join("Cookies");
-    if alt.exists() {
-        return alt;
+    let legacy = udd.join("Default").join("Cookies");
+    if legacy.exists() {
+        return legacy;
     }
-    primary
+    live
 }
 
 /// Export decrypted cookies.
@@ -657,6 +663,20 @@ impl Sealed {
             Sealed::Logins => ("logins", "password_value"),
         }
     }
+    /// The columns that make a row "the same one" in two databases of this kind.
+    fn key_columns(self) -> &'static [&'static str] {
+        match self {
+            Sealed::Cookies => &["host_key", "top_frame_site_key", "has_cross_site_ancestor", "name", "path", "source_scheme", "source_port"],
+            Sealed::Logins => &["origin_url", "username_element", "username_value", "password_element", "signon_realm"],
+        }
+    }
+    /// How recent a row is, best column first (the first one both databases have is used).
+    fn freshness_columns(self) -> &'static [&'static str] {
+        match self {
+            Sealed::Cookies => &["last_update_utc", "creation_utc"],
+            Sealed::Logins => &["date_password_modified", "date_created"],
+        }
+    }
     /// Query returning (rowid, sealed value, host) for every row.
     fn select(self) -> &'static str {
         match self {
@@ -681,12 +701,22 @@ fn remove_db(path: &Path) {
     }
 }
 
+/// What `portable_copy` found in the database: rows in all, rows turned into plaintext, rows
+/// dropped because this machine could not open them. All of them dropped means the key this
+/// machine seals with is not the key the browser sealed with — the login cannot travel.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct PortableStats {
+    pub rows: usize,
+    pub portable: usize,
+    pub dropped: usize,
+}
+
 /// A copy of the database at `src` with every value this machine sealed turned into
 /// plaintext. A value this machine cannot open (sealed by another one long ago) is dropped
 /// with its row, rather than sent on as noise. The original is only read.
-pub(crate) fn portable_copy(udd: &Path, src: &Path, kind: Sealed) -> Result<Vec<u8>> {
+pub(crate) fn portable_copy(udd: &Path, src: &Path, kind: Sealed) -> Result<(Vec<u8>, PortableStats)> {
     let tmp = scratch_copy(src)?;
-    let result = (|| -> Result<Vec<u8>> {
+    let result = (|| -> Result<(Vec<u8>, PortableStats)> {
         let crypt = Crypt::open(udd)?;
         let (table, column) = kind.table_column();
         let conn = rusqlite::Connection::open(&tmp).with_context(|| format!("open {}", tmp.display()))?;
@@ -695,6 +725,7 @@ pub(crate) fn portable_copy(udd: &Path, src: &Path, kind: Sealed) -> Result<Vec<
             let it = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)))?;
             it.filter_map(|r| r.ok()).collect()
         };
+        let mut stats = PortableStats { rows: rows.len(), ..Default::default() };
         for (rowid, blob) in rows {
             if blob.len() < 3 || &blob[..3] != b"v10" {
                 continue; // empty, or stored in the clear: nothing to convert
@@ -704,14 +735,16 @@ pub(crate) fn portable_copy(udd: &Path, src: &Path, kind: Sealed) -> Result<Vec<
                     let mut out = PORTABLE_MARK.to_vec();
                     out.extend_from_slice(&plain);
                     conn.execute(&format!("UPDATE {table} SET {column} = ?1 WHERE rowid = ?2"), rusqlite::params![out, rowid])?;
+                    stats.portable += 1;
                 }
                 None => {
                     conn.execute(&format!("DELETE FROM {table} WHERE rowid = ?1"), rusqlite::params![rowid])?;
+                    stats.dropped += 1;
                 }
             }
         }
         drop(conn);
-        Ok(std::fs::read(&tmp)?)
+        Ok((std::fs::read(&tmp)?, stats))
     })();
     remove_db(&tmp);
     result
@@ -741,7 +774,135 @@ pub(crate) fn localize_file(udd: &Path, db: &Path, kind: Sealed) -> Result<usize
     Ok(n)
 }
 
+/// Takes the rows of `from` into `into` — never replacing one by an older or equal one, never
+/// dropping a row `into` has that `from` lacks. A row is the same row when its key columns match
+/// (a cookie's host, name, path…); where both have it, the more recently updated one stays.
+///
+/// This is how a login arriving from another machine is taken. Replacing the local database by
+/// the incoming one meant that any machine that had gone logged-out (a fresh profile, a machine
+/// that could not restore its login) and pushed that state took everyone else's login away on
+/// their next background pull. Merged, a worse copy can only add what was missing.
+///
+/// Both files must be sealed with the same key (the incoming one is resealed first). Returns how
+/// many rows were added or updated.
+pub(crate) fn merge_sealed(into: &Path, from: &Path, kind: Sealed) -> Result<usize> {
+    let (table, _) = kind.table_column();
+    let conn = rusqlite::Connection::open(into).with_context(|| format!("open {}", into.display()))?;
+    conn.execute("ATTACH DATABASE ?1 AS inc", [from.to_string_lossy().as_ref()])?;
+    // (column, is part of the primary key) for one of the two databases.
+    let columns = |schema: &str| -> Result<Vec<(String, bool)>> {
+        let mut st = conn.prepare(&format!("PRAGMA {schema}.table_info(\"{table}\")"))?;
+        let rows = st.query_map([], |r| Ok((r.get::<_, String>(1)?, r.get::<_, i64>(5)? != 0)))?;
+        Ok(rows.filter_map(|r| r.ok()).collect())
+    };
+    let here = columns("main")?;
+    let there = columns("inc")?;
+    // What both have, without the primary key (those numbers belong to each database alone).
+    let common: Vec<String> = here
+        .iter()
+        .filter(|(n, pk)| !*pk && there.iter().any(|(m, _)| m == n))
+        .map(|(n, _)| n.clone())
+        .collect();
+    let has = |c: &str| common.iter().any(|x| x == c);
+    let key: Vec<&str> = kind.key_columns().iter().copied().filter(|k| has(k)).collect();
+    // Without a way to tell two rows are the same, changing anything is a guess: change nothing.
+    if common.is_empty() || key.len() < 2 {
+        return Ok(0);
+    }
+    let fresh = kind.freshness_columns().iter().copied().find(|c| has(c));
+    let list = common.iter().map(|c| format!("\"{c}\"")).collect::<Vec<_>>().join(", ");
+    let from_list = common.iter().map(|c| format!("i.\"{c}\"")).collect::<Vec<_>>().join(", ");
+    let on = key.iter().map(|k| format!("m.\"{k}\" IS i.\"{k}\"")).collect::<Vec<_>>().join(" AND ");
+    let wanted = match fresh {
+        Some(f) => format!("m.rowid IS NULL OR i.\"{f}\" > m.\"{f}\""),
+        None => "m.rowid IS NULL".to_string(),
+    };
+    let changed = conn.execute(
+        &format!(
+            "INSERT OR REPLACE INTO main.\"{table}\" ({list}) \
+             SELECT {from_list} FROM inc.\"{table}\" i LEFT JOIN main.\"{table}\" m ON {on} WHERE {wanted}"
+        ),
+        [],
+    )?;
+    conn.execute("DETACH DATABASE inc", [])?;
+    Ok(changed)
+}
+
+/// How many rows the sealed database at `db` holds (`None` when it cannot be read).
+pub(crate) fn row_count(db: &Path, kind: Sealed) -> Option<i64> {
+    let (table, _) = kind.table_column();
+    let conn = rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    conn.query_row(&format!("SELECT count(1) FROM {table}"), [], |r| r.get(0)).ok()
+}
+
 /// Where a profile's cookie database is, for the sync (which wants the file that exists).
 pub(crate) fn cookie_db(udd: &Path) -> PathBuf {
     cookies_db_path(udd)
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    fn logins_db(path: &Path, rows: &[(&str, &str, &str, i64)]) {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE logins (id INTEGER PRIMARY KEY AUTOINCREMENT, origin_url VARCHAR NOT NULL, \
+             username_element VARCHAR, username_value VARCHAR, password_element VARCHAR, \
+             signon_realm VARCHAR NOT NULL, password_value BLOB, date_created INTEGER NOT NULL, \
+             date_password_modified INTEGER NOT NULL); \
+             CREATE UNIQUE INDEX u ON logins (origin_url, username_element, username_value, password_element, signon_realm);",
+        )
+        .unwrap();
+        for (site, user, pw, modified) in rows {
+            conn.execute(
+                "INSERT INTO logins (origin_url, username_element, username_value, password_element, signon_realm, password_value, date_created, date_password_modified) \
+                 VALUES (?1, 'u', ?2, 'p', ?1, ?3, 1, ?4)",
+                rusqlite::params![site, user, pw.as_bytes(), modified],
+            )
+            .unwrap();
+        }
+    }
+
+    fn password(path: &Path, site: &str, user: &str) -> Option<String> {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.query_row(
+            "SELECT password_value FROM logins WHERE origin_url = ?1 AND username_value = ?2",
+            [site, user],
+            |r| r.get::<_, Vec<u8>>(0),
+        )
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+    }
+
+    /// Saved passwords merge the same way as cookies: the more recently changed one stays, a login
+    /// only one side has is kept, and an incoming database with different columns changes nothing
+    /// it cannot match.
+    #[test]
+    fn saved_passwords_are_merged_by_site_and_user_and_the_newer_change_wins() {
+        let dir = std::env::temp_dir().join(format!("hir-merge-logins-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (here, there) = (dir.join("here.db"), dir.join("there.db"));
+        logins_db(&here, &[("https://a.test", "ann", "mine-newer", 20), ("https://b.test", "bob", "only-here", 5)]);
+        logins_db(&there, &[("https://a.test", "ann", "theirs-older", 10), ("https://c.test", "cy", "only-there", 7)]);
+
+        let changed = merge_sealed(&here, &there, Sealed::Logins).unwrap();
+        assert_eq!(changed, 1, "only the login this machine lacked was taken");
+        assert_eq!(password(&here, "https://a.test", "ann").as_deref(), Some("mine-newer"), "the newer change stays");
+        assert_eq!(password(&here, "https://b.test", "bob").as_deref(), Some("only-here"));
+        assert_eq!(password(&here, "https://c.test", "cy").as_deref(), Some("only-there"));
+
+        // Now the incoming one is the newer change for ann: it replaces.
+        let newer = dir.join("newer.db");
+        logins_db(&newer, &[("https://a.test", "ann", "theirs-newer", 99)]);
+        assert_eq!(merge_sealed(&here, &newer, Sealed::Logins).unwrap(), 1);
+        assert_eq!(password(&here, "https://a.test", "ann").as_deref(), Some("theirs-newer"));
+
+        // A database that is not shaped like this one is left alone rather than guessed at.
+        let odd = dir.join("odd.db");
+        rusqlite::Connection::open(&odd).unwrap().execute_batch("CREATE TABLE logins (x INTEGER);").unwrap();
+        assert_eq!(merge_sealed(&here, &odd, Sealed::Logins).unwrap(), 0);
+        assert_eq!(password(&here, "https://a.test", "ann").as_deref(), Some("theirs-newer"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

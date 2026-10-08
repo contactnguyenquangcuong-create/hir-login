@@ -81,7 +81,9 @@ pub async fn launch_profile_synced(
     }
     // No-op unless Settings > Team Sync is configured; otherwise locks the
     // profile on the sync server and pulls its latest state down first.
+    let t_start = std::time::Instant::now();
     crate::cloud_sync::checkout(profile_id).await?;
+    let t_sync = t_start.elapsed();
     let bin = resolve_binary()?;
     let stored = profile::load_raw(profile_id)?;
     let udd = profile::user_data_dir(profile_id)?;
@@ -98,11 +100,19 @@ pub async fn launch_profile_synced(
         Some(p) => Some(proxy::effective(&p).await),
         None => None,
     };
+    let t_proxy = t_start.elapsed();
+    // Where the proxy exits is needed twice below (time zone, WebRTC address) and takes a round
+    // trip through the proxy. Ask now, beside the UDP probe, and let both share the answer.
+    if let Some(p) = bound_proxy.clone() {
+        tokio::spawn(async move {
+            let _ = proxy::geo_check_cached(&p).await;
+        });
+    }
 
     // Live UDP probe; QUIC/WebRTC gating uses current capability not stale cache.
     let proxy_udp_ok = if let Some(p) = bound_proxy.as_ref() {
         if matches!(p.kind, proxy::ProxyKind::Socks5) {
-            match proxy::probe_udp(p).await {
+            match proxy::probe_udp_cached(p).await {
                 Ok(ms) => {
                     eprintln!("[launcher] UDP relay OK ({ms} ms) for proxy {}", p.host);
                     true
@@ -152,6 +162,7 @@ pub async fn launch_profile_synced(
     // engine that leaks the machine's real public IP (and IPv6) as a WebRTC candidate.
     // With UDP off, QUIC is disabled and WebRTC falls back to TCP-only.
     let proxy_udp_ok = bound_proxy.as_ref().map(|p| crate::proxy_relay::udp_path_exists(p, proxy_udp_ok)).unwrap_or(false);
+    let t_udp = t_start.elapsed();
 
     // Strip `_meta` wrapper and resolve "auto" sentinels before serialising.
     let mut raw = stored.config.clone();
@@ -295,13 +306,14 @@ pub async fn launch_profile_synced(
         .and_then(|p| proxy::latest_test(&p.id));
     // Live geo for ICE-candidate spoofing, cached snapshot as fallback.
     let proxy_public_ip: Option<String> = if let Some(p) = bound_proxy.as_ref() {
-        match proxy::geo_check(p, None).await {
+        match proxy::geo_check_cached(p).await {
             Ok(g) if !g.ip.is_empty() => Some(g.ip),
             _ => latest.as_ref().map(|s| s.ip.clone()).filter(|ip| !ip.is_empty()),
         }
     } else {
         None
     };
+    let t_geo = t_start.elapsed();
     match webrtc_mode {
         "block" => {
             cmd.arg("--force-webrtc-ip-handling-policy=disable_non_proxied_udp");
@@ -427,6 +439,18 @@ pub async fn launch_profile_synced(
     // CommandExt import needed (unlike plain std::process::Command elsewhere).
     #[cfg(target_os = "windows")]
     cmd.creation_flags(0x08000000);
+    // Where the time went before the browser even started — the answer to "why does opening a
+    // profile take seconds" — is kept in the sync log so it can be read off a slow machine.
+    let ms = |d: std::time::Duration| d.as_millis();
+    crate::cloud_sync::log_line(&format!(
+        "launch {profile_id}: ready to start the browser after {} ms — sync {} ms, proxy {} ms, UDP check {} ms, location lookup {} ms, the rest {} ms",
+        ms(t_start.elapsed()),
+        ms(t_sync),
+        ms(t_proxy - t_sync),
+        ms(t_udp - t_proxy),
+        ms(t_geo - t_udp),
+        ms(t_start.elapsed() - t_geo),
+    ));
     let child = cmd.spawn().context("spawn Hir-Login")?;
     let pid = Tracker::shared().track(profile_id.to_string(), child, stored.meta.temporary);
 
@@ -520,7 +544,7 @@ async fn resolve_auto_fields(
     let mut source = "";
     let geo: Option<proxy::GeoInfo> = match proxy_opt {
         Some(p) => {
-            match proxy::geo_check_via(Some(p), None).await {
+            match proxy::geo_check_cached(p).await {
                 Ok(g) => {
                     source = "proxy-live";
                     // The country the session actually exits from — keeps the
@@ -568,7 +592,7 @@ async fn resolve_auto_fields(
             }
         }
         None => {
-            match proxy::geo_check_via(None, None).await {
+            match proxy::geo_check_direct_cached().await {
                 Ok(g) => { source = "direct-live"; Some(g) }
                 Err(e) => {
                     eprintln!("[launcher] direct geo failed: {e} — falling back to host TZ/locale");

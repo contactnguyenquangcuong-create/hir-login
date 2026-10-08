@@ -184,6 +184,7 @@ pub fn delete(id: &str) -> Result<()> {
     if hs.by_proxy.remove(id).is_some() {
         save_history(&hs)?;
     }
+    forget_verified(id);
     Ok(())
 }
 
@@ -426,6 +427,12 @@ async fn resolve_stun_ipv4() -> Result<(std::net::Ipv4Addr, u16)> {
 /// per application, so the browser may be allowed where the launcher is not —
 /// looks exactly like a proxy without a relay. One STUN request straight out.
 pub async fn can_send_udp_directly() -> bool {
+    // A property of this machine, not of any proxy: asked once per run, not on every open.
+    static ANSWER: std::sync::OnceLock<tokio::sync::OnceCell<bool>> = std::sync::OnceLock::new();
+    *ANSWER.get_or_init(tokio::sync::OnceCell::new).get_or_init(can_send_udp_directly_now).await
+}
+
+async fn can_send_udp_directly_now() -> bool {
     use tokio::net::UdpSocket;
     use tokio::time::{timeout, Duration};
     let Ok((ip, port)) = resolve_stun_ipv4().await else {
@@ -570,7 +577,7 @@ async fn probe_udp_inner(entry: &ProxyEntry) -> Result<u128> {
 
 // ---- Geo lookup ----
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeoInfo {
     pub ip: String,
     pub country: String,
@@ -603,7 +610,20 @@ pub async fn geo_check(entry: &ProxyEntry, provider_override: Option<String>) ->
 /// (a genuine TLS proxy, an unreachable one) stays as labelled — nothing is concluded from
 /// silence. What was found is remembered per `host:port`, and written back to the saved proxy
 /// so the list shows the real type.
+///
+/// This is the version for launching a profile: a proxy that was checked as it is configured now
+/// is simply used as the kind it was checked as, and nothing is sent to it (see `geo_check_cached`).
+/// `effective_live` below always looks.
 pub async fn effective(entry: &ProxyEntry) -> ProxyEntry {
+    if is_verified(entry) {
+        return entry.clone();
+    }
+    effective_live(entry).await
+}
+
+/// `effective`, always asking the proxy. For the Test button, the first check, and the
+/// background refresh.
+pub async fn effective_live(entry: &ProxyEntry) -> ProxyEntry {
     static KNOWN: std::sync::OnceLock<std::sync::Mutex<HashMap<String, ProxyKind>>> = std::sync::OnceLock::new();
     let known = KNOWN.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
     let key = format!("{}:{}", entry.host, entry.port);
@@ -673,7 +693,10 @@ async fn sniff(entry: &ProxyEntry, payload: &[u8]) -> Sniff {
         return Sniff::Silent;
     }
     let mut buf = [0u8; 16];
-    match timeout(Duration::from_secs(4), s.read(&mut buf)).await {
+    // A SOCKS5 server answers its greeting at once, and so does an HTTP proxy a CONNECT. An HTTP
+    // proxy that is handed a SOCKS greeting says nothing, so this wait is the whole cost of the
+    // first look at a proxy whose list labelled it wrongly — kept short for that reason.
+    match timeout(Duration::from_millis(2500), s.read(&mut buf)).await {
         Ok(Ok(n)) if n > 0 => Sniff::Reply(buf[..n].to_vec()),
         _ => Sniff::Silent,
     }
@@ -702,6 +725,328 @@ async fn detect_kind(entry: &ProxyEntry) -> Option<ProxyKind> {
         }
     }
     None
+}
+
+// ---- what launching a profile asks of a proxy, asked once ----
+//
+// Opening a profile asked its proxy the same things one after another: where it exits (to set
+// the time zone and language), where it exits again (for the WebRTC address), and whether it
+// relays UDP (up to 6 s, and 4 more when it does not). Each of those goes through the proxy, so
+// each costs a full round trip or a timeout. They are asked once now, at the same time, and
+// remembered for a short while — callers that arrive while the first is still waiting share its
+// answer instead of sending their own.
+
+/// Remembers one answer per key for a while, and lets simultaneous askers share one request.
+struct TtlCache<V: Clone + Send + Sync + 'static> {
+    map: std::sync::Mutex<HashMap<String, (std::time::Instant, std::sync::Arc<tokio::sync::OnceCell<V>>)>>,
+}
+
+impl<V: Clone + Send + Sync + 'static> TtlCache<V> {
+    fn new() -> Self {
+        Self { map: std::sync::Mutex::new(HashMap::new()) }
+    }
+
+    /// The answer for `key`: remembered if it is younger than `ttl(&answer)`, otherwise
+    /// computed by `make` (once, however many ask meanwhile). A `ttl` of zero forgets it at once.
+    async fn get_or<F, Fut>(&self, key: &str, ttl: impl Fn(&V) -> std::time::Duration, make: F) -> V
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = V>,
+    {
+        let cell = {
+            let mut m = self.map.lock().unwrap_or_else(|e| e.into_inner());
+            let fresh = m.get(key).filter(|(at, cell)| match cell.get() {
+                Some(v) => at.elapsed() < ttl(v),
+                None => true, // still being asked: join it
+            });
+            match fresh {
+                Some((_, cell)) => cell.clone(),
+                None => {
+                    let cell = std::sync::Arc::new(tokio::sync::OnceCell::new());
+                    m.insert(key.to_string(), (std::time::Instant::now(), cell.clone()));
+                    cell
+                }
+            }
+        };
+        let answer = cell.get_or_init(make).await.clone();
+        // The age counts from when the answer arrived, not from when the question was asked.
+        if let Ok(mut m) = self.map.lock() {
+            if let Some((at, c)) = m.get_mut(key) {
+                if std::sync::Arc::ptr_eq(c, &cell) {
+                    *at = std::time::Instant::now();
+                }
+            }
+        }
+        answer
+    }
+}
+
+/// Identifies a proxy for the caches below: the address and who it is used as, not the password.
+fn proxy_key(entry: &ProxyEntry) -> String {
+    format!("{}://{}@{}:{}", entry.kind.as_str(), entry.username, entry.host, entry.port)
+}
+
+// ---- a proxy is checked once, and trusted until it changes ----
+//
+// What opening a profile needs to know about its proxy — where it exits (time zone, language,
+// WebRTC address) and whether it relays UDP — does not change from one open to the next. So it is
+// found out the first time, written to `proxies-verified.json`, and used from then on without
+// sending the proxy anything. What was learned belongs to the proxy *as configured*: change its
+// type, host, port or login and the record no longer matches, and it is checked again. A record
+// older than 12 hours is still used (the profile opens at once) and refreshed in the background;
+// one older than a week is not trusted and the proxy is asked afresh.
+
+const REFRESH_AFTER_SECS: u64 = 12 * 3600;
+const EXPIRES_AFTER_SECS: u64 = 7 * 24 * 3600;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UdpFact {
+    ok: bool,
+    ms: u128,
+    err: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct Verified {
+    /// `proxy_sig` of the proxy this was learned about.
+    sig: String,
+    #[serde(default)]
+    geo: Option<GeoInfo>,
+    #[serde(default)]
+    geo_at: u64,
+    #[serde(default)]
+    udp: Option<UdpFact>,
+    #[serde(default)]
+    udp_at: u64,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct VerifiedStore {
+    #[serde(default)]
+    by_proxy: HashMap<String, Verified>,
+}
+
+fn verified_path() -> Result<PathBuf> {
+    Ok(store::user_files_root()?.join("proxies-verified.json"))
+}
+
+fn verified_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn load_verified() -> VerifiedStore {
+    verified_path()
+        .ok()
+        .and_then(|p| fs::read_to_string(p).ok())
+        .and_then(|b| serde_json::from_str(&b).ok())
+        .unwrap_or_default()
+}
+
+fn save_verified(st: &VerifiedStore) {
+    if let (Ok(body), Ok(path)) = (serde_json::to_string_pretty(st), verified_path()) {
+        let _ = write_atomic(&path, body.as_bytes());
+    }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// What the connection to a proxy consists of. A record about the proxy holds only while this
+/// is unchanged; the name, country tag and notes are not part of it.
+pub fn proxy_sig(e: &ProxyEntry) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    for part in [e.kind.as_str(), &e.host, &e.port.to_string(), &e.username, &e.password] {
+        h.update(part.as_bytes());
+        h.update([0u8]);
+    }
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn verified_for(entry: &ProxyEntry) -> Option<Verified> {
+    if entry.id.is_empty() {
+        return None; // not a saved proxy (a quick profile's own): nothing to remember it by
+    }
+    let st = load_verified();
+    let v = st.by_proxy.get(&entry.id)?;
+    (v.sig == proxy_sig(entry)).then(|| v.clone())
+}
+
+fn update_verified(entry: &ProxyEntry, f: impl FnOnce(&mut Verified)) {
+    if entry.id.is_empty() {
+        return;
+    }
+    let _g = verified_guard();
+    let mut st = load_verified();
+    let sig = proxy_sig(entry);
+    let v = st.by_proxy.entry(entry.id.clone()).or_default();
+    if v.sig != sig {
+        *v = Verified { sig, ..Default::default() };
+    }
+    f(v);
+    save_verified(&st);
+}
+
+fn forget_verified(id: &str) {
+    let _g = verified_guard();
+    let mut st = load_verified();
+    if st.by_proxy.remove(id).is_some() {
+        save_verified(&st);
+    }
+}
+
+/// Where this proxy exits, from the record, with the record's age in seconds — unless there is
+/// none, it is about a different configuration, or it is too old to trust.
+fn geo_record(entry: &ProxyEntry) -> Option<(GeoInfo, u64)> {
+    let v = verified_for(entry)?;
+    let age = now_secs().saturating_sub(v.geo_at);
+    if age >= EXPIRES_AFTER_SECS {
+        return None;
+    }
+    v.geo.map(|g| (g, age))
+}
+
+fn udp_record(entry: &ProxyEntry) -> Option<(UdpFact, u64)> {
+    let v = verified_for(entry)?;
+    let age = now_secs().saturating_sub(v.udp_at);
+    if age >= EXPIRES_AFTER_SECS {
+        return None;
+    }
+    v.udp.map(|u| (u, age))
+}
+
+fn remember_geo(entry: &ProxyEntry, g: &GeoInfo) {
+    update_verified(entry, |v| {
+        v.geo = Some(g.clone());
+        v.geo_at = now_secs();
+    });
+}
+
+fn remember_udp(entry: &ProxyEntry, r: &Result<u128, String>) {
+    update_verified(entry, |v| {
+        v.udp = Some(match r {
+            Ok(ms) => UdpFact { ok: true, ms: *ms, err: String::new() },
+            Err(e) => UdpFact { ok: false, ms: 0, err: e.clone() },
+        });
+        v.udp_at = now_secs();
+    });
+}
+
+/// True when the proxy has been checked as it is configured now and the check is still trusted:
+/// nothing needs to be sent to it to open a profile.
+fn is_verified(entry: &ProxyEntry) -> bool {
+    geo_record(entry).is_some()
+}
+
+/// Checks the proxy again without making anyone wait: a profile opened on a record older than
+/// 12 hours starts at once on it, and this runs beside. If the proxy no longer answers (a plan
+/// that ran out, say) the record is dropped, so the next open asks for real and says what is
+/// wrong, and a warning tells the person now.
+fn refresh_in_background(entry: ProxyEntry) {
+    static BUSY: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    let busy = BUSY.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    if !busy.lock().map(|mut b| b.insert(entry.id.clone())).unwrap_or(false) {
+        return;
+    }
+    tokio::spawn(async move {
+        let used = effective_live(&entry).await;
+        let want_udp = matches!(used.kind, ProxyKind::Socks5);
+        let (geo, udp) = tokio::join!(geo_check_via(Some(&used), None), async {
+            if want_udp {
+                Some(probe_udp(&used).await.map_err(|e| e.to_string()))
+            } else {
+                None
+            }
+        });
+        match geo {
+            Ok(g) => {
+                remember_geo(&used, &g);
+                if let Some(u) = &udp {
+                    remember_udp(&used, u);
+                }
+                eprintln!("[proxy] {}:{} re-checked in the background: exits from {} ({})", used.host, used.port, g.ip, g.country_code);
+            }
+            Err(e) => {
+                forget_verified(&used.id);
+                eprintln!("[proxy] {}:{} did not answer the background re-check: {e}", used.host, used.port);
+                crate::notify_warning(format!(
+                    "Proxy {}:{} không còn trả lời (có thể đã hết hạn hoặc bị chặn). Lần mở profile tới sẽ kiểm tra lại.",
+                    used.host, used.port
+                ));
+            }
+        }
+        if let Ok(mut b) = busy.lock() {
+            b.remove(&entry.id);
+        }
+    });
+}
+
+/// Where the proxy exits, for launching a profile: from the record when the proxy has been
+/// checked and has not changed (nothing is sent to it), otherwise asked for now — once, however
+/// many callers want it at the same time — and written down for next time. A failure is
+/// remembered for half a minute only, so the second asker does not repeat a lookup that just failed.
+pub async fn geo_check_cached(entry: &ProxyEntry) -> Result<GeoInfo, String> {
+    if let Some((g, age)) = geo_record(entry) {
+        if age > REFRESH_AFTER_SECS {
+            refresh_in_background(entry.clone());
+        }
+        return Ok(g);
+    }
+    static CACHE: std::sync::OnceLock<TtlCache<Result<GeoInfo, String>>> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(TtlCache::new);
+    cache
+        .get_or(
+            &proxy_key(entry),
+            |r| std::time::Duration::from_secs(if r.is_ok() { 120 } else { 30 }),
+            || async {
+                let r = geo_check_via(Some(entry), None).await.map_err(|e| e.to_string());
+                if let Ok(g) = &r {
+                    remember_geo(entry, g);
+                }
+                r
+            },
+        )
+        .await
+}
+
+/// Whether the proxy relays UDP, for launching a profile: the same record-first rule as the
+/// location. A failure is kept for three minutes in memory and is also written down — a proxy
+/// that cannot relay UDP will not start to.
+pub async fn probe_udp_cached(entry: &ProxyEntry) -> Result<u128, String> {
+    if let Some((u, _)) = udp_record(entry) {
+        return if u.ok { Ok(u.ms) } else { Err(u.err) };
+    }
+    static CACHE: std::sync::OnceLock<TtlCache<Result<u128, String>>> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(TtlCache::new);
+    cache
+        .get_or(
+            &proxy_key(entry),
+            |r| std::time::Duration::from_secs(if r.is_ok() { 600 } else { 180 }),
+            || async {
+                let r = probe_udp(entry).await.map_err(|e| e.to_string());
+                remember_udp(entry, &r);
+                r
+            },
+        )
+        .await
+}
+
+/// Where this machine's own connection exits (a profile with no proxy), kept for ten minutes.
+pub async fn geo_check_direct_cached() -> Result<GeoInfo, String> {
+    static CACHE: std::sync::OnceLock<TtlCache<Result<GeoInfo, String>>> = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(TtlCache::new);
+    cache
+        .get_or(
+            "direct",
+            |r| std::time::Duration::from_secs(if r.is_ok() { 600 } else { 30 }),
+            || async { geo_check_via(None, None).await.map_err(|e| e.to_string()) },
+        )
+        .await
 }
 
 /// Every provider we know, chosen provider first. ip-api is plain HTTP on the
@@ -1028,15 +1373,26 @@ fn unix_now() -> String {
 /// Run TCP + UDP + geo, persist into history, auto-fill country tag.
 pub async fn full_test(entry: &ProxyEntry) -> Result<TestSnapshot> {
     let now = unix_now();
-    let entry = &effective(entry).await;
+    let entry = &effective_live(entry).await;
 
-    let tcp_res = probe(entry).await;
-    let udp_res = if matches!(entry.kind, ProxyKind::Socks5) {
-        Some(probe_udp(entry).await)
-    } else {
-        None
-    };
-    let geo_res = geo_check(entry, None).await;
+    // The three checks do not depend on each other: one wait, not their sum.
+    let want_udp = matches!(entry.kind, ProxyKind::Socks5);
+    let (tcp_res, udp_res, geo_res) = tokio::join!(
+        probe(entry),
+        async { if want_udp { Some(probe_udp(entry).await) } else { None } },
+        geo_check(entry, None)
+    );
+    // What was just learned is what launching a profile trusts from now on; a proxy that
+    // failed is forgotten, so the next open looks again instead of relying on an old answer.
+    match (&tcp_res, &geo_res) {
+        (Ok(_), Ok(g)) => {
+            remember_geo(entry, g);
+            if let Some(u) = &udp_res {
+                remember_udp(entry, &u.as_ref().map(|ms| *ms).map_err(|e| e.to_string()));
+            }
+        }
+        _ => forget_verified(&entry.id),
+    }
 
     // TCP failure → zero geo so snapshot reads "Failed, no IP".
     let tcp_failed = tcp_res.is_err();
@@ -1255,6 +1611,7 @@ mod effective_kind_tests {
     /// list shows the real type.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_http_label_on_a_socks5_port_is_used_as_socks5_and_the_saved_kind_is_corrected() {
+        let _root = crate::cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         assert_eq!(effective(&entry(ProxyKind::Http, fake("socks").await)).await.kind, ProxyKind::Socks5);
         assert_eq!(effective(&entry(ProxyKind::Https, fake("socks").await)).await.kind, ProxyKind::Socks5);
         assert_eq!(effective(&entry(ProxyKind::Http, fake("http").await)).await.kind, ProxyKind::Http, "a right label stays");
@@ -1309,3 +1666,213 @@ mod effective_kind_tests {
     }
 }
 
+
+#[cfg(test)]
+mod ttl_cache_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Everyone who asks while the first answer is still on its way gets that answer: three
+    /// callers, one request. This is what lets a prefetch and the two later lookups in a launch
+    /// share a single trip through the proxy.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn askers_that_arrive_together_share_one_request() {
+        let cache: Arc<TtlCache<u32>> = Arc::new(TtlCache::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let ask = |cache: Arc<TtlCache<u32>>, calls: Arc<AtomicUsize>| async move {
+            cache
+                .get_or("k", |_| Duration::from_secs(60), || async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    7
+                })
+                .await
+        };
+        let (a, b, c) = tokio::join!(
+            ask(cache.clone(), calls.clone()),
+            ask(cache.clone(), calls.clone()),
+            ask(cache.clone(), calls.clone())
+        );
+        assert_eq!((a, b, c), (7, 7, 7));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "one request, not three");
+    }
+
+    /// An answer is kept for as long as its own rule says, and asked for again after: a success
+    /// for a while, a failure for a shorter while (zero here: forgotten at once).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_answer_is_remembered_for_its_time_and_a_failure_can_be_forgotten_at_once() {
+        let cache: TtlCache<Result<u32, String>> = TtlCache::new();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let ttl = |r: &Result<u32, String>| Duration::from_secs(if r.is_ok() { 60 } else { 0 });
+        let ask = |ok: bool| {
+            let calls = calls.clone();
+            cache.get_or("k", ttl, move || async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                if ok { Ok(1) } else { Err("down".into()) }
+            })
+        };
+        assert_eq!(ask(true).await, Ok(1));
+        assert_eq!(ask(true).await, Ok(1));
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "a success is remembered");
+
+        let other: TtlCache<Result<u32, String>> = TtlCache::new();
+        let ask_bad = || {
+            let calls = calls.clone();
+            other.get_or("k", ttl, move || async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Err::<u32, String>("down".into())
+            })
+        };
+        assert!(ask_bad().await.is_err());
+        assert!(ask_bad().await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "a failure with no time to live is asked again");
+
+        // Different proxies never share an answer.
+        let a = proxy_key(&ProxyEntry { id: String::new(), name: String::new(), kind: ProxyKind::Http, host: "h1".into(), port: 1, username: "u".into(), password: "p".into(), country: String::new(), notes: String::new() });
+        let b = proxy_key(&ProxyEntry { id: String::new(), name: String::new(), kind: ProxyKind::Http, host: "h2".into(), port: 1, username: "u".into(), password: "p".into(), country: String::new(), notes: String::new() });
+        assert_ne!(a, b);
+        assert_eq!(a, "http://u@h1:1", "who and where, never the password");
+    }
+}
+
+#[cfg(test)]
+mod verified_tests {
+    use super::*;
+
+    /// A proxy on `port` of this machine, with its own id so tests never share a record.
+    fn entry(kind: ProxyKind, port: u16) -> ProxyEntry {
+        ProxyEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            name: "t".into(),
+            kind,
+            host: "127.0.0.1".into(),
+            port,
+            username: "u".into(),
+            password: "p".into(),
+            country: String::new(),
+            notes: String::new(),
+        }
+    }
+
+    fn geo(ip: &str) -> GeoInfo {
+        GeoInfo {
+            ip: ip.into(),
+            country: "Viet Nam".into(),
+            country_code: "VN".into(),
+            region: String::new(),
+            city: "Hanoi".into(),
+            isp: String::new(),
+            timezone: "Asia/Ho_Chi_Minh".into(),
+            latitude: 21.0,
+            longitude: 105.8,
+            provider: "test".into(),
+        }
+    }
+
+    /// A port nothing listens on: any attempt to reach it fails at once.
+    fn dead_port() -> u16 {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    }
+
+    /// The point of it: a proxy that has been checked is not asked again. Its address here is a
+    /// dead port, so a lookup through it would fail — the answer can only have come from the record.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_proxy_checked_once_is_answered_from_its_record_and_never_contacted() {
+        let _g = crate::cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let e = entry(ProxyKind::Socks5, dead_port());
+        remember_geo(&e, &geo("203.0.113.7"));
+        remember_udp(&e, &Ok(42));
+        let started = std::time::Instant::now();
+        let g = geo_check_cached(&e).await.expect("answered from the record");
+        let udp = probe_udp_cached(&e).await;
+        let kept = effective(&e).await;
+        assert_eq!((g.ip.as_str(), g.timezone.as_str()), ("203.0.113.7", "Asia/Ho_Chi_Minh"));
+        assert_eq!(udp, Ok(42));
+        assert_eq!(kept.kind, ProxyKind::Socks5, "the kind it was checked as");
+        assert!(started.elapsed() < std::time::Duration::from_millis(500), "nothing was sent anywhere: {:?}", started.elapsed());
+
+        // A relay that was found not to work stays "not working" without trying again.
+        remember_udp(&e, &Err("no relay".into()));
+        assert_eq!(probe_udp_cached(&e).await, Err("no relay".to_string()));
+        forget_verified(&e.id);
+    }
+
+    /// What was learned holds for the proxy as configured. Editing the connection (type, host,
+    /// port, login) makes the record not apply — it is checked again; editing its name, country
+    /// tag or notes does not.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn changing_the_proxy_makes_it_be_checked_again_but_renaming_it_does_not() {
+        let _g = crate::cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // A "proxy" that hangs up on everyone at once. (A closed port is slow to refuse on Windows,
+        // and a lookup tries three providers.)
+        let hangup = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = hangup.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                if let Ok((sock, _)) = hangup.accept().await {
+                    drop(sock);
+                }
+            }
+        });
+        let e = entry(ProxyKind::Http, port);
+        remember_geo(&e, &geo("203.0.113.8"));
+        assert!(geo_record(&e).is_some());
+
+        let mut renamed = e.clone();
+        renamed.name = "another name".into();
+        renamed.country = "US".into();
+        renamed.notes = "a note".into();
+        assert!(geo_record(&renamed).is_some(), "name, country and notes are not the connection");
+
+        let mut host = e.clone(); host.host = "localhost".into();
+        let mut port = e.clone(); port.port = e.port.wrapping_add(1).max(1025);
+        let mut user = e.clone(); user.username = "other".into();
+        let mut pass = e.clone(); pass.password = "other".into();
+        let mut kind = e.clone(); kind.kind = ProxyKind::Socks5;
+        for (what, changed) in [("host", host), ("port", port), ("user", user), ("password", pass), ("type", kind)] {
+            assert!(geo_record(&changed).is_none(), "a changed {what} must not reuse the old answer");
+            assert_ne!(proxy_sig(&changed), proxy_sig(&e), "{what}");
+        }
+
+        // So the first open after an edit really asks — here the (dead) proxy, which fails fast.
+        let mut edited = e.clone();
+        edited.password = "changed".into();
+        let t = std::time::Instant::now();
+        assert!(geo_check_cached(&edited).await.is_err());
+        assert!(t.elapsed() < std::time::Duration::from_secs(20), "{:?}", t.elapsed());
+        forget_verified(&e.id);
+    }
+
+    /// An answer is trusted for a week. Past 12 hours it is still used (the profile opens at once)
+    /// and re-checked in the background; past a week it is not used at all.
+    #[test]
+    fn a_record_is_used_while_it_is_young_and_dropped_when_it_is_a_week_old() {
+        let _g = crate::cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let e = entry(ProxyKind::Http, 1080);
+        update_verified(&e, |v| { v.geo = Some(geo("1.1.1.1")); v.geo_at = now_secs() - 3 * 3600; });
+        let (_, age) = geo_record(&e).expect("three hours old: used");
+        assert!(age < REFRESH_AFTER_SECS, "{age}");
+
+        update_verified(&e, |v| v.geo_at = now_secs() - 20 * 3600);
+        let (_, age) = geo_record(&e).expect("twenty hours old: still used");
+        assert!(age > REFRESH_AFTER_SECS && age < EXPIRES_AFTER_SECS, "{age}: due for a background refresh");
+
+        update_verified(&e, |v| v.geo_at = now_secs() - 8 * 24 * 3600);
+        assert!(geo_record(&e).is_none(), "a week old: ask again");
+        forget_verified(&e.id);
+    }
+
+    /// Deleting a proxy deletes what was known about it.
+    #[test]
+    fn deleting_a_proxy_forgets_what_was_verified_about_it() {
+        let _g = crate::cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = upsert(entry(ProxyKind::Http, 3128)).unwrap();
+        remember_geo(&saved, &geo("198.51.100.1"));
+        assert!(geo_record(&saved).is_some());
+        delete(&saved.id).unwrap();
+        assert!(geo_record(&saved).is_none());
+    }
+}

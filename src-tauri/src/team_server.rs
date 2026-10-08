@@ -371,7 +371,20 @@ async fn lock_profile(
     let expires_at = now_ms() + lock_ttl_ms();
     map.insert(id.clone(), json!({"holder": holder, "acquiredAt": now_ms(), "expiresAt": expires_at}));
     let _ = save_json_atomic(&locks_path, &locks);
-    Json(json!({"ok": true, "expiresAt": expires_at})).into_response()
+    // The version of the bundle as it stands, so a client that opens the profile knows what it
+    // is about to pull (or already has) without asking for the whole list again.
+    let updated_at = bundle_version(&id);
+    Json(json!({"ok": true, "expiresAt": expires_at, "updatedAt": updated_at})).into_response()
+}
+
+/// The `updatedAt` of the live bundle for `id`; `None` for a profile with none yet or a deleted one.
+fn bundle_version(id: &str) -> Option<String> {
+    let meta = meta_map();
+    let m = meta.get(id)?;
+    if m.get("deleted").and_then(|d| d.as_bool()).unwrap_or(false) {
+        return None;
+    }
+    m.get("updatedAt").and_then(|v| v.as_str()).map(String::from).filter(|s| !s.is_empty())
 }
 
 async fn unlock_profile(
@@ -418,12 +431,28 @@ async fn get_bundle(
     if profile_level(&who, &load_acl(), &meta_map(), &id) < Level::Use {
         return not_found();
     }
+    // The version doubles as the ETag. A client that already holds exactly this version says so
+    // with If-None-Match and is told "304" instead of being sent megabytes it has.
+    let version = bundle_version(&id);
+    let etag = version.as_ref().map(|v| format!("\"{v}\""));
+    if let (Some(v), Some(have)) = (&version, headers.get("if-none-match").and_then(|h| h.to_str().ok())) {
+        if have.trim().trim_matches('"') == v.as_str() {
+            let mut h = HeaderMap::new();
+            if let Some(e) = &etag {
+                if let Ok(val) = e.parse() { h.insert("ETag", val); }
+            }
+            return (StatusCode::NOT_MODIFIED, h).into_response();
+        }
+    }
     let dir = match bundles_dir() { Ok(d) => d, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok":false,"error":e.to_string()}))).into_response() };
     let path = dir.join(format!("{id}.zip"));
     match tokio::fs::read(&path).await {
         Ok(bytes) => {
             let mut headers_map = HeaderMap::new();
             headers_map.insert("Content-Type", "application/zip".parse().unwrap());
+            if let Some(e) = &etag {
+                if let Ok(val) = e.parse() { headers_map.insert("ETag", val); }
+            }
             (StatusCode::OK, headers_map, Body::from(bytes)).into_response()
         }
         Err(_) => (StatusCode::NOT_FOUND, Json(json!({"ok":false,"error":"no bundle yet"}))).into_response(),
@@ -1233,6 +1262,56 @@ mod permission_tests {
         let mut r = match method { "GET" => c.get(url), "PUT" => c.put(url), _ => c.post(url) }.bearer_auth(tok).header("x-sync-holder", holder);
         if let Some(b) = body { r = r.body(b); } else if method == "POST" { r = r.json(&json!({"holder": holder})); }
         r.send().await.unwrap().status().as_u16()
+    }
+
+    /// Opening a profile asked for its whole bundle every time. The server now says which version
+    /// the bundle is (on the lock and as an ETag), and a client that already holds that version is
+    /// answered 304 instead of being sent the bundle again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_bundle_carries_its_version_and_is_not_sent_again_to_a_client_that_has_it() {
+        let _g = crate::cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-etag-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        crate::store::set_data_root(Some(tmp.clone()));
+        let admin = "admin-token-etag-1";
+        let port = start(0, admin.to_string()).await.expect("start");
+        let base = format!("http://127.0.0.1:{port}");
+        let c = reqwest::Client::new();
+        let lock = || c.post(format!("{base}/profiles/ev1/lock")).bearer_auth(admin).json(&json!({"holder": "m"})).send();
+        let get = |have: Option<&str>| {
+            let mut r = c.get(format!("{base}/profiles/ev1/bundle")).bearer_auth(admin);
+            if let Some(h) = have { r = r.header("If-None-Match", h); }
+            r.send()
+        };
+
+        // A profile the server has never seen has no version to report.
+        let first: Value = lock().await.unwrap().json().await.unwrap();
+        assert!(first["updatedAt"].is_null(), "{first}");
+        assert_eq!(status(&c, admin, "PUT", format!("{base}/profiles/ev1/bundle"), Some(bundle("", "ua1")), "m").await, 200);
+
+        // Now the lock names the version, and the bundle carries it as its ETag.
+        let after: Value = lock().await.unwrap().json().await.unwrap();
+        let ver = after["updatedAt"].as_str().expect("the lock reports the version").to_string();
+        let full = get(None).await.unwrap();
+        assert_eq!(full.status().as_u16(), 200);
+        assert_eq!(full.headers().get("etag").and_then(|h| h.to_str().ok()), Some(format!("\"{ver}\"").as_str()));
+        assert!(!full.bytes().await.unwrap().is_empty());
+
+        // A client that holds this exact version is told so; one that holds another is sent it.
+        let same = get(Some(&format!("\"{ver}\""))).await.unwrap();
+        assert_eq!(same.status().as_u16(), 304);
+        assert!(same.bytes().await.unwrap().is_empty(), "a 304 carries no bundle");
+        assert_eq!(get(Some("\"1999-01-01T00:00:00Z\"")).await.unwrap().status().as_u16(), 200);
+
+        // After a new upload the old version no longer matches (versions are whole seconds).
+        tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        assert_eq!(status(&c, admin, "PUT", format!("{base}/profiles/ev1/bundle"), Some(bundle("", "ua2")), "m").await, 200);
+        let stale = get(Some(&format!("\"{ver}\""))).await.unwrap();
+        assert_eq!(stale.status().as_u16(), 200, "the version the client holds is out of date");
+
+        let _ = stop();
+        crate::store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     async fn put_json(c: &reqwest::Client, tok: &str, url: String, body: Value) -> (u16, Value) {

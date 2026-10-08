@@ -3,6 +3,7 @@
 mod profile_icon;
 mod winfs;
 mod winhide;
+mod localtime;
 mod api;
 mod bookmarks;
 mod cloud_sync;
@@ -2545,7 +2546,7 @@ fn proxy_delete(id: String) -> Result<(), String> {
 #[tauri::command]
 async fn proxy_check(entry: proxy::ProxyEntry) -> Result<u128, String> {
     // Tested the way it will be used: an HTTP proxy pasted as SOCKS5 passes as HTTP.
-    let entry = proxy::effective(&entry).await;
+    let entry = proxy::effective_live(&entry).await;
     proxy::probe(&entry).await.map_err(|e| e.to_string())
 }
 
@@ -3196,6 +3197,21 @@ fn team_invite_generate_with_auth(server_url: String, token: String, auth_key: S
 fn team_invite_parse(code: String) -> Result<Value, String> {
     let (url, token, _auth) = team_invite::parse_invite_code(&code).map_err(|e| e.to_string())?;
     Ok(serde_json::json!({"url": url, "token": token}))
+}
+
+/// The last lines of the sync log, for the Team tab: what was pulled, what was made portable,
+/// what could not be restored — the answer to "why am I logged out on this machine".
+#[tauri::command]
+fn sync_log_tail(lines: Option<usize>) -> String {
+    cloud_sync::log_tail(lines.unwrap_or(120).clamp(1, 2000))
+}
+
+/// Sends every profile on this machine to the team now, login included. Answers
+/// `{ sent, skipped }`.
+#[tauri::command]
+async fn sync_push_all() -> Result<serde_json::Value, String> {
+    let (sent, skipped) = cloud_sync::push_all_local().await.map_err(|e| format!("{e:#}"))?;
+    Ok(serde_json::json!({ "sent": sent, "skipped": skipped }))
 }
 
 /// A profile was saved or created here: send it to the team now.
@@ -3926,6 +3942,8 @@ pub fn run() {
             automation_run_status,
             automation_sheet_counts,
             automation_sheet_reset,
+            sync_log_tail,
+            sync_push_all,
             automation_fleet,
             automation_fleet_window,
             automation_display,
