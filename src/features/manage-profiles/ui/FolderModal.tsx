@@ -15,12 +15,14 @@ export function FolderModal({
 }) {
   const t = useT();
   const [name, setName] = useState("");
+  const [find, setFind] = useState("");
   const ref = useRef<HTMLInputElement>(null);
   useEffect(() => { ref.current?.focus(); }, []);
   const trimmed = name.trim();
   const dup = existing.includes(trimmed);
   const create = () => { if (trimmed && !dup) onCreate(trimmed); };
   const showList = mode === "move" && existing.length > 0;
+  const listed = find.trim() ? existing.filter((f) => f.toLowerCase().includes(find.trim().toLowerCase())) : existing;
   return (
     <DialogModal
       open
@@ -37,8 +39,16 @@ export function FolderModal({
         {showList && (
           <>
             <span className="text-label-xs text-text-sub-600">{t("folderModal.existingFolders")}</span>
+            {existing.length > 8 && (
+              <Input
+                inputSize="small"
+                value={find}
+                placeholder={`Tìm trong ${existing.length} thư mục…`}
+                onChange={(e) => setFind(e.target.value)}
+              />
+            )}
             <div className="flex max-h-[220px] flex-col gap-1 overflow-y-auto">
-              {existing.map((f) => (
+              {listed.slice(0, 200).map((f) => (
                 <Button
                   key={f}
                   variant="neutral"
@@ -51,6 +61,8 @@ export function FolderModal({
                   {f}
                 </Button>
               ))}
+              {listed.length > 200 && <span className="px-1 py-1 text-paragraph-xs text-text-soft-400">Còn {listed.length - 200} thư mục nữa — gõ thêm để lọc.</span>}
+              {listed.length === 0 && <span className="px-1 py-1 text-paragraph-xs text-text-soft-400">Không có thư mục nào khớp.</span>}
             </div>
             <div className="my-0.5 flex items-center gap-2.5 text-paragraph-xs text-text-soft-400 [&::before]:h-px [&::before]:flex-1 [&::before]:bg-stroke-soft-200 [&::before]:content-[''] [&::after]:h-px [&::after]:flex-1 [&::after]:bg-stroke-soft-200 [&::after]:content-['']">
             <span>{t("folderModal.orCreateNew")}</span>

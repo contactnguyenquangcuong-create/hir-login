@@ -8,7 +8,6 @@ import type { Settings, RemoteProfileStatus } from "../../entities/settings";
 import { teamSyncList, teamSyncPull, teamServerStart, teamServerStop, teamServerStatus, teamServerConflict, teamSyncedElsewhere, firewallStatus, firewallGrant, type FirewallStatus, teamInviteJoin, tailscaleStatus, autostartGet, autostartSet, tailscaleOauthGet, tailscaleOauthSet, tailscaleOauthVerify, tailscaleOauthClear } from "../../entities/settings";
 import { confirmModal } from "../../shared/model/confirm";
 import { MembersPanel } from "./MembersPanel";
-import { SyncLogPanel } from "./SyncLogPanel";
 import { FirstDownload } from "./FirstDownload";
 import { Section, Row, Block, Pill, Dot, Segmented } from "./ui";
 
@@ -363,8 +362,6 @@ export function TeamTab({
       {mode === (serverRunning ? "host" : "join") && (
         <MembersPanel getServerUrl={getServerUrl} oauthReady={oauthReady} onOpenOauthSetup={() => setOauthOpen(true)} />
       )}
-
-      <SyncLogPanel />
 
       <button type="button" onClick={() => setAdvancedOpen((v) => !v)} className="self-start border-0 bg-transparent p-0 text-label-xs text-text-sub-600 hover:text-text-strong-950">
         {advancedOpen ? "▾ Ẩn cấu hình nâng cao" : "▸ Cấu hình nâng cao"}

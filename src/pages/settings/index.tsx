@@ -87,25 +87,33 @@ export function SettingsPage() {
   // click. Persist it at once and drop the cached role right away, or the
   // Nhân sự list (built from the old, still-saved token) keeps showing.
   const disconnect = async () => {
-    // Leaving the team takes its profiles with it: they belong to the team, not to this machine.
-    const ok = await confirmModal({
+    // Leaving takes back what the team gave this machine; what was here before it joined, or was
+    // made here, stays — with its folder. A machine that joined before the app recorded that
+    // cannot tell them apart, so the person is asked.
+    const choice: "cancel" | "delete" | "keep" = await confirmModal({
       title: "Rời nhóm",
-      message: "Rời nhóm sẽ XOÁ khỏi máy này tất cả profile của nhóm đã tải về (dữ liệu trên server vẫn còn). Profile chỉ tạo riêng trên máy này không bị ảnh hưởng. Tham gia lại bằng mã mới sẽ tải về lại.",
+      message:
+        "Profile bạn tạo riêng (có trước khi vào nhóm hoặc tự tạo) luôn được giữ nguyên cùng thư mục cá nhân. " +
+        "Profile do nhóm cấp xuống máy này sẽ bị xoá khỏi máy (dữ liệu trên server vẫn còn). " +
+        "Nếu máy này vào nhóm từ phiên bản cũ, app không phân biệt được profile riêng với profile của nhóm — " +
+        "chọn “Rời nhóm, giữ mọi profile” để không mất cái nào.",
       buttons: [
-        { label: "Huỷ", value: false },
-        { label: "Rời nhóm và xoá", value: true, danger: true },
+        { label: "Huỷ", value: "cancel" },
+        { label: "Rời nhóm, giữ mọi profile", value: "keep" },
+        { label: "Rời nhóm, xoá profile của nhóm", value: "delete", danger: true },
       ],
     });
-    if (!ok) return;
+    if (choice !== "keep" && choice !== "delete") return;
     let removed = 0;
-    try { removed = await teamLeave(); }
+    try { removed = await teamLeave(choice === "keep"); }
     catch (e) { toast.err(String(e)); return; }
     const next = { ...s, sync: { ...s.sync!, enabled: false, server_url: null, token: null } };
     setS(next);
     setSaved(JSON.stringify(next));
     useTeam.setState({ role: null, name: "", id: "", isServerAdmin: false, folderNames: null });
     try { localStorage.removeItem("hir.teamRole"); } catch { /* ignore */ }
-    toast.ok(`Đã rời nhóm — đã xoá ${removed} profile của nhóm khỏi máy này`);
+    toast.ok(choice === "keep" ? "Đã rời nhóm — mọi profile được giữ lại trên máy này" : `Đã rời nhóm — đã xoá ${removed} profile của nhóm khỏi máy này`);
+    window.dispatchEvent(new CustomEvent("store-changed"));
   };
 
   const TABS: { id: Tab; label: string }[] = [

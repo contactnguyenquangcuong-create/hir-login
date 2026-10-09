@@ -7,6 +7,7 @@ import { CSSelect } from "../../shared/ui/CSSelect";
 import { AddIcon, DeleteIcon, NavBookmarksIcon } from "../../shared/icons";
 import { useBookmarks, emptyBookmark, type Bookmark } from "../../entities/bookmark";
 import { useFolders, useProfile } from "../../entities/profile";
+import { FolderListButton, inlineFolders } from "../../shared/ui/FolderListButton";
 import { useT } from "../../shared/i18n";
 
 function Editor({ initial, folders, onClose }: {
@@ -91,11 +92,20 @@ export function BookmarksPage() {
   const countIn = (f: string) =>
     f === "" ? profiles.length : profiles.filter((p) => p.folder === f).length;
 
+  // "All" and "every profile", then the first few folders and the open one; the rest are behind
+  // the list button, which scrolls and searches, so a thousand folders do not fill the page.
   const tabs = [
     { id: "all", label: t("bookmarks.tabAll") },
     { id: "__any__", label: t("bookmarks.tabEveryProfile") },
-    ...folders.map((f) => ({ id: f, label: f })),
+    ...inlineFolders(folders, folder === "all" || folder === "__any__" ? "" : folder).map((f) => ({ id: f, label: f })),
   ];
+  const tabClass = (on: boolean) =>
+    cn(
+      "flex max-w-[200px] items-center gap-1.5 rounded-6 px-2.5 py-1 text-label-xs ring-1 ring-inset transition-colors",
+      on
+        ? "bg-primary-alpha-10 text-primary-base ring-primary-alpha-24"
+        : "text-text-sub-600 ring-stroke-soft-200 hover:bg-bg-weak-50",
+    );
 
   return (
     <section className="flex flex-col">
@@ -115,16 +125,21 @@ export function BookmarksPage() {
                 key={tab.id}
                 type="button"
                 onClick={() => setFolder(tab.id)}
-                className={cn(
-                  "rounded-6 px-2.5 py-1 text-label-xs ring-1 ring-inset transition-colors",
-                  folder === tab.id
-                    ? "bg-primary-alpha-10 text-primary-base ring-primary-alpha-24"
-                    : "text-text-sub-600 ring-stroke-soft-200 hover:bg-bg-weak-50",
-                )}
+                className={tabClass(folder === tab.id)}
+                title={tab.label}
               >
-                {tab.label}
+                <span className="truncate">{tab.label}</span>
               </button>
             ))}
+            {folders.length > tabs.length - 2 && (
+              <FolderListButton
+                folders={folders}
+                value={folder}
+                onPick={setFolder}
+                className={cn(tabClass(false), "text-primary-base")}
+                extra={[{ id: "all", label: t("bookmarks.tabAll") }, { id: "__any__", label: t("bookmarks.tabEveryProfile") }]}
+              />
+            )}
           </div>
         </div>
         <Button

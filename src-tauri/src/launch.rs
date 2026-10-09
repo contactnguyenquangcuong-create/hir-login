@@ -171,7 +171,7 @@ pub async fn launch_profile_synced(
     // Strip `_meta` wrapper and resolve "auto" sentinels before serialising.
     let mut raw = stored.config.clone();
     raw.remove("_meta");
-    resolve_auto_fields(&mut raw, bound_proxy.as_ref()).await;
+    resolve_auto_fields(profile_id, &mut raw, bound_proxy.as_ref()).await;
     // A profile made on another machine carries that machine's screen; on Win/Linux
     // the window has to fit this monitor. "real" mode skips — the core drops it anyway.
     if settings::load()?.screen_resolution_mode.as_deref() != Some("real") {
@@ -541,6 +541,7 @@ async fn read_devtools_endpoint(udd: &Path) -> Option<process::CdpInfo> {
 
 /// Resolve "auto" sentinels in profile JSON; with proxy: live → cached → country tag → host warn.
 async fn resolve_auto_fields(
+    profile_id: &str,
     cfg: &mut serde_json::Map<String, serde_json::Value>,
     proxy_opt: Option<&proxy::ProxyEntry>,
 ) {
@@ -677,6 +678,16 @@ async fn resolve_auto_fields(
     eprintln!(
         "[launcher] resolved tz={resolved_tz} locale={resolved_locale} (source={source})"
     );
+    // Where the sites will think this profile is, written down: a profile with no proxy exits from
+    // each machine's own address and takes that machine's time zone and language, so the same
+    // login seen from two machines looks like two places — often what a site logs out for.
+    crate::cloud_sync::log_line(&format!(
+        "launch {profile_id}: the sites see {} ({}{}) — time zone {resolved_tz}, language {resolved_locale}, from {}",
+        geo.as_ref().map(|g| g.ip.as_str()).filter(|s| !s.is_empty()).unwrap_or("an address that could not be read"),
+        geo.as_ref().map(|g| g.country_code.as_str()).filter(|s| !s.is_empty()).unwrap_or("country unknown"),
+        geo.as_ref().map(|g| g.city.as_str()).filter(|s| !s.is_empty()).map(|c| format!(", {c}")).unwrap_or_default(),
+        if source.is_empty() { "this computer's own settings" } else { source },
+    ));
 
     if want_tz_auto {
         cfg.insert("timezone".into(), serde_json::Value::String(resolved_tz.clone()));

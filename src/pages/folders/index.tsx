@@ -28,6 +28,8 @@ export function FoldersPage() {
   const [sharing, setSharing] = useState<string | null>(null);
   const [trash, setTrash] = useState<TrashedFolder[]>([]);
   const [name, setName] = useState("");
+  const [filter, setFilter] = useState("");
+  const [limit, setLimit] = useState(50);
 
   useEffect(() => { startTeamRole(); }, []);
 
@@ -62,6 +64,13 @@ export function FoldersPage() {
     const extra = localFolders.filter((f) => !seen.has(f)).map((f) => ({ name: f, profiles: localCount[f] ?? 0, access: {} as Record<string, string>, canDelete: true, createdBy: undefined, local: true }));
     return [...(server ?? []).map((f) => ({ ...f, local: false })), ...extra];
   }, [server, localFolders, localCount]);
+
+  // A page of fifty at a time, filtered by what is typed: with a thousand folders the rows were a
+  // thousand blocks of sharing pills to scroll through.
+  const filtered = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    return q ? rows.filter((r) => r.name.toLowerCase().includes(q)) : rows;
+  }, [rows, filter]);
 
   const create = async () => {
     const n = name.trim();
@@ -147,8 +156,20 @@ export function FoldersPage() {
               <div className="flex-1"><Input inputSize="small" label="Tạo thư mục mới" value={name} onChange={(e) => setName(e.target.value)} placeholder="Tên thư mục, ví dụ: Shop A" /></div>
               <Button type="submit" variant="primary" size="small" disabled={!name.trim()}>Tạo</Button>
             </form>
+            {rows.length > 8 && (
+              <div className="flex items-center gap-3 px-5 pb-3">
+                <input
+                  value={filter}
+                  onChange={(e) => { setFilter(e.target.value); setLimit(50); }}
+                  placeholder={`Tìm trong ${rows.length} thư mục…`}
+                  className="h-8 w-72 rounded-8 bg-bg-white-0 px-2.5 text-paragraph-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 outline-none placeholder:text-text-soft-400 focus:ring-primary-base"
+                />
+                <span className="text-paragraph-xs text-text-soft-400">{filter.trim() ? `${filtered.length} khớp` : `${rows.length} thư mục`}</span>
+              </div>
+            )}
             {rows.length === 0 && <div className="px-5 py-8 text-center text-paragraph-xs text-text-soft-400">Chưa có thư mục nào.</div>}
-            {rows.map((f) => {
+            {rows.length > 0 && filtered.length === 0 && <div className="px-5 py-8 text-center text-paragraph-xs text-text-soft-400">Không có thư mục nào khớp “{filter}”.</div>}
+            {filtered.slice(0, limit).map((f) => {
               const people = Object.entries(f.access);
               return (
                 <div key={f.name} className="flex flex-wrap items-center gap-3 px-5 py-3.5">
@@ -175,6 +196,13 @@ export function FoldersPage() {
                 </div>
               );
             })}
+            {filtered.length > limit && (
+              <div className="flex justify-center px-5 py-3">
+                <Button variant="neutral" mode="stroke" size="xsmall" onClick={() => setLimit(limit + 50)}>
+                  Hiện thêm 50 (còn {filtered.length - limit})
+                </Button>
+              </div>
+            )}
           </Section>
         )}
 

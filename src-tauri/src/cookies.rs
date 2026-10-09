@@ -963,11 +963,23 @@ pub fn census(profile_id: &str) -> String {
         Some((sealed, ok)) => format!("{ok} of {sealed} sealed rows open with this machine's key"),
         None => "key check unavailable".into(),
     };
+    // Whether the logins of the sites people use most are among the cookies.
+    let has_on = |site: &str, name: &str| -> bool {
+        conn.query_row(
+            "SELECT count(1) FROM cookies WHERE name = ?1 AND host_key LIKE ?2",
+            rusqlite::params![name, format!("%{site}")],
+            |r| r.get::<_, i64>(0),
+        ).map(|n| n > 0).unwrap_or(false)
+    };
+    let yn = |b: bool| if b { "yes" } else { "no" };
     format!(
-        "cookies: {total} rows ({session} session, {} long-lived; {kept}), {opened}; Facebook login c_user={} xs={}",
+        "cookies: {total} rows ({session} session, {} long-lived; {kept}), {opened}; logins — Facebook c_user={} xs={}, Google SID={} __Secure-1PSID={}, Shopee SPC_ST={}",
         total - session,
-        if has("c_user") { "yes" } else { "no" },
-        if has("xs") { "yes" } else { "no" },
+        yn(has("c_user")),
+        yn(has("xs")),
+        yn(has_on("google.com", "SID")),
+        yn(has_on("google.com", "__Secure-1PSID")),
+        yn(has_on("shopee.vn", "SPC_ST")),
     )
 }
 

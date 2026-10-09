@@ -162,6 +162,18 @@ struct SyncState {
     /// with the profiles when this machine leaves the team or is removed from it.
     #[serde(default)]
     team_proxies: std::collections::HashSet<String>,
+    /// Profiles that CAME FROM the team — arrived by a download onto a machine that did not have
+    /// them. Only these are the team's to take back when this machine leaves or is removed; a
+    /// profile that was on the machine before it joined (or that its person made) stays, with
+    /// its folder, even though it was uploaded too.
+    #[serde(default)]
+    pulled: std::collections::HashSet<String>,
+    /// Whether `pulled` is complete: true for a machine that joined with this recorded from the
+    /// start. A machine that joined before it was recorded cannot tell its own profiles from the
+    /// team's, and leaves with the old rule (everything that synced goes) unless its person
+    /// chooses to keep them all.
+    #[serde(default)]
+    tracked: bool,
 }
 
 fn state_lock() -> &'static Mutex<()> {
@@ -338,14 +350,46 @@ pub fn ensure_access(id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Called when sync is switched on for a machine that was not in a team: from now on it records
+/// which profiles the team gives it (see `SyncState::pulled`), so that leaving takes those and
+/// leaves the machine's own. A machine that already holds team state keeps the old rule.
+pub fn note_joined() {
+    update_state(|s| {
+        if s.items.is_empty() && s.pending.is_empty() {
+            s.tracked = true;
+            s.pulled.clear();
+        }
+    });
+}
+
+/// Leaves the team and keeps every profile on this machine: they become ordinary local profiles
+/// (and the proxies that came with them ordinary proxies). For a person who chooses to keep them,
+/// not for a machine that was removed — that one is wiped (`wipe_team_data`).
+pub fn forget_team() {
+    update_state(|s| {
+        s.items.clear();
+        s.pending.clear();
+        s.team_proxies.clear();
+        s.pulled.clear();
+        s.tracked = false;
+    });
+}
+
 /// Deletes from this machine every profile that came from (or went to) the team, with its browser
 /// data, its copy in the trash, and the proxies that arrived with them; stops any of them that is
 /// running first; forgets the sync state. Local-only profiles are left alone. Returns how many
 /// profiles were deleted. Nothing is reported to the server — it already has them.
 pub async fn wipe_team_data() -> usize {
     let st = load_state();
-    let mut ids: Vec<String> = st.items.keys().cloned().collect();
-    ids.extend(st.pending.iter().cloned());
+    // What came from the team goes; what was here before it joined, or was made here, stays. A
+    // machine that joined before that was recorded cannot tell them apart: everything that synced.
+    let mut ids: Vec<String> = if st.tracked {
+        st.pulled.iter().cloned().collect()
+    } else {
+        let mut all: Vec<String> = st.items.keys().cloned().collect();
+        all.extend(st.pending.iter().cloned());
+        all
+    };
     ids.sort();
     ids.dedup();
     let mut gone = 0;
@@ -368,6 +412,8 @@ pub async fn wipe_team_data() -> usize {
         s.items.clear();
         s.pending.clear();
         s.team_proxies.clear();
+        s.pulled.clear();
+        s.tracked = false;
     });
     if let Some(app) = crate::app_handle() {
         use tauri::Emitter;
@@ -644,6 +690,16 @@ fn apply_bundle(id: &str, bytes: &[u8]) -> Result<()> {
 /// from the bundle but leave this machine's own browser data (logins, cookies,
 /// storage) untouched — for a profile whose last close never reached the server.
 fn apply_bundle_with(id: &str, bytes: &[u8], keep_local_session: bool) -> Result<()> {
+    // A profile this machine did not have is one the team gave it.
+    let arrives_new = crate::profile::load_raw(id).is_err();
+    let result = apply_bundle_inner(id, bytes, keep_local_session);
+    if arrives_new && result.is_ok() {
+        update_state(|st| { st.pulled.insert(id.to_string()); });
+    }
+    result
+}
+
+fn apply_bundle_inner(id: &str, bytes: &[u8], keep_local_session: bool) -> Result<()> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
     let udd = store::user_data_root()?.join(id);
     fs::create_dir_all(&udd)?;
@@ -2585,6 +2641,98 @@ mod tests {
         assert_eq!(sync_round().await.expect("round"), 0, "and a round has nothing to fetch for the profiles it holds");
     }
 
+    /// Leaving the team takes back what the team gave the machine and nothing else: a profile that
+    /// was here before it joined stays, with its folder — even though it was uploaded to the team
+    /// too. A person who chooses to keep everything keeps everything.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn leaving_the_team_keeps_the_profiles_that_were_here_before_it_and_their_folders() {
+        let _g = TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-leave-{}", uuid::Uuid::new_v4()));
+        for d in ["srv", "A", "W"] {
+            std::fs::create_dir_all(tmp.join(d)).unwrap();
+        }
+        crate::team_server::set_server_dir_for_tests(Some(tmp.join("srv")));
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = crate::team_server::stop();
+                crate::team_server::set_server_dir_for_tests(None);
+                store::set_data_root(None);
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(tmp.clone());
+        at(&tmp.join("srv"));
+        let token = "leave-token-123456789";
+        let port = crate::team_server::start(0, token.to_string()).await.expect("start");
+        let base = format!("http://127.0.0.1:{port}");
+        let join = |name: &str| {
+            at(&tmp.join(name));
+            let mut s = settings::load().unwrap();
+            s.sync.enabled = true;
+            s.sync.server_url = Some(base.clone());
+            s.sync.token = Some(token.to_string());
+            s.sync.device_name = Some(format!("machine-{name}"));
+            s.sync.slim_local = false;
+            settings::save(&s).unwrap();
+        };
+        let leave_settings = |name: &str| {
+            at(&tmp.join(name));
+            let mut s = settings::load().unwrap();
+            s.sync.enabled = false;
+            s.sync.server_url = None;
+            s.sync.token = None;
+            settings::save(&s).unwrap();
+        };
+        let make = |id: &str, folder: &str| {
+            let mut stored = crate::profile::StoredProfile::default();
+            stored.meta.id = id.to_string();
+            stored.meta.folder = folder.to_string();
+            stored.config.insert("name".into(), serde_json::json!(id));
+            crate::profile::save_raw(&mut stored).unwrap();
+        };
+        // The team has two profiles, made on machine A.
+        join("A");
+        at(&tmp.join("A"));
+        make("team-1", "Nhóm");
+        make("team-2", "Nhóm");
+        sim_login_on(&tmp.join("A"), "team-1", 1).await;
+        sim_login_on(&tmp.join("A"), "team-2", 2).await;
+
+        // W has a profile of its own, in a personal folder, from before it joins.
+        at(&tmp.join("W"));
+        make("mine-1", "Của tôi");
+        cookies::import("mine-1", &[sim_cookie("c_user", "u-9"), sim_cookie("xs", "x-9")]).unwrap();
+        join("W");
+        note_joined();
+        assert_eq!(pull_everything().await.expect("download"), 2, "the team's two came down");
+        let _ = sync_round().await; // sends mine-1 up as well
+        assert!(load_state().items.contains_key("mine-1"), "it was uploaded: the state knows it");
+
+        // Leaving: the team's profiles go, W's own stays — folder and login included.
+        leave_settings("W");
+        let gone = wipe_team_data().await;
+        assert_eq!(gone, 2, "only what the team gave");
+        assert!(crate::profile::load_raw("team-1").is_err() && crate::profile::load_raw("team-2").is_err());
+        let mine = crate::profile::load_raw("mine-1").expect("its own profile stays");
+        assert_eq!(mine.meta.folder, "Của tôi", "with its personal folder");
+        assert_eq!(sim_login("mine-1"), Some(9), "and its login");
+        assert!(load_state().items.is_empty(), "nothing is left of the team in the state");
+        assert!(ensure_access("mine-1").is_ok(), "and it opens: it is nobody's but its owner's now");
+
+        // Joining again and then choosing to keep everything keeps everything.
+        join("W");
+        note_joined();
+        assert_eq!(pull_everything().await.expect("download again"), 2);
+        leave_settings("W");
+        forget_team();
+        for id in ["team-1", "team-2", "mine-1"] {
+            assert!(crate::profile::load_raw(id).is_ok(), "{id} was kept");
+            assert!(ensure_access(id).is_ok(), "and opens");
+        }
+        assert!(load_state().items.is_empty());
+    }
+
     /// The refusal to open a profile names the member, in words the UI turns into a sentence —
     /// and an older server that only knows machine names still gets a readable message.
     #[test]
@@ -2688,6 +2836,7 @@ mod tests {
         assert!(cookies::restore_if_lost(id).is_none());
         let line = cookies::census(id);
         assert!(line.contains("c_user=yes") && line.contains("xs=yes") && line.contains("saved copy"), "{line}");
+        assert!(line.contains("Google SID=no") && line.contains("Shopee SPC_ST=no"), "{line}");
 
     }
 

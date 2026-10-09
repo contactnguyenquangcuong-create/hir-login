@@ -3042,6 +3042,7 @@ fn settings_save(mut value: settings::Settings) -> Result<(), String> {
     }
     // Owned by the migration, not the form — which round-trips the whole struct
     // and would reset it while the data sits on another disk.
+    let was_in_a_team = settings::load().map(|c| c.sync.enabled && has_token(&c.sync.token)).unwrap_or(false);
     if let Ok(cur) = settings::load() {
         value.data_root = cur.data_root;
         // Owned by team_server_start/stop, not the form: the form has no such
@@ -3052,7 +3053,13 @@ fn settings_save(mut value: settings::Settings) -> Result<(), String> {
             value.api_secret = cur.api_secret;
         }
     }
-    settings::save(&value).map_err(|e| e.to_string())
+    settings::save(&value).map_err(|e| e.to_string())?;
+    // A machine joining a team starts recording which profiles the team gives it, so that leaving
+    // takes those and not the ones it already had.
+    if value.sync.enabled && has_token(&value.sync.token) && !was_in_a_team {
+        cloud_sync::note_joined();
+    }
+    Ok(())
 }
 
 /// Settings page "Test connection": proves the server URL + token work and
@@ -3201,18 +3208,34 @@ fn team_invite_parse(code: String) -> Result<Value, String> {
 }
 
 /// Leaves the team: sync is switched off and every profile that came from the team is deleted
-/// from this machine (see `cloud_sync::wipe_team_data`). A machine that runs the team's own server
-/// is refused — it holds the originals. Answers how many profiles were deleted.
+/// from this machine (see `cloud_sync::wipe_team_data`). A machine whose sync points at its OWN
+/// server is refused — it holds the originals. A member (an admin or manager of the team included)
+/// is not the team's server, and may leave: a server token left over from hosting earlier does
+/// not make a machine the server of the team it belongs to now. What goes is what the team gave
+/// the machine (profiles that were here before it joined, or that its person made, stay with
+/// their folders); `keep_all` keeps everything, as ordinary local profiles. Answers how many
+/// profiles were deleted.
 #[tauri::command]
-async fn team_leave() -> Result<usize, String> {
+async fn team_leave(keep_all: Option<bool>) -> Result<usize, String> {
     let mut s = settings::load().map_err(|e| e.to_string())?;
-    if s.server_host.token.as_deref().is_some_and(|t| !t.trim().is_empty()) {
+    let syncs_to_itself = has_token(&s.sync.token) && s.sync.token == s.server_host.token;
+    if syncs_to_itself {
         return Err("Máy này là máy chủ của nhóm, nó giữ bản gốc — dùng “Tắt máy chủ” thay vì rời nhóm".into());
     }
     s.sync.enabled = false;
     s.sync.server_url = None;
     s.sync.token = None;
+    // A server token kept from hosting earlier is of no use while the server is off, and would
+    // otherwise go on counting as "this machine hosts a team" and keep the profiles it just left
+    // openable (see `cloud_sync::ensure_access`).
+    if !s.server_host.enabled {
+        s.server_host.token = None;
+    }
     settings::save(&s).map_err(|e| e.to_string())?;
+    if keep_all == Some(true) {
+        cloud_sync::forget_team();
+        return Ok(0);
+    }
     Ok(cloud_sync::wipe_team_data().await)
 }
 
