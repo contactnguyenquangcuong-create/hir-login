@@ -469,6 +469,15 @@ pub async fn launch_profile_synced(
         ms(t_geo - t_udp),
         ms(t_start.elapsed() - t_geo),
     ));
+    // The cookie file as it is the moment before the browser opens it (see the "close" line).
+    if !stored.meta.temporary {
+        // A computer switched off or restarted under the browser can leave its cookie file
+        // damaged or without the login: put the saved copy back before the browser looks.
+        if let Some(note) = crate::cookies::restore_if_lost(profile_id) {
+            crate::cloud_sync::log_line(&format!("open {profile_id}: {note}"));
+        }
+        crate::cloud_sync::log_line(&format!("open {profile_id}: {}", crate::cookies::census(profile_id)));
+    }
     let child = cmd.spawn().context("spawn Hir-Login")?;
     let pid = Tracker::shared().track(profile_id.to_string(), child, stored.meta.temporary);
 

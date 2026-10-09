@@ -60,6 +60,21 @@ impl Tracker {
         // Graceful shutdown (SIGTERM / taskkill WM_CLOSE) → 5s → hard kill.
         // Graceful path flushes session state so next launch skips the restore prompt.
         let started_at = Instant::now();
+        // While the browser runs, keep a second copy of its login every few minutes — the cookie
+        // file can be lost with a computer that is switched off under it (see `cookies::snapshot`).
+        if !temporary {
+            let id = profile_id.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(180)).await;
+                    if !Self::shared().is_running(&id) {
+                        break;
+                    }
+                    let id2 = id.clone();
+                    let _ = tokio::task::spawn_blocking(move || crate::cookies::snapshot(&id2)).await;
+                }
+            });
+        }
         tokio::spawn(async move {
             tokio::select! {
                 _ = child.wait() => {}
@@ -99,6 +114,12 @@ impl Tracker {
                 g.remove(&profile_id);
             }
             crate::proxy_relay::stop(&profile_id);
+            // The cookie file as the browser left it: with the line written at launch, this
+            // places a vanished login — gone before the browser started, or while it ran.
+            if !temporary {
+                let _ = crate::cookies::snapshot(&profile_id);
+                crate::cloud_sync::log_line(&format!("close {profile_id}: ran {} s — {}", started_at.elapsed().as_secs(), crate::cookies::census(&profile_id)));
+            }
             // Bump the persisted total runtime; non-temporary only (temp
             // profiles get deleted next line so their counter is moot).
             if !temporary {

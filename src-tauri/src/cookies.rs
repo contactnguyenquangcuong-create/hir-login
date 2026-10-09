@@ -878,6 +878,122 @@ pub(crate) fn row_count(db: &Path, kind: Sealed) -> Option<i64> {
     conn.query_row(&format!("SELECT count(1) FROM {table}"), [], |r| r.get(0)).ok()
 }
 
+/// One line saying what this profile's cookie database holds right now, for the log: how many
+/// rows, how many of them this machine's key can open, how many are session cookies (the browser
+/// forgets those when it closes), and whether a Facebook login (`c_user` and `xs`) is among them.
+/// Written when a profile opens and when it closes, so a login that vanishes can be placed
+/// between two lines — before the browser started, while it ran, or in the sync. Never reads
+/// values, never writes.
+pub fn census(profile_id: &str) -> String {
+    let Ok(udd) = profile::user_data_dir(profile_id) else { return "cookies: profile folder not found".into() };
+    let db = cookies_db_path(&udd);
+    if !db.exists() {
+        return "cookies: no cookie file".into();
+    }
+    let Ok(conn) = rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        return "cookies: file could not be opened".into();
+    };
+    let total: i64 = conn.query_row("SELECT count(1) FROM cookies", [], |r| r.get(0)).unwrap_or(-1);
+    let session: i64 = conn.query_row("SELECT count(1) FROM cookies WHERE has_expires = 0", [], |r| r.get(0)).unwrap_or(-1);
+    let kept = if backup_path(&db).exists() { format!("{} in the saved copy", long_lived(&backup_path(&db)).unwrap_or(-1)) } else { "no saved copy".into() };
+    let has = |name: &str| -> bool {
+        conn.query_row(
+            "SELECT count(1) FROM cookies WHERE name = ?1 AND host_key LIKE '%facebook.com'",
+            [name],
+            |r| r.get::<_, i64>(0),
+        ).map(|n| n > 0).unwrap_or(false)
+    };
+    let opened = match readable_rows(&udd, &db, Sealed::Cookies) {
+        Some((sealed, ok)) => format!("{ok} of {sealed} sealed rows open with this machine's key"),
+        None => "key check unavailable".into(),
+    };
+    format!(
+        "cookies: {total} rows ({session} session, {} long-lived; {kept}), {opened}; Facebook login c_user={} xs={}",
+        total - session,
+        if has("c_user") { "yes" } else { "no" },
+        if has("xs") { "yes" } else { "no" },
+    )
+}
+
+// ---- a second copy of the logins, against a cookie file lost with the computer ----
+
+/// How many long-lived cookies (the ones that keep a site logged in across restarts — not the
+/// session cookies the browser drops when it closes) the cookie database at `db` holds. `None`
+/// when the file cannot be opened or read at all (missing, damaged).
+fn long_lived(db: &Path) -> Option<i64> {
+    let conn = rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    conn.query_row("SELECT count(1) FROM cookies WHERE has_expires = 1", [], |r| r.get(0)).ok()
+}
+
+/// A copy is worth keeping, and worth putting back, only with this many long-lived cookies.
+const MIN_KEPT: i64 = 5;
+
+fn backup_path(db: &Path) -> PathBuf {
+    db.with_file_name("Cookies.hir-backup")
+}
+
+/// Keeps a second copy of the profile's cookie file — every site's logins, Facebook, Gmail and the
+/// rest — next to the live one (sealed the same way, so it is exactly as private). The browser
+/// writes its cookies lazily and a computer that is switched off, loses power or restarts under the
+/// browser can leave the file damaged or emptied, and the browser then starts with nothing and
+/// every site has to be logged in again. Safe while the browser runs (a read-only snapshot).
+/// A file that has already lost most of what the last copy holds never replaces it. Returns
+/// whether a copy was made.
+pub fn snapshot(profile_id: &str) -> Result<bool> {
+    let udd = profile::user_data_dir(profile_id)?;
+    let db = cookies_db_path(&udd);
+    if !db.exists() {
+        return Ok(false);
+    }
+    let backup = backup_path(&db);
+    let now = long_lived(&db).unwrap_or(0);
+    let before = long_lived(&backup).unwrap_or(0);
+    if now < MIN_KEPT || now * 2 < before {
+        return Ok(false);
+    }
+    let tmp = db.with_file_name("Cookies.hir-backup.tmp");
+    remove_db(&tmp);
+    let conn = rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.execute("VACUUM INTO ?1", [tmp.to_string_lossy().as_ref()])?;
+    drop(conn);
+    // Only a copy that opens and holds what was read replaces the previous one.
+    if long_lived(&tmp).unwrap_or(0) < MIN_KEPT {
+        remove_db(&tmp);
+        return Ok(false);
+    }
+    let _ = std::fs::remove_file(&backup);
+    std::fs::rename(&tmp, &backup)?;
+    Ok(true)
+}
+
+/// Puts the saved copy back when the live cookie file has lost what the copy holds: missing,
+/// damaged, or left with under a third of its long-lived cookies. Call it with the browser closed.
+/// Returns a line for the log when it restored, `None` when there was nothing to do.
+pub fn restore_if_lost(profile_id: &str) -> Option<String> {
+    let udd = profile::user_data_dir(profile_id).ok()?;
+    let db = cookies_db_path(&udd);
+    let backup = backup_path(&db);
+    if !backup.exists() {
+        return None;
+    }
+    let kept = long_lived(&backup).filter(|n| *n >= MIN_KEPT)?;
+    let live = long_lived(&db);
+    if live.is_some_and(|n| n * 3 >= kept) {
+        return None;
+    }
+    let what = match live {
+        None if !db.exists() => "missing".to_string(),
+        None => "unreadable".to_string(),
+        Some(n) => format!("down to {n} long-lived cookies from {kept}"),
+    };
+    if let Some(dir) = db.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    remove_db(&db);
+    std::fs::copy(&backup, &db).ok()?;
+    Some(format!("the cookie file was {what} — the logins were put back from the saved copy ({kept} long-lived cookies)"))
+}
+
 /// Where a profile's cookie database is, for the sync (which wants the file that exists).
 pub(crate) fn cookie_db(udd: &Path) -> PathBuf {
     cookies_db_path(udd)

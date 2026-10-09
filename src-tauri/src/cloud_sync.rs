@@ -2457,6 +2457,73 @@ mod tests {
         assert_eq!(w_token, Some(latest));
     }
 
+    /// A computer switched off under the browser can leave its cookie file damaged, missing, or
+    /// without the login. The copy kept beside it puts the login back — and does nothing while the
+    /// live file still has it, or when there is no copy to put back.
+    #[test]
+    fn the_logins_lost_with_the_computer_are_put_back_from_the_saved_copy() {
+        let _g = TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-keep-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        store::set_data_root(Some(tmp.clone()));
+        struct Reset(std::path::PathBuf);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                store::set_data_root(None);
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _reset = Reset(tmp.clone());
+
+        let id = "keep-1";
+        let mut stored = crate::profile::StoredProfile::default();
+        stored.meta.id = id.to_string();
+        crate::profile::save_raw(&mut stored).unwrap();
+        let udd = store::user_data_root().unwrap().join(id);
+        let live = cookies::cookie_db(&udd);
+        let sites = |n: u32| -> Vec<cookies::Cookie> {
+            let mut v = vec![sim_cookie("c_user", "u-5"), sim_cookie("xs", "x-5")];
+            for i in 0..n {
+                let mut c = sim_cookie(&format!("SID{i}"), "g");
+                c.domain = ".google.com".into();
+                v.push(c);
+            }
+            v
+        };
+
+        assert!(cookies::restore_if_lost(id).is_none(), "no copy, nothing to put back");
+        cookies::import(id, &sites(6)).unwrap();
+        assert!(cookies::snapshot(id).unwrap(), "a profile with logins is copied");
+        assert!(cookies::restore_if_lost(id).is_none(), "the live file still has them");
+
+        // The file is damaged.
+        std::fs::write(&live, b"this is not a database").unwrap();
+        assert!(cookies::snapshot(id).is_ok_and(|made| !made), "a damaged file never replaces the good copy");
+        let note = cookies::restore_if_lost(id).expect("restored");
+        assert!(note.contains("unreadable"), "{note}");
+        assert_eq!(sim_login(id), Some(5));
+        assert_eq!(cookies::export(id).unwrap().len(), 8, "Gmail's cookies came back with Facebook's");
+
+        // The file is gone.
+        std::fs::remove_file(&live).unwrap();
+        assert!(cookies::restore_if_lost(id).expect("restored").contains("missing"));
+        assert_eq!(cookies::export(id).unwrap().len(), 8);
+
+        // The file is there but emptied down to a stray cookie or two.
+        std::fs::remove_file(&live).unwrap();
+        cookies::import(id, &[sim_cookie("fr", "other")]).unwrap();
+        assert!(cookies::snapshot(id).is_ok_and(|made| !made), "an emptied file never replaces the good copy");
+        assert!(cookies::restore_if_lost(id).expect("restored").contains("down to"));
+        assert_eq!(cookies::export(id).unwrap().len(), 8);
+
+        // Logging out of one site changes nothing: most of the file is still there.
+        cookies::import(id, &sites(6)).unwrap();
+        assert!(cookies::restore_if_lost(id).is_none());
+        let line = cookies::census(id);
+        assert!(line.contains("c_user=yes") && line.contains("xs=yes") && line.contains("saved copy"), "{line}");
+
+    }
+
     /// "Why am I logged out on this machine?" has an answer in the sync log: how many cookies a
     /// bundle was made with, how many were restored here, and — the case that left a Mac logged
     /// out with nothing to show for it — when a bundle carried no login at all.
