@@ -11,6 +11,7 @@ type Rule = {
 // what happened and what to do, in the language chosen in Settings; anything
 // not listed passes through unchanged.
 const RULES: Rule[] = [
+  { re: /this profile is in use by you on another machine/i, key: "err.profileInUseBySelf" },
   { re: /this profile is in use by (.+?)\s*[—-]\s*try again/i, key: "err.profileInUse", vars: (m) => ({ who: m[1] }) },
   { re: /profile .* is already running/i, key: "err.alreadyRunning" },
   { re: /you do not hold the lock/i, key: "err.lockLost" },

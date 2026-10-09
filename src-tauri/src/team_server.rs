@@ -346,6 +346,7 @@ async fn list_profiles(
             "access": profile_level(&who, &acl, &meta_map, &id).as_str(),
             "locked": held,
             "holder": if held { lock.get("holder").cloned().unwrap_or(Value::Null) } else { Value::Null },
+            "heldBy": if held { lock.get("by").cloned().unwrap_or(Value::Null) } else { Value::Null },
             "lockExpiresAt": if held { lock.get("expiresAt").cloned().unwrap_or(Value::Null) } else { Value::Null },
         })
     }).collect();
@@ -382,11 +383,15 @@ async fn lock_profile(
         if !is_expired(&existing) && existing.get("holder").and_then(|h| h.as_str()) != Some(&holder) {
             let holder_other = existing.get("holder").cloned().unwrap_or(Value::Null);
             let exp = existing.get("expiresAt").cloned().unwrap_or(Value::Null);
-            return (StatusCode::CONFLICT, Json(json!({"ok":false,"holder":holder_other,"expiresAt":exp}))).into_response();
+            // Who has it open, as a person: the machine's name tells a team nothing. `self` says the
+            // person is the caller, i.e. the same member has it open on another machine.
+            let by = existing.get("by").cloned().unwrap_or(Value::Null);
+            let is_self = existing.get("byId").and_then(|v| v.as_str()) == Some(who.id.as_str());
+            return (StatusCode::CONFLICT, Json(json!({"ok":false,"holder":holder_other,"by":by,"self":is_self,"expiresAt":exp}))).into_response();
         }
     }
     let expires_at = now_ms() + lock_ttl_ms();
-    map.insert(id.clone(), json!({"holder": holder, "acquiredAt": now_ms(), "expiresAt": expires_at}));
+    map.insert(id.clone(), json!({"holder": holder, "by": who.name, "byId": who.id, "acquiredAt": now_ms(), "expiresAt": expires_at}));
     let _ = save_json_atomic(&locks_path, &locks);
     // The version of the bundle as it stands, so a client that opens the profile knows what it
     // is about to pull (or already has) without asking for the whole list again.
@@ -577,7 +582,7 @@ async fn put_bundle(
     let _ = save_json_atomic(&meta_path, &meta);
     // refresh lock TTL
     if let Some(map) = locks.as_object_mut() {
-        map.insert(id.clone(), json!({"holder": holder, "acquiredAt": existing.get("acquiredAt").cloned().unwrap_or(json!(now_ms())), "expiresAt": now_ms() + lock_ttl_ms()}));
+        map.insert(id.clone(), json!({"holder": holder, "by": existing.get("by").cloned().unwrap_or(Value::Null), "byId": existing.get("byId").cloned().unwrap_or(Value::Null), "acquiredAt": existing.get("acquiredAt").cloned().unwrap_or(json!(now_ms())), "expiresAt": now_ms() + lock_ttl_ms()}));
         let _ = save_json_atomic(&locks_path, &locks);
     }
     publish_event(&id);
@@ -1343,6 +1348,53 @@ mod permission_tests {
         let after_many: Value = lock().await.unwrap().json().await.unwrap();
         let last = after_many["updatedAt"].as_str().unwrap().to_string();
         assert!(last.as_str() > newest.trim_matches('"'), "versions only move forward: {newest} then {last}");
+
+        let _ = stop();
+        crate::store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A refused lock names the member who has the profile open — a person the team knows, not
+    /// the machine they sit at — and says so when it is the caller themselves on another machine.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_profile_open_elsewhere_is_attributed_to_the_member_not_the_machine() {
+        let _g = crate::cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-who-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        crate::store::set_data_root(Some(tmp.clone()));
+        let admin = "admin-token-who-1";
+        let port = start(0, admin.to_string()).await.expect("start");
+        let base = format!("http://127.0.0.1:{port}");
+        let c = reqwest::Client::new();
+        let mut toks = std::collections::HashMap::new();
+        for name in ["Ann", "Ben"] {
+            let (_, r) = put_json(&c, admin, format!("{base}/admin/members"), json!({"name": name, "role": "admin"})).await;
+            toks.insert(name, r["token"].as_str().unwrap().to_string());
+        }
+        let lock = |who: &str, machine: &str| {
+            c.post(format!("{base}/profiles/w1/lock")).bearer_auth(&toks[who]).json(&json!({"holder": machine})).send()
+        };
+
+        assert_eq!(lock("Ann", "DESKTOP-F3N1GCR").await.unwrap().status().as_u16(), 200);
+        // Ann's lock is kept alive by the same machine asking again.
+        assert_eq!(lock("Ann", "DESKTOP-F3N1GCR").await.unwrap().status().as_u16(), 200);
+
+        let by_ben = lock("Ben", "MacBook-Air").await.unwrap();
+        assert_eq!(by_ben.status().as_u16(), 409);
+        let body: Value = by_ben.json().await.unwrap();
+        assert_eq!(body["by"], "Ann", "the member, not the machine: {body}");
+        assert_eq!(body["self"], false);
+        assert_eq!(body["holder"], "DESKTOP-F3N1GCR", "the machine is still reported, for logs");
+
+        let by_ann_elsewhere = lock("Ann", "MacBook-Air").await.unwrap();
+        assert_eq!(by_ann_elsewhere.status().as_u16(), 409);
+        let body: Value = by_ann_elsewhere.json().await.unwrap();
+        assert_eq!((body["by"].as_str(), body["self"].as_bool()), (Some("Ann"), Some(true)), "{body}");
+
+        // The list of profiles names her too.
+        let list: Value = c.get(format!("{base}/profiles")).bearer_auth(&toks["Ben"]).send().await.unwrap().json().await.unwrap();
+        let row = list["profiles"].as_array().unwrap().iter().find(|p| p["id"] == "w1").expect("w1 listed");
+        assert_eq!(row["heldBy"], "Ann", "{row}");
 
         let _ = stop();
         crate::store::set_data_root(None);

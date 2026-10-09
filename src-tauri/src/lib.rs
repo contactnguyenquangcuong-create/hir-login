@@ -3,6 +3,7 @@
 mod profile_icon;
 mod winfs;
 mod winhide;
+mod mackey;
 mod localtime;
 mod api;
 mod bookmarks;
@@ -3063,7 +3064,7 @@ async fn team_sync_list() -> Result<Vec<cloud_sync::RemoteProfileStatus>, String
 
 #[tauri::command]
 async fn team_sync_pull() -> Result<usize, String> {
-    cloud_sync::pull_missing().await.map_err(|e| e.to_string())
+    cloud_sync::pull_everything().await.map_err(|e| e.to_string())
 }
 
 // ---- Team Server (embedded sync server) + Invite codes ----

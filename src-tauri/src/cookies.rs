@@ -73,6 +73,9 @@ fn now_chromium() -> i64 {
 /// Resolved OSCrypt key; cipher chosen per-OS at compile time.
 struct Crypt {
     key: Vec<u8>,
+    /// Keys that only open values (never seal): on a Mac, the other of the two passwords the
+    /// engine may seal with, so a row sealed with it is still read and not thrown away.
+    alts: Vec<Vec<u8>>,
 }
 
 impl Crypt {
@@ -80,7 +83,13 @@ impl Crypt {
     fn open(udd: &Path) -> Result<Self> {
         Ok(Self {
             key: os_crypt_key(udd)?,
+            alts: alt_keys(),
         })
+    }
+
+    /// The plaintext of a sealed body, with this machine's key or else one of the alternates.
+    fn open_body(&self, body: &[u8]) -> Option<Vec<u8>> {
+        cipher_decrypt(&self.key, body).or_else(|| self.alts.iter().find_map(|k| cipher_decrypt(k, body)))
     }
 
     fn decrypt(&self, encrypted: &[u8], plain: &str) -> String {
@@ -88,7 +97,7 @@ impl Crypt {
         if encrypted.len() < 3 || &encrypted[..3] != b"v10" {
             return plain.to_string();
         }
-        match cipher_decrypt(&self.key, &encrypted[3..]) {
+        match self.open_body(&encrypted[3..]) {
             Some(pt) => String::from_utf8_lossy(&strip_host_prefix(pt)).into_owned(),
             None => String::new(),
         }
@@ -100,7 +109,7 @@ impl Crypt {
         if encrypted.len() < 3 || &encrypted[..3] != b"v10" {
             return None;
         }
-        let pt = cipher_decrypt(&self.key, &encrypted[3..])?;
+        let pt = self.open_body(&encrypted[3..])?;
         Some(if strip_host { strip_host_prefix(pt) } else { pt })
     }
 
@@ -133,12 +142,59 @@ fn strip_host_prefix(mut pt: Vec<u8>) -> Vec<u8> {
     pt
 }
 
-// ---- macOS: mock_password ----
+// ---- macOS: the password the engine seals with (see `mackey`) ----
 #[cfg(target_os = "macos")]
 fn os_crypt_key(_udd: &Path) -> Result<Vec<u8>> {
-    let mut key = [0u8; 16];
-    pbkdf2::pbkdf2_hmac::<sha1::Sha1>(b"mock_password", b"saltysalt", 1003, &mut key);
-    Ok(key.to_vec())
+    Ok(crate::mackey::derive(&crate::mackey::engine_password()))
+}
+
+#[cfg(target_os = "macos")]
+fn alt_keys() -> Vec<Vec<u8>> {
+    crate::mackey::alternates()
+}
+#[cfg(not(target_os = "macos"))]
+fn alt_keys() -> Vec<Vec<u8>> {
+    Vec::new()
+}
+
+/// On a Mac, from the cookie database the browser itself wrote (after a profile closes, and before
+/// a login is restored into one): finds out which key the engine sealed what it kept with, and
+/// remembers it for the next restore (see `mackey`). Returns a line for the log when that changed
+/// what this machine seals with, in which case what the engine dropped for being unreadable has
+/// to be restored again. Other systems: nothing to learn.
+#[cfg(target_os = "macos")]
+pub fn learn_from_db(db: &Path) -> Option<String> {
+    use crate::mackey::{decide, keychain_password, save, stored, Engine};
+    let conn = rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    let mut st = conn.prepare("SELECT encrypted_value FROM cookies WHERE length(encrypted_value) > 3 LIMIT 300").ok()?;
+    let blobs: Vec<Vec<u8>> = st.query_map([], |r| r.get::<_, Vec<u8>>(0)).ok()?.filter_map(|r| r.ok()).collect();
+    let verdict = decide(&blobs, keychain_password)?;
+    let (before, seen) = stored();
+    let seen_now = seen || verdict.keychain_opens.is_some_and(|k| k > 0);
+    if verdict.engine == before && seen_now == seen {
+        return None;
+    }
+    save(verdict.engine, seen_now);
+    if verdict.engine == before {
+        return None;
+    }
+    Some(format!(
+        "the browser here seals cookies with {} — of {} values it kept, the fixed key opened {} and the Keychain key {}; logins are restored with that key from now on",
+        if verdict.engine == Engine::Keychain { "the Keychain key" } else { "the fixed key" },
+        verdict.sealed,
+        verdict.mock_opens,
+        verdict.keychain_opens.map(|k| k.to_string()).unwrap_or_else(|| "was not asked".into()),
+    ))
+}
+#[cfg(not(target_os = "macos"))]
+pub fn learn_from_db(_db: &Path) -> Option<String> {
+    None
+}
+
+/// `learn_from_db` for a profile's own cookie database.
+pub fn learn_engine_key(profile_id: &str) -> Option<String> {
+    let udd = profile::user_data_dir(profile_id).ok()?;
+    learn_from_db(&cookies_db_path(&udd))
 }
 
 // ---- Linux: peanuts ----

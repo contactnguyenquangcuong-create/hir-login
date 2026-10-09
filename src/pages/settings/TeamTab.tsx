@@ -9,6 +9,7 @@ import { teamSyncList, teamSyncPull, teamServerStart, teamServerStop, teamServer
 import { confirmModal } from "../../shared/model/confirm";
 import { MembersPanel } from "./MembersPanel";
 import { SyncLogPanel } from "./SyncLogPanel";
+import { FirstDownload } from "./FirstDownload";
 import { Section, Row, Block, Pill, Dot, Segmented } from "./ui";
 
 const ROLE_LABEL = { admin: "Quản trị", manager: "Quản lý nhóm", member: "Thành viên" } as const;
@@ -45,6 +46,7 @@ export function TeamTab({
   const [autoStart, setAutoStart] = useState(false);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [syncTesting, setSyncTesting] = useState(false);
+  const [firstDownload, setFirstDownload] = useState(false);
   const [syncRows, setSyncRows] = useState<RemoteProfileStatus[] | null>(null);
   const [oauth, setOauth] = useState({ clientId: "", hasSecret: false, tag: "" });
   const [oauthEdit, setOauthEdit] = useState({ clientId: "", clientSecret: "", tag: "tag:hirlogin" });
@@ -167,6 +169,14 @@ export function TeamTab({
       await onSyncCommit({ enabled: true, server_url: res.url, token: res.token as string });
       toast.ok(`Đã kết nối tới ${res.url}`);
       setJoinCode("");
+      // Take every profile of the team down now, once, with the count on screen — so none is
+      // missing when somebody opens it a minute later.
+      setFirstDownload(true);
+      try {
+        const n = await teamSyncPull();
+        if (n > 0) { toast.ok(`Đã tải ${n} profile của nhóm`); window.dispatchEvent(new CustomEvent("store-changed")); }
+      } catch (e) { toast.err(String(e)); }
+      finally { setFirstDownload(false); }
       refreshTs();
       useTeam.getState().refresh();
       refreshConflict();
@@ -198,6 +208,7 @@ export function TeamTab({
 
   return (
     <div className="flex flex-col gap-4">
+      <FirstDownload open={firstDownload} />
       {/* Where this machine stands */}
       <Section title="Kết nối">
         <Row

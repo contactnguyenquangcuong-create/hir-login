@@ -117,6 +117,13 @@ impl Tracker {
             // The cookie file as the browser left it: with the line written at launch, this
             // places a vanished login — gone before the browser started, or while it ran.
             if !temporary {
+                // On a Mac: which key the browser sealed what it kept with. A different one from
+                // the one assumed means the logins restored at launch were unreadable to it and
+                // dropped — the server still has them, so every profile pulls in full next time.
+                if let Some(note) = crate::cookies::learn_engine_key(&profile_id) {
+                    crate::cloud_sync::log_line(&format!("close {profile_id}: {note}"));
+                    crate::cloud_sync::force_repull();
+                }
                 let _ = crate::cookies::snapshot(&profile_id);
                 crate::cloud_sync::log_line(&format!("close {profile_id}: ran {} s — {}", started_at.elapsed().as_secs(), crate::cookies::census(&profile_id)));
             }

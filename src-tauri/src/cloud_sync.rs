@@ -244,6 +244,23 @@ fn active_config() -> Result<Option<(SyncConfig, String, String)>> {
     Ok(Some((cfg, base, token)))
 }
 
+/// Who has a profile open, as the server's refusal names them: the member (a person the team
+/// knows), not the machine they sit at. Older servers only send the machine's name.
+fn who_has_it(body: &serde_json::Value) -> String {
+    let text = |k: &str| body.get(k).and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+    text("by").or_else(|| text("holder")).unwrap_or_else(|| "another member".into())
+}
+
+/// The refusal to open a profile somebody else has open. The UI turns it into a sentence in the
+/// chosen language (see `errorText.ts`); it names the member, and says so when it is the same
+/// member on another machine.
+fn in_use_message(body: &serde_json::Value) -> String {
+    if body.get("self").and_then(|v| v.as_bool()) == Some(true) {
+        return "this profile is in use by you on another machine — try again once you close it".into();
+    }
+    format!("this profile is in use by {} — try again once they close it", who_has_it(body))
+}
+
 /// What the team server said no to, as a message the UI can translate.
 async fn denied(resp: reqwest::Response, what: &str) -> anyhow::Error {
     let code = resp.status().as_u16();
@@ -823,6 +840,13 @@ fn install_portable(udd: &Path, dest_rel: &str, bytes: &[u8], kind: cookies::Sea
     }
     let tmp = dest.with_extension("hir-incoming");
     fs::write(&tmp, bytes)?;
+    // On a Mac: which key the browser here seals with, from what it has written itself, before
+    // anything is sealed or dropped on an assumption about it.
+    if kind == cookies::Sealed::Cookies && dest.exists() {
+        if let Some(note) = cookies::learn_from_db(&dest) {
+            slog!("{dest_rel}: {note}");
+        }
+    }
     let done = cookies::localize_file(udd, &tmp, kind).and_then(|sealed| {
         let here = cookies::row_count(&dest, kind).unwrap_or(0);
         // Can the key this launcher assumes open what this machine's own browser wrote? If not,
@@ -955,7 +979,7 @@ async fn relock(c: &reqwest::Client, base: &str, token: &str, id: &str, holder: 
     if resp.status().as_u16() == 401 { kicked_out(); }
     if resp.status().as_u16() == 409 {
         let body: serde_json::Value = resp.json().await.unwrap_or_default();
-        let other = body.get("holder").and_then(|v| v.as_str()).unwrap_or("another device");
+        let other = who_has_it(&body);
         anyhow::bail!("profile is now held by {other}; this session could not be saved to the server");
     }
     if !resp.status().is_success() {
@@ -1059,8 +1083,7 @@ pub async fn checkout(profile_id: &str) -> Result<()> {
 
     if resp.status().as_u16() == 409 {
         let body: serde_json::Value = resp.json().await.unwrap_or_default();
-        let other = body.get("holder").and_then(|v| v.as_str()).unwrap_or("another device");
-        anyhow::bail!("this profile is in use by {other} — try again once they close it");
+        anyhow::bail!("{}", in_use_message(&body));
     }
     if !resp.status().is_success() {
         return Err(denied(resp, "lock request").await);
@@ -1334,34 +1357,45 @@ pub struct RemoteProfileStatus {
 }
 
 /// Pulls any remote profiles that don't exist locally. Returns count pulled.
-pub async fn pull_missing() -> Result<usize> {
+/// Takes down every profile of the team this machine does not have yet, in one go, with the
+/// count reported to the window as it goes (`team:pull-progress`) — for a machine that has just
+/// joined, so that no profile is missing when somebody opens it a minute later. A profile another
+/// member has open is taken too (as of the server's last copy; the next round brings what they
+/// change), where a normal round leaves such a profile alone. Returns how many came down; the
+/// ones that could not are in the log and are tried again by the next round.
+pub async fn pull_everything() -> Result<usize> {
     let Some((_cfg, base, token)) = active_config()? else {
         anyhow::bail!("sync is not enabled");
     };
     let remote = list_remote().await?;
-    let c = client();
-    let mut pulled = 0usize;
-    for r in &remote {
-        // Skip if profile already exists locally
-        if crate::profile::load_raw(&r.id).is_ok() {
-            continue;
+    struct Finished;
+    impl Drop for Finished {
+        fn drop(&mut self) { emit_progress(0, 0); }
+    }
+    let _finished = Finished;
+    let wanted: Vec<&RemoteProfileStatus> = remote
+        .iter()
+        .filter(|r| !r.deleted && crate::profile::load_raw(&r.id).is_err())
+        .collect();
+    let total = wanted.len();
+    let (mut pulled, mut failed) = (0usize, 0usize);
+    for (n, r) in wanted.iter().enumerate() {
+        emit_progress(n, total);
+        let Some(_guard) = try_begin(&r.id, "pull") else { continue };
+        match pull_profile(&base, &token, &r.id).await {
+            Ok(true) => pulled += 1,
+            Ok(false) => {}
+            Err(e) => {
+                failed += 1;
+                slog!("first download {}: {e:#}", r.id);
+            }
         }
-        let resp = c
-            .get(format!("{base}/profiles/{}/bundle", r.id))
-            .bearer_auth(&token)
-            .send()
-            .await
-            .context("download bundle")?;
-        if !resp.status().is_success() {
-            slog!("pull {} failed: {}", r.id, resp.status());
-            continue;
-        }
-        let bytes = resp.bytes().await.context("read bundle")?;
-        if let Err(e) = apply_bundle(&r.id, &bytes) {
-            slog!("apply {} failed: {e}", r.id);
-            continue;
-        }
-        pulled += 1;
+    }
+    emit_progress(total, total);
+    let library = sync_library(&base, &token).await;
+    slog!("first download: {pulled} of {total} profiles taken down{}{}", if failed > 0 { format!(", {failed} failed (the next round tries again)") } else { String::new() }, if library > 0 { format!("; {library} library items") } else { String::new() });
+    if pulled + library > 0 {
+        GENERATION.fetch_add(1, Ordering::Relaxed);
     }
     Ok(pulled)
 }
@@ -1624,11 +1658,38 @@ fn local_edit_time(id: &str) -> u64 {
         .unwrap_or(0)
 }
 
+/// Makes the next open of every profile download its bundle in full, whatever this machine
+/// believes it already has: for when what it holds locally was wrongly dropped (the browser threw
+/// away cookies sealed with a key it does not use) while the server still has the right ones.
+pub fn force_repull() {
+    update_state(|s| {
+        for item in s.items.values_mut() {
+            item.at_ms = 0;
+        }
+    });
+}
+
+/// Tells the window how far a round has got through the team's profiles — `done` of `total` —
+/// so a first download (joining a team with hundreds of profiles) can show it, instead of the
+/// profiles appearing one by one while the rest are still on the server.
+fn emit_progress(done: usize, total: usize) {
+    if let Some(app) = crate::app_handle() {
+        use tauri::Emitter;
+        let _ = app.emit("team:pull-progress", serde_json::json!({ "done": done, "total": total }));
+    }
+}
+
 /// One pass: bring in what other machines added or changed, and send up what
 /// this one added or edited. Never touches a profile that is running, mid-sync,
 /// or locked by someone else. Returns how many local profiles changed.
 pub async fn sync_round() -> Result<usize> {
     let Some((cfg, base, token)) = active_config()? else { return Ok(0) };
+    // However the round ends — also on an error halfway — the window is told it is over.
+    struct Finished;
+    impl Drop for Finished {
+        fn drop(&mut self) { emit_progress(0, 0); }
+    }
+    let _finished = Finished;
     let holder = device_name(&cfg);
     let remote = list_remote().await?;
     let state = {
@@ -1643,7 +1704,9 @@ pub async fn sync_round() -> Result<usize> {
     let mut changed = 0usize;
     let mut touched: Vec<String> = Vec::new();
 
-    for r in &remote {
+    let total = remote.len();
+    for (n, r) in remote.iter().enumerate() {
+        emit_progress(n, total);
         let id = r.id.as_str();
         if crate::process::Tracker::shared().is_running(id) {
             continue;
@@ -2455,6 +2518,110 @@ mod tests {
         assert_eq!(c_after.1, Some(latest), "and the latest site storage");
         assert_eq!(w_login, Some(latest), "a machine added at the end starts logged in: the broken machine's pushes did not empty the server's copy");
         assert_eq!(w_token, Some(latest));
+    }
+
+    /// A machine that has just joined takes down every profile of the team in one go — the one a
+    /// colleague has open right now included — with its login, and a normal round after that
+    /// finds nothing left to fetch.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn joining_a_team_takes_every_profile_down_even_one_that_is_open_elsewhere() {
+        let _g = TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-join-{}", uuid::Uuid::new_v4()));
+        for d in ["srv", "A", "W"] {
+            std::fs::create_dir_all(tmp.join(d)).unwrap();
+        }
+        crate::team_server::set_server_dir_for_tests(Some(tmp.join("srv")));
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = crate::team_server::stop();
+                crate::team_server::set_server_dir_for_tests(None);
+                store::set_data_root(None);
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(tmp.clone());
+        at(&tmp.join("srv"));
+        let token = "join-token-123456789";
+        let port = crate::team_server::start(0, token.to_string()).await.expect("start");
+        let base = format!("http://127.0.0.1:{port}");
+        let setup = |name: &str| {
+            at(&tmp.join(name));
+            let mut s = settings::load().unwrap();
+            s.sync.enabled = true;
+            s.sync.server_url = Some(base.clone());
+            s.sync.token = Some(token.to_string());
+            s.sync.device_name = Some(format!("machine-{name}"));
+            s.sync.slim_local = false;
+            settings::save(&s).unwrap();
+        };
+        setup("A");
+        at(&tmp.join("A"));
+        let ids = ["join-1", "join-2", "join-3"];
+        for id in ids {
+            let mut stored = crate::profile::StoredProfile::default();
+            stored.meta.id = id.to_string();
+            stored.config.insert("name".into(), serde_json::json!(id));
+            crate::profile::save_raw(&mut stored).unwrap();
+        }
+        let a = tmp.join("A");
+        for (k, id) in ids.iter().enumerate() {
+            sim_login_on(&a, id, k as u32 + 1).await;
+        }
+        // A colleague has the third open right now.
+        at(&a);
+        checkout("join-3").await.expect("open on A");
+
+        // A new machine joins.
+        setup("W");
+        at(&tmp.join("W"));
+        let taken = pull_everything().await.expect("first download");
+        assert_eq!(taken, 3, "all three came down, the open one too");
+        for (k, id) in ids.iter().enumerate() {
+            assert!(crate::profile::load_raw(id).is_ok(), "{id} is on the new machine");
+            assert_eq!(sim_login(id), Some(k as u32 + 1), "{id} came with its login");
+        }
+        assert_eq!(pull_everything().await.expect("again"), 0, "nothing is missing the second time");
+        assert_eq!(sync_round().await.expect("round"), 0, "and a round has nothing to fetch for the profiles it holds");
+    }
+
+    /// The refusal to open a profile names the member, in words the UI turns into a sentence —
+    /// and an older server that only knows machine names still gets a readable message.
+    #[test]
+    fn the_refusal_to_open_names_the_member() {
+        let by = serde_json::json!({"holder": "DESKTOP-F3N1GCR", "by": "Ann", "self": false});
+        assert_eq!(in_use_message(&by), "this profile is in use by Ann — try again once they close it");
+        let me = serde_json::json!({"holder": "MacBook-Air", "by": "Ann", "self": true});
+        assert!(in_use_message(&me).starts_with("this profile is in use by you on another machine"));
+        let old = serde_json::json!({"holder": "DESKTOP-F3N1GCR"});
+        assert!(in_use_message(&old).contains("DESKTOP-F3N1GCR"));
+        assert!(in_use_message(&serde_json::json!({})).contains("another member"));
+    }
+
+    /// After the browser threw away cookies it could not read, the next open of every profile
+    /// downloads in full instead of trusting that nothing changed.
+    #[test]
+    fn forcing_a_full_pull_makes_every_profile_download_again() {
+        let _g = TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-repull-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        store::set_data_root(Some(tmp.clone()));
+        struct Reset(std::path::PathBuf);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                store::set_data_root(None);
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _reset = Reset(tmp);
+        update_state(|s| {
+            s.items.insert("a".into(), StateItem { remote: "v1".into(), at: 5, at_ms: 5000, proxy: String::new(), fmt: SYNC_FMT });
+            s.items.insert("b".into(), StateItem { remote: "v2".into(), at: 6, at_ms: 6000, proxy: String::new(), fmt: SYNC_FMT });
+        });
+        force_repull();
+        let st = load_state();
+        assert!(st.items.values().all(|k| k.at_ms == 0), "no profile is trusted to be up to date");
+        assert_eq!(st.items["a"].remote, "v1", "what the server version was is kept");
     }
 
     /// A computer switched off under the browser can leave its cookie file damaged, missing, or
