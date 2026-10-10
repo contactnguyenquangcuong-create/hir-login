@@ -28,6 +28,38 @@ pub struct CdpInfo {
     pub web_socket_debugger_url: String,
 }
 
+/// Profiles whose browser has exited and whose close is still being saved to the team (the upload
+/// after the exit). They no longer count as running, but the app must not quit, nor the computer
+/// shut down, until they are through: an upload cut short leaves the server with the older copy.
+fn closing_set() -> &'static Mutex<std::collections::HashSet<String>> {
+    static S: std::sync::OnceLock<Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    S.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Which profiles are being saved after their browser closed.
+pub fn closing_ids() -> Vec<String> {
+    closing_set().lock().map(|s| s.iter().cloned().collect()).unwrap_or_default()
+}
+
+/// How many profiles are being saved after their browser closed.
+pub fn closing_count() -> usize {
+    closing_set().lock().map(|s| s.len()).unwrap_or(0)
+}
+
+fn closing_begin(id: &str) {
+    if let Ok(mut s) = closing_set().lock() {
+        s.insert(id.to_string());
+    }
+    crate::cloud_sync::notify_working();
+}
+
+fn closing_end(id: &str) {
+    if let Ok(mut s) = closing_set().lock() {
+        s.remove(id);
+    }
+    crate::cloud_sync::notify_working();
+}
+
 impl Tracker {
     pub fn new() -> Self {
         Self {
@@ -110,6 +142,8 @@ impl Tracker {
                     }
                 }
             }
+            // From here until the close has been saved, the profile counts as "being saved".
+            closing_begin(&profile_id);
             if let Ok(mut g) = Self::shared().inner.lock() {
                 g.remove(&profile_id);
             }
@@ -142,6 +176,7 @@ impl Tracker {
                     eprintln!("[launcher] cloud_sync checkin({profile_id}) failed: {e:#}");
                 }
             }
+            closing_end(&profile_id);
             // Tear down temporary profile (config + udd) on close.
             if temporary {
                 match crate::profile::delete(&profile_id) {

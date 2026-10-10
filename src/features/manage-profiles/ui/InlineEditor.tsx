@@ -173,6 +173,19 @@ export function InlineEditor({
   return (
     <div className="inline-editor relative border-t border-stroke-soft-200 bg-bg-weak-50 px-[18px] py-4 pl-[22px]">
       <div className="absolute left-0 top-0 h-full w-[3px] bg-primary-base" />
+      {/* The buttons are at the top and stay there while the form scrolls: a person who has filled
+          the page in should not have to scroll to the bottom to find "Save". */}
+      <div className="sticky top-0 z-10 -mx-[18px] -mt-4 mb-4 flex items-center justify-between gap-3 border-b border-stroke-soft-200 bg-bg-weak-50/95 px-[18px] py-2.5 pl-[22px] backdrop-blur">
+        <span className="min-w-0 truncate text-label-md text-text-strong-950">
+          {f.id ? `${t("inlineEditor.saveChanges")} · ${f.name || ""}` : t("inlineEditor.createProfile")}
+        </span>
+        <div className="flex flex-none gap-2.5">
+          <Button variant="neutral" mode="stroke" size="small" onClick={onCancel}>{t("inlineEditor.cancel")}</Button>
+          <Button variant="primary" mode="filled" size="small" onClick={onSave}>
+            {f.id ? t("inlineEditor.saveChanges") : t("inlineEditor.createProfile")}
+          </Button>
+        </div>
+      </div>
       <div className="grid grid-cols-1 items-stretch gap-4 lg:grid-cols-2 xl:grid-cols-3">
         <div className="flex flex-col gap-4 [&>section:last-child]:flex-1">
           <Card title={t("inlineEditor.cardInfo")}>
@@ -385,12 +398,6 @@ export function InlineEditor({
             <Hint>{t("inlineEditor.cookiesHelp")}</Hint>
           </Card>
         </div>
-      </div>
-      <div className="mt-4 flex justify-end gap-2.5 border-t border-stroke-soft-200 pt-3.5">
-        <Button variant="neutral" mode="stroke" size="small" onClick={onCancel}>{t("inlineEditor.cancel")}</Button>
-        <Button variant="primary" mode="filled" size="small" onClick={onSave}>
-          {f.id ? t("inlineEditor.saveChanges") : t("inlineEditor.createProfile")}
-        </Button>
       </div>
       {pendingGpu && compatById[pendingGpu] && (
         <IncompatibleWarningModal

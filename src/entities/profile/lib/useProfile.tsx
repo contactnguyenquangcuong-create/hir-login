@@ -129,6 +129,8 @@ export type ProfileStore = {
   startBusy: Set<string>;
   /// Profiles mid-sync with the team server (download on open, upload after close).
   syncing: Set<string>;
+  /** Profiles another machine has open or is still saving: who, and whether it is saving. */
+  elsewhere: Record<string, { by: string; saving: boolean }>;
   selected: Set<string>;
 
   // UI state lives in the store so feature buttons stay prop-free.
@@ -223,6 +225,7 @@ export const useProfile = create<ProfileStore>((set, get) => ({
   running: {},
   startBusy: new Set<string>(),
   syncing: new Set<string>(),
+  elsewhere: {},
   selected: new Set<string>(),
 
   search: "",
@@ -278,6 +281,13 @@ export const useProfile = create<ProfileStore>((set, get) => ({
           const prevSyncing = get().syncing;
           const same = prevSyncing.size === act.busy.length && act.busy.every((id) => prevSyncing.has(id));
           if (!same) set({ syncing: new Set(act.busy) });
+          const other: Record<string, { by: string; saving: boolean }> = {};
+          for (const l of act.elsewhere ?? []) other[l.id] = { by: l.by, saving: l.saving };
+          const before = get().elsewhere;
+          const ids = Object.keys(other);
+          if (ids.length !== Object.keys(before).length || ids.some((id) => before[id]?.by !== other[id].by || before[id]?.saving !== other[id].saving)) {
+            set({ elsewhere: other });
+          }
           // A pull from another machine changed local profiles: reload the table.
           if (lastGen !== -1 && act.generation !== lastGen) get().reload();
           lastGen = act.generation;
@@ -431,6 +441,11 @@ export const useProfile = create<ProfileStore>((set, get) => ({
       return;
     }
     if (get().startBusy.has(p.id)) return;
+    // Not offered while its close is still being saved here, or while another machine has it open
+    // or is saving it: the button says so, and so do the menu and the bulk start.
+    if (get().syncing.has(p.id)) { toast.err(t("profileRowActions.syncingTitle")); return; }
+    const other = get().elsewhere[p.id];
+    if (other) { toast.err(t(other.saving ? "profileRowActions.savedByTitle" : "profileRowActions.usedByTitle", { who: other.by })); return; }
     set({ startBusy: new Set([...get().startBusy, p.id]) });
     try {
       await launch(p.id);

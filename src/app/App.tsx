@@ -5,6 +5,7 @@ import { ActivationGate } from "../widgets/ActivationGate";
 import { FirstRunGate } from "../widgets/FirstRunGate/FirstRunGate";
 import { ToastHost } from "../widgets/ToastHost/ToastHost";
 import { ConfirmHost } from "../widgets/ConfirmHost/ConfirmHost";
+import { SyncWorkingBanner } from "../widgets/SyncWorkingBanner/SyncWorkingBanner";
 import { HelperWatcher } from "../widgets/HelperWatcher";
 import { WhatsNewGate } from "../widgets/WhatsNewGate";
 import { BrowsersPage } from "../pages/browsers";
@@ -58,6 +59,7 @@ export function App() {
             </main>
             <ToastHost />
             <ConfirmHost />
+            <SyncWorkingBanner />
           </div>
         </FirstRunGate>
       </ActivationGate>

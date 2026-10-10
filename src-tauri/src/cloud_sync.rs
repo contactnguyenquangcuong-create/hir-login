@@ -84,7 +84,25 @@ impl Drop for BusyGuard {
         if let Ok(mut m) = busy_map().lock() {
             m.remove(&self.0);
         }
+        notify_working();
     }
+}
+
+/// How many profiles are being synced or saved right now: what must not be cut short by quitting
+/// the app or shutting the computer down.
+pub fn working() -> usize {
+    busy_map().lock().map(|m| m.len()).unwrap_or(0) + crate::process::closing_count()
+}
+
+/// Tells the window (a banner that says to wait) and the system (a computer that is being shut
+/// down is asked to wait) how much is still being saved.
+pub fn notify_working() {
+    let n = working();
+    if let Some(app) = crate::app_handle() {
+        use tauri::Emitter;
+        let _ = app.emit("sync:working", n);
+    }
+    crate::shutdown_guard::update(n);
 }
 
 fn try_begin(id: &str, phase: &'static str) -> Option<BusyGuard> {
@@ -93,6 +111,8 @@ fn try_begin(id: &str, phase: &'static str) -> Option<BusyGuard> {
         return None;
     }
     m.insert(id.to_string(), phase);
+    drop(m);
+    notify_working();
     Some(BusyGuard(id.to_string()))
 }
 
@@ -108,21 +128,78 @@ async fn begin_wait(id: &str, phase: &'static str) -> BusyGuard {
     if let Ok(mut m) = busy_map().lock() {
         m.insert(id.to_string(), phase);
     }
+    notify_working();
     BusyGuard(id.to_string())
+}
+
+/// A profile another machine has open, or is saving, as the team reported it a moment ago.
+#[derive(Clone, serde::Serialize)]
+pub struct ElsewhereLock {
+    pub id: String,
+    /// The member — the machine's name tells a team nothing.
+    pub by: String,
+    /// True once their browser has closed and the result is on its way up.
+    pub saving: bool,
+}
+
+fn elsewhere() -> &'static Mutex<Vec<ElsewhereLock>> {
+    static M: OnceLock<Mutex<Vec<ElsewhereLock>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(Vec::new()))
 }
 
 #[derive(serde::Serialize)]
 pub struct SyncActivity {
+    /// Profiles being synced or saved on this machine (a profile whose browser has just closed is
+    /// among them until its close has reached the team).
     pub busy: Vec<String>,
     pub generation: u64,
+    /// Profiles open — or being saved — on another machine.
+    pub elsewhere: Vec<ElsewhereLock>,
 }
 
 pub fn activity() -> SyncActivity {
-    let busy = busy_map()
+    let mut busy: Vec<String> = busy_map()
         .lock()
         .map(|m| m.keys().cloned().collect())
         .unwrap_or_default();
-    SyncActivity { busy, generation: GENERATION.load(Ordering::Relaxed) }
+    for id in crate::process::closing_ids() {
+        if !busy.contains(&id) {
+            busy.push(id);
+        }
+    }
+    let elsewhere = elsewhere().lock().map(|v| v.clone()).unwrap_or_default();
+    SyncActivity { busy, generation: GENERATION.load(Ordering::Relaxed), elsewhere }
+}
+
+/// Asks the team who has which profile open, every few seconds, so a profile another machine has
+/// open (or is still saving) shows as such here and its start button is not offered. A light
+/// request: only the held profiles come back.
+pub async fn watch_locks() {
+    loop {
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        let Ok(Some((cfg, base, token))) = active_config() else {
+            if let Ok(mut v) = elsewhere().lock() { v.clear(); }
+            continue;
+        };
+        let me = device_name(&cfg);
+        let Ok(resp) = client().get(format!("{base}/locks")).bearer_auth(&token).timeout(Duration::from_secs(10)).send().await else { continue };
+        if resp.status().as_u16() == 401 { kicked_out(); continue; }
+        if !resp.status().is_success() { continue; } // an older server has no such list: nothing is shown, nothing breaks
+        #[derive(serde::Deserialize)]
+        struct Row { id: String, holder: Option<String>, by: Option<String>, phase: Option<String> }
+        #[derive(serde::Deserialize)]
+        struct Resp { locks: Vec<Row> }
+        let Ok(body) = resp.json::<Resp>().await else { continue };
+        let rows: Vec<ElsewhereLock> = body.locks.into_iter()
+            .filter(|r| r.holder.as_deref() != Some(me.as_str()))
+            .map(|r| ElsewhereLock {
+                id: r.id,
+                by: r.by.filter(|s| !s.is_empty()).or(r.holder).unwrap_or_else(|| "?".into()),
+                saving: r.phase.as_deref() == Some("saving"),
+            })
+            .collect();
+        if let Ok(mut v) = elsewhere().lock() { *v = rows; }
+    }
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -267,8 +344,16 @@ fn who_has_it(body: &serde_json::Value) -> String {
 /// chosen language (see `errorText.ts`); it names the member, and says so when it is the same
 /// member on another machine.
 fn in_use_message(body: &serde_json::Value) -> String {
+    let saving = body.get("phase").and_then(|v| v.as_str()) == Some("saving");
     if body.get("self").and_then(|v| v.as_bool()) == Some(true) {
-        return "this profile is in use by you on another machine — try again once you close it".into();
+        return if saving {
+            "this profile is being saved by you on another machine — try again in a moment".into()
+        } else {
+            "this profile is in use by you on another machine — try again once you close it".into()
+        };
+    }
+    if saving {
+        return format!("this profile is being saved by {} — try again in a moment", who_has_it(body));
     }
     format!("this profile is in use by {} — try again once they close it", who_has_it(body))
 }
@@ -1024,10 +1109,20 @@ fn install_bundled_extensions(bundled: HashMap<String, Vec<(String, Vec<u8>)>>) 
 /// while we still hold it, and re-acquires it if it lapsed or the server
 /// forgot it — but never takes it from another device (409).
 async fn relock(c: &reqwest::Client, base: &str, token: &str, id: &str, holder: &str) -> Result<()> {
+    relock_as(c, base, token, id, holder, None).await
+}
+
+/// `phase` = Some("saving") tells the team the browser has closed and the result is on its way up:
+/// anyone who asks for the profile in the meantime is told to wait a moment for it.
+async fn relock_as(c: &reqwest::Client, base: &str, token: &str, id: &str, holder: &str, phase: Option<&str>) -> Result<()> {
+    let mut body = serde_json::json!({ "holder": holder });
+    if let Some(p) = phase {
+        body["phase"] = serde_json::json!(p);
+    }
     let resp = c
         .post(format!("{base}/profiles/{id}/lock"))
         .bearer_auth(token)
-        .json(&serde_json::json!({ "holder": holder }))
+        .json(&body)
         .timeout(Duration::from_secs(25))
         .send()
         .await
@@ -1159,6 +1254,8 @@ pub async fn checkout(profile_id: &str) -> Result<()> {
 
     if status.as_u16() == 304 {
         slog!("{profile_id}: opened here in {} ms — already up to date with the server, nothing downloaded", started.elapsed().as_millis());
+        // Opened all the same: until its close has been saved, this machine's copy is the newer one.
+        update_state(|st| { st.pending.insert(profile_id.to_string()); });
         return Ok(());
     }
 
@@ -1225,6 +1322,11 @@ pub async fn checkout(profile_id: &str) -> Result<()> {
         started.elapsed().as_millis()
     );
 
+    // From now until the close has been saved, this machine's copy is the newer one. If the
+    // computer is switched off, loses power or the app is killed in between, the next open must
+    // keep it (see the mark in `checkin`) instead of taking the server's older copy over it.
+    update_state(|st| { st.pending.insert(profile_id.to_string()); });
+
     Ok(())
 }
 
@@ -1277,11 +1379,18 @@ pub async fn checkin(profile_id: &str) -> Result<()> {
     let holder = device_name(&cfg);
     let c = client();
 
+    // Written down BEFORE the upload starts, and cleared only once it has succeeded: a computer
+    // switched off (or an app quit) in the middle of it leaves this machine with the newest copy
+    // and the server with an older one, and without this mark the next open pulled the older one
+    // over the newer — the login made in that session gone. With it, the next open keeps this
+    // machine's copy and sends it.
+    update_state(|st| { st.pending.insert(profile_id.to_string()); });
+
     let upload: Result<()> = async {
         let bytes = build_bundle(profile_id).context("zip profile for upload")?;
         // Renew first: the lock is only good for 6 hours, and an upload without
         // it is refused.
-        relock(&c, &base, &token, profile_id, &holder).await?;
+        relock_as(&c, &base, &token, profile_id, &holder, Some("saving")).await?;
         let resp = c
             .put(format!("{base}/profiles/{profile_id}/bundle"))
             .bearer_auth(&token)
@@ -1412,7 +1521,6 @@ pub struct RemoteProfileStatus {
     pub deleted: bool,
 }
 
-/// Pulls any remote profiles that don't exist locally. Returns count pulled.
 /// Takes down every profile of the team this machine does not have yet, in one go, with the
 /// count reported to the window as it goes (`team:pull-progress`) — for a machine that has just
 /// joined, so that no profile is missing when somebody opens it a minute later. A profile another
@@ -2733,6 +2841,28 @@ mod tests {
         assert!(load_state().items.is_empty());
     }
 
+    /// An open profile is marked as "this machine holds the newer copy" from the moment it opens
+    /// until its close has reached the server: a computer switched off in between (before or in the
+    /// middle of the upload) leaves the mark, and the next open keeps this machine's login instead
+    /// of taking the server's older copy over it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_profile_is_marked_unsaved_from_open_to_a_finished_close() {
+        with_synced_profile(|_base, _token, _cookies| async move {
+            checkout("sess-1").await.expect("open");
+            assert!(load_state().pending.contains("sess-1"), "open: the newer copy is here, not on the server");
+            checkin("sess-1").await.expect("close");
+            assert!(!load_state().pending.contains("sess-1"), "closed and saved: the mark is gone");
+
+            // Power cut: opened, never closed.
+            checkout("sess-1").await.expect("open again");
+            assert!(load_state().pending.contains("sess-1"));
+            // The next start finds the mark, and the next open keeps this machine's session.
+            checkout("sess-1").await.expect("open after the cut");
+            checkin("sess-1").await.expect("close");
+            assert!(!load_state().pending.contains("sess-1"));
+        }).await;
+    }
+
     /// The refusal to open a profile names the member, in words the UI turns into a sentence —
     /// and an older server that only knows machine names still gets a readable message.
     #[test]
@@ -2744,6 +2874,10 @@ mod tests {
         let old = serde_json::json!({"holder": "DESKTOP-F3N1GCR"});
         assert!(in_use_message(&old).contains("DESKTOP-F3N1GCR"));
         assert!(in_use_message(&serde_json::json!({})).contains("another member"));
+        let saving = serde_json::json!({"holder": "PC", "by": "Ann", "self": false, "phase": "saving"});
+        assert_eq!(in_use_message(&saving), "this profile is being saved by Ann — try again in a moment");
+        let mine = serde_json::json!({"holder": "PC", "by": "Ann", "self": true, "phase": "saving"});
+        assert!(in_use_message(&mine).starts_with("this profile is being saved by you on another machine"));
     }
 
     /// After the browser threw away cookies it could not read, the next open of every profile

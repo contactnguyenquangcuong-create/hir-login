@@ -60,13 +60,18 @@ export function ProfileTable() {
     return () => clearTimeout(t);
   }, [expanded]);
 
+  // While a profile is being edited or made, only that is on the page: the list below it is
+  // hidden and comes back when the form is saved or cancelled.
+  const editing = expanded !== null;
+  const rows = editing ? visible.filter((p) => p.id === expanded) : paged;
+
   const allPageSelected = paged.length > 0 && paged.every((p) => selected.has(p.id));
   const anyPageSelected = paged.some((p) => selected.has(p.id));
 
   return (
     <>
       <div className="overflow-hidden rounded-lg bg-bg-white-0 shadow-[var(--shadow-xs)] ring-1 ring-inset ring-stroke-soft-200">
-        {expanded !== "__new__" && (
+        {!editing && (
         <div className="t-cols border-b border-stroke-soft-200 bg-bg-weak-50 text-subheading-2xs text-text-soft-400">
           <div></div>
           <div>
@@ -92,7 +97,7 @@ export function ProfileTable() {
             <ProfileInlineEditor />
           </div>
         )}
-        {paged.map((p) => (
+        {rows.map((p) => (
           <ProfileRow
             key={p.id}
             profile={p}
@@ -116,7 +121,7 @@ export function ProfileTable() {
           </div>
         )}
       </div>
-      {pageCount > 1 && (
+      {pageCount > 1 && !editing && (
         <div className="flex items-center justify-center py-3 pb-1">
           <Pagination
             page={page}

@@ -4,6 +4,7 @@ mod profile_icon;
 mod winfs;
 mod winhide;
 mod heal;
+mod shutdown_guard;
 mod mackey;
 mod localtime;
 mod api;
@@ -3269,6 +3270,12 @@ async fn team_admin(method: String, path: String, body: Option<Value>) -> Result
     cloud_sync::admin_call(&method, &path, body).await.map_err(|e| format!("{e:#}"))
 }
 
+/// How many profiles are being synced or saved right now (the banner that says to wait).
+#[tauri::command]
+fn sync_working() -> usize {
+    cloud_sync::working()
+}
+
 #[tauri::command]
 fn sync_activity() -> cloud_sync::SyncActivity {
     cloud_sync::activity()
@@ -3904,18 +3911,24 @@ fn build_app_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tau
 /// operator is asked to close their profiles first instead.
 fn quit_gracefully(app: &tauri::AppHandle) {
     let running = process::Tracker::shared().running();
-    eprintln!("[launcher] quit requested; {} profile(s) running", running.len());
-    if running.is_empty() {
+    let saving = cloud_sync::working();
+    eprintln!("[launcher] quit requested; {} profile(s) running, {saving} being saved", running.len());
+    if running.is_empty() && saving == 0 {
         app.exit(0);
         return;
     }
     use tauri_plugin_dialog::DialogExt;
     show_main_window(app);
-    app.dialog()
-        .message(
-            "Còn profile đang chạy. Đóng hết trình duyệt của các profile đó trước khi thoát \
-             Hir-Login, để dữ liệu được đồng bộ đầy đủ lên Team Sync.",
+    let message = if running.is_empty() {
+        format!(
+            "Đang đồng bộ {saving} profile lên nhóm. Đợi đồng bộ xong (thanh thông báo ở góc dưới sẽ báo) rồi hãy thoát Hir-Login,              nếu không máy khác mở ra sẽ thấy tài khoản bị đăng xuất."
         )
+    } else {
+        "Còn profile đang chạy. Đóng hết trình duyệt của các profile đó trước khi thoát          Hir-Login, để dữ liệu được đồng bộ đầy đủ lên Team Sync."
+            .to_string()
+    };
+    app.dialog()
+        .message(message)
         .title("Chưa thể thoát")
         .kind(tauri_plugin_dialog::MessageDialogKind::Warning)
         .show(|_| {});
@@ -4082,6 +4095,7 @@ pub fn run() {
             tailscale_list_keys,
             tailscale_revoke_key,
             sync_activity,
+            sync_working,
             team_admin,
             sync_kick,
             autostart_get,
@@ -4269,6 +4283,7 @@ pub fn run() {
 
             // Keep profiles in step with the team server without any click.
             tauri::async_runtime::spawn(cloud_sync::run_forever());
+            tauri::async_runtime::spawn(cloud_sync::watch_locks());
 
             // Trash older than its week.
             match trash::purge_expired() {
@@ -4309,7 +4324,7 @@ pub fn run() {
                 // path in `quit_gracefully`) re-enters this same event —
                 // preventing that one too would loop forever instead of exiting.
                 tauri::RunEvent::ExitRequested { api, .. } => {
-                    if !process::Tracker::shared().running().is_empty() {
+                    if !process::Tracker::shared().running().is_empty() || cloud_sync::working() > 0 {
                         api.prevent_exit();
                         quit_gracefully(app_handle);
                     }

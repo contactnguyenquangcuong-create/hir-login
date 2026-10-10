@@ -62,7 +62,7 @@ export const hostPlatform = () => invoke<string>("host_platform");
 
 /// Profiles being pulled/pushed right now, plus a counter that moves whenever a
 /// background pull changed a local profile (so the list should reload).
-export const syncActivity = () => invoke<{ busy: string[]; generation: number }>("sync_activity");
+export const syncActivity = () => invoke<{ busy: string[]; generation: number; elsewhere: { id: string; by: string; saving: boolean }[] }>("sync_activity");
 /// A profile was saved or created here: tell the team now instead of waiting.
 export const syncKick = () => invoke<void>("sync_kick");
 /** Brings a running profile's window back on screen if automation had put it out of sight. */

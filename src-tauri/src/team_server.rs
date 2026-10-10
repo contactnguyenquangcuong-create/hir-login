@@ -57,6 +57,11 @@ fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// How long a lock held while the result is being sent up lasts.
+fn saving_ttl_ms() -> u64 {
+    15 * 60 * 1000
+}
+
 fn lock_ttl_ms() -> u64 {
     // 6h default, same as sync-server/server.js
     6 * 3600 * 1000
@@ -320,6 +325,33 @@ async fn health() -> impl IntoResponse {
     Json(json!({"ok": true}))
 }
 
+/// Only the profiles somebody has open (or is saving) right now, who, and in which phase — small
+/// enough to ask every few seconds, where the full list of profiles is not. A person who may use a
+/// profile sees its holder; one who may not sees nothing of it.
+async fn list_locks(
+    headers: HeaderMap,
+    axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
+) -> Response {
+    let Some(who) = authenticate(&headers, &state.token) else { return unauthorized() };
+    let locks: Value = load_json(&locks_path().unwrap_or_default(), json!({}));
+    let meta = meta_map();
+    let acl = load_acl();
+    let rows: Vec<Value> = locks
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(_, l)| !is_expired(l))
+        .filter(|(id, _)| profile_level(&who, &acl, &meta, id) > Level::None)
+        .map(|(id, l)| json!({
+            "id": id,
+            "holder": l.get("holder").cloned().unwrap_or(Value::Null),
+            "by": l.get("by").cloned().unwrap_or(Value::Null),
+            "phase": l.get("phase").cloned().unwrap_or(Value::Null),
+        }))
+        .collect();
+    Json(json!({"ok": true, "locks": rows})).into_response()
+}
+
 async fn list_profiles(
     headers: HeaderMap,
     axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
@@ -347,6 +379,7 @@ async fn list_profiles(
             "locked": held,
             "holder": if held { lock.get("holder").cloned().unwrap_or(Value::Null) } else { Value::Null },
             "heldBy": if held { lock.get("by").cloned().unwrap_or(Value::Null) } else { Value::Null },
+            "lockPhase": if held { lock.get("phase").cloned().unwrap_or(Value::Null) } else { Value::Null },
             "lockExpiresAt": if held { lock.get("expiresAt").cloned().unwrap_or(Value::Null) } else { Value::Null },
         })
     }).collect();
@@ -387,11 +420,20 @@ async fn lock_profile(
             // person is the caller, i.e. the same member has it open on another machine.
             let by = existing.get("by").cloned().unwrap_or(Value::Null);
             let is_self = existing.get("byId").and_then(|v| v.as_str()) == Some(who.id.as_str());
-            return (StatusCode::CONFLICT, Json(json!({"ok":false,"holder":holder_other,"by":by,"self":is_self,"expiresAt":exp}))).into_response();
+            let phase = existing.get("phase").cloned().unwrap_or(Value::Null);
+            return (StatusCode::CONFLICT, Json(json!({"ok":false,"holder":holder_other,"by":by,"self":is_self,"phase":phase,"expiresAt":exp}))).into_response();
         }
     }
-    let expires_at = now_ms() + lock_ttl_ms();
-    map.insert(id.clone(), json!({"holder": holder, "by": who.name, "byId": who.id, "acquiredAt": now_ms(), "expiresAt": expires_at}));
+    // "saving": the holder's browser has closed and it is sending the result up. Others who ask
+    // are told so (a short wait, not a person at work), and the lock is short — a machine that
+    // went away mid-save does not keep the profile from the team for hours.
+    let saving = v.get("phase").and_then(|x| x.as_str()) == Some("saving");
+    let expires_at = now_ms() + if saving { saving_ttl_ms() } else { lock_ttl_ms() };
+    let mut record = json!({"holder": holder, "by": who.name, "byId": who.id, "acquiredAt": now_ms(), "expiresAt": expires_at});
+    if saving {
+        record["phase"] = json!("saving");
+    }
+    map.insert(id.clone(), record);
     let _ = save_json_atomic(&locks_path, &locks);
     // The version of the bundle as it stands, so a client that opens the profile knows what it
     // is about to pull (or already has) without asking for the whole list again.
@@ -582,7 +624,12 @@ async fn put_bundle(
     let _ = save_json_atomic(&meta_path, &meta);
     // refresh lock TTL
     if let Some(map) = locks.as_object_mut() {
-        map.insert(id.clone(), json!({"holder": holder, "by": existing.get("by").cloned().unwrap_or(Value::Null), "byId": existing.get("byId").cloned().unwrap_or(Value::Null), "acquiredAt": existing.get("acquiredAt").cloned().unwrap_or(json!(now_ms())), "expiresAt": now_ms() + lock_ttl_ms()}));
+        let saving = existing.get("phase").and_then(|p| p.as_str()) == Some("saving");
+        let mut record = json!({"holder": holder, "by": existing.get("by").cloned().unwrap_or(Value::Null), "byId": existing.get("byId").cloned().unwrap_or(Value::Null), "acquiredAt": existing.get("acquiredAt").cloned().unwrap_or(json!(now_ms())), "expiresAt": now_ms() + if saving { saving_ttl_ms() } else { lock_ttl_ms() }});
+        if saving {
+            record["phase"] = json!("saving");
+        }
+        map.insert(id.clone(), record);
         let _ = save_json_atomic(&locks_path, &locks);
     }
     publish_event(&id);
@@ -1161,6 +1208,7 @@ pub async fn start(port: u16, token: String) -> Result<u16> {
     let app = Router::new()
         .route("/health", get(health))
         .route("/profiles", get(list_profiles))
+        .route("/locks", get(list_locks))
         .route("/profiles/:id/lock", post(lock_profile))
         .route("/profiles/:id/unlock", post(unlock_profile))
         .route("/profiles/:id/bundle", get(get_bundle).merge(big_upload(put_bundle, &state)))
@@ -1391,10 +1439,23 @@ mod permission_tests {
         let body: Value = by_ann_elsewhere.json().await.unwrap();
         assert_eq!((body["by"].as_str(), body["self"].as_bool()), (Some("Ann"), Some(true)), "{body}");
 
+        // Once her browser has closed and she is sending the result up, the refusal says so.
+        let saving = c.post(format!("{base}/profiles/w1/lock")).bearer_auth(&toks["Ann"]).json(&json!({"holder": "DESKTOP-F3N1GCR", "phase": "saving"})).send().await.unwrap();
+        assert_eq!(saving.status().as_u16(), 200);
+        let waiting: Value = lock("Ben", "MacBook-Air").await.unwrap().json().await.unwrap();
+        assert_eq!(waiting["phase"], "saving", "{waiting}");
+        assert_eq!(waiting["by"], "Ann");
+
+        // The light list of who has what open says the same, to the one who may see it.
+        let locks: Value = c.get(format!("{base}/locks")).bearer_auth(&toks["Ben"]).send().await.unwrap().json().await.unwrap();
+        let mine = locks["locks"].as_array().unwrap().iter().find(|l| l["id"] == "w1").expect("w1 is held");
+        assert_eq!((mine["by"].as_str(), mine["phase"].as_str()), (Some("Ann"), Some("saving")), "{locks}");
+
         // The list of profiles names her too.
         let list: Value = c.get(format!("{base}/profiles")).bearer_auth(&toks["Ben"]).send().await.unwrap().json().await.unwrap();
         let row = list["profiles"].as_array().unwrap().iter().find(|p| p["id"] == "w1").expect("w1 listed");
         assert_eq!(row["heldBy"], "Ann", "{row}");
+        assert_eq!(row["lockPhase"], "saving", "{row}");
 
         let _ = stop();
         crate::store::set_data_root(None);
