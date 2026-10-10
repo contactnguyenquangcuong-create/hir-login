@@ -388,10 +388,12 @@ pub async fn launch_profile_synced(
         cmd.arg("--shardx-camera");
     }
 
-    // On a Mac the browser may not take the logins this launcher restored into its cookie file (it
-    // opens them with a key of its own), so it is given a debugging port on this machine only,
-    // through which `heal` hands it whatever it lacks a moment after it starts.
-    let heal_cookies = cfg!(target_os = "macos") && !enable_cdp && !headless && !stored.meta.temporary;
+    // The browser may not take every login this launcher restored into its cookie file (seen on a
+    // Mac, where it opens them with a key of its own and skips the rest in silence). So every
+    // interactive browser is given a debugging port on this machine only, through which `heal`
+    // compares what the file holds with what the browser has a moment after it starts, and hands
+    // over whatever it lacks — the cookies then travel with the browser itself, sealed by it.
+    let heal_cookies = !enable_cdp && !headless && !stored.meta.temporary;
     if heal_cookies {
         let _ = std::fs::remove_file(udd.join("DevToolsActivePort"));
         cmd.arg("--remote-debugging-port=0");

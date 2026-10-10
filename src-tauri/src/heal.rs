@@ -8,7 +8,9 @@
 //! starts, what the file holds is compared with what the browser has, and what it lacks is
 //! handed over, after which the open pages are reloaded to see the login.
 //!
-//! Only the debugging port is used, only on this machine's loopback, and only for this.
+//! Only the debugging port is used, only on this machine's loopback, and only for this. It runs for
+//! every interactive profile on every system, so the logins reach the browser the same way
+//! wherever the profile was last open.
 
 use crate::cookies::Cookie;
 use anyhow::{Context, Result};
