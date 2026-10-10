@@ -3,6 +3,7 @@
 mod profile_icon;
 mod winfs;
 mod winhide;
+mod heal;
 mod mackey;
 mod localtime;
 mod api;

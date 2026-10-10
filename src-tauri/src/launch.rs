@@ -388,6 +388,15 @@ pub async fn launch_profile_synced(
         cmd.arg("--shardx-camera");
     }
 
+    // On a Mac the browser may not take the logins this launcher restored into its cookie file (it
+    // opens them with a key of its own), so it is given a debugging port on this machine only,
+    // through which `heal` hands it whatever it lacks a moment after it starts.
+    let heal_cookies = cfg!(target_os = "macos") && !enable_cdp && !headless && !stored.meta.temporary;
+    if heal_cookies {
+        let _ = std::fs::remove_file(udd.join("DevToolsActivePort"));
+        cmd.arg("--remote-debugging-port=0");
+    }
+
     // CDP: port=0 makes Chrome pick free port and write DevToolsActivePort.
     if enable_cdp {
         let _ = std::fs::remove_file(udd.join("DevToolsActivePort"));
@@ -482,6 +491,20 @@ pub async fn launch_profile_synced(
     let pid = Tracker::shared().track(profile_id.to_string(), child, stored.meta.temporary);
 
     profile::touch_launched(profile_id, None)?;
+
+    if heal_cookies {
+        let (id, udd) = (profile_id.to_string(), udd.clone());
+        tokio::spawn(async move {
+            let Some(c) = read_devtools_endpoint(&udd).await else {
+                crate::cloud_sync::log_line(&format!("heal {id}: the browser did not report its debugging port"));
+                return;
+            };
+            match crate::heal::heal(&id, &c.web_socket_debugger_url).await {
+                Ok(line) => crate::cloud_sync::log_line(&format!("heal {id}: {line}")),
+                Err(e) => crate::cloud_sync::log_line(&format!("heal {id}: could not compare the cookies: {e:#}")),
+            }
+        });
+    }
 
     let mut cdp_error = None;
     let cdp = if enable_cdp {
