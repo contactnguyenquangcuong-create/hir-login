@@ -109,12 +109,34 @@ pub struct StoredProfile {
     pub config: serde_json::Map<String, serde_json::Value>,
 }
 
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+/// Binds the profile to `proxy` (or to none), and stamps the change if it is one.
+pub fn bind_proxy_stamped(meta: &mut StoredMeta, proxy: Option<String>) {
+    if meta.proxy_id != proxy {
+        meta.proxy_id = proxy;
+        meta.proxy_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct StoredMeta {
     #[serde(default)]
     pub id: String,
     #[serde(default)]
     pub proxy_id: Option<String>,
+    /// When (ms since the epoch) a person last bound this profile to a proxy, or unbound it. A
+    /// machine that closes the profile later carries its OWN binding up with it; with this stamp
+    /// the team keeps the newer of the two instead of whichever machine uploaded last — which is
+    /// how a proxy set on one machine used to vanish when another, that had not heard of it,
+    /// closed the profile (and the profile then opened with the machine's own address).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub proxy_at: u64,
     #[serde(default)]
     pub last_launched_at: Option<String>,
     /// "@<unix_secs>" creation marker.
@@ -439,6 +461,10 @@ fn save_raw_locked(stored: &mut StoredProfile) -> Result<()> {
             stored.meta.pinned = existing.meta.pinned;
             if stored.meta.folder.is_empty() {
                 stored.meta.folder = existing.meta.folder;
+            }
+            // The editor's form does not carry the stamp: keep it unless the save is the change.
+            if stored.meta.proxy_at == 0 {
+                stored.meta.proxy_at = existing.meta.proxy_at;
             }
             if stored.meta.last_launched_at.is_none() {
                 stored.meta.last_launched_at = existing.meta.last_launched_at;
@@ -814,7 +840,7 @@ pub fn touch_launched(id: &str, proxy_id: Option<String>) -> Result<()> {
     let mut p = load_raw(id)?;
     p.meta.last_launched_at = Some(chrono_now_iso());
     if proxy_id.is_some() {
-        p.meta.proxy_id = proxy_id;
+        bind_proxy_stamped(&mut p.meta, proxy_id);
     }
     save_raw_locked(&mut p)?;
     Ok(())

@@ -1310,7 +1310,7 @@ async fn data_root_migrate(app: tauri::AppHandle, path: String) -> Result<u64, S
 #[tauri::command]
 fn profile_bind_proxy(profile_id: String, proxy_id: Option<String>) -> Result<(), String> {
     let mut p = profile::load_raw(&profile_id).map_err(|e| e.to_string())?;
-    p.meta.proxy_id = proxy_id;
+    profile::bind_proxy_stamped(&mut p.meta, proxy_id);
     profile::save_raw(&mut p).map_err(|e| e.to_string())
 }
 

@@ -453,7 +453,7 @@ async fn edit_profile(Path(id): Path<String>, Json(body): Json<EditReq>) -> ApiR
         stored.config.insert("notes".into(), json!(n));
     }
     if let Some(pid) = body.proxy_id.as_ref() {
-        stored.meta.proxy_id = if pid.is_empty() { None } else { Some(pid.clone()) };
+        crate::profile::bind_proxy_stamped(&mut stored.meta, if pid.is_empty() { None } else { Some(pid.clone()) });
         stored.meta.inline_proxy = None;
     } else if let Some(pstr) = body.proxy.as_ref() {
         let entry = crate::proxy::parse_single(pstr)
@@ -461,7 +461,7 @@ async fn edit_profile(Path(id): Path<String>, Json(body): Json<EditReq>) -> ApiR
         let s = crate::proxy::upsert_dedup(entry)
             .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
         let _ = crate::proxy::full_test(&s).await;
-        stored.meta.proxy_id = Some(s.id);
+        crate::profile::bind_proxy_stamped(&mut stored.meta, Some(s.id));
         stored.meta.inline_proxy = None;
         crate::notify_store_changed("proxies");
     }

@@ -827,6 +827,8 @@ fn apply_bundle_inner(id: &str, bytes: &[u8], keep_local_session: bool) -> Resul
     }
     // Some(None) = the bundle says "no proxy"; None = an older bundle that says nothing.
     let mut proxy_in_bundle: Option<Option<crate::proxy::ProxyEntry>> = None;
+    // When the bundle's proxy binding was last changed by a person (0 = never, or an older build).
+    let mut bundle_proxy_at: u64 = 0;
     // extension id -> (relative path, bytes) of every file the bundle carries for it
     let mut bundled_ext: HashMap<String, Vec<(String, Vec<u8>)>> = HashMap::new();
     // The portable files this bundle carried (cookies, saved passwords), by name.
@@ -866,6 +868,7 @@ fn apply_bundle_inner(id: &str, bytes: &[u8], keep_local_session: bool) -> Resul
                 local.meta.extensions = remote.meta.extensions.clone();
                 local.meta.color = remote.meta.color.clone();
                 local.meta.android_media = remote.meta.android_media;
+                bundle_proxy_at = remote.meta.proxy_at;
                 let _ = crate::profile::save_raw(&mut local);
                 if existed {
                     // `save_raw` keeps this machine's pin and folder on purpose
@@ -918,6 +921,14 @@ fn apply_bundle_inner(id: &str, bytes: &[u8], keep_local_session: bool) -> Resul
     // team shares.
     if let Some(proxy) = proxy_in_bundle {
         if let Ok(mut local) = crate::profile::load_raw(id) {
+            // The newer change wins. A person set this profile's proxy here after the machine that
+            // uploaded this bundle last heard of it: its binding is older, so it does not undo
+            // this one — and this machine, which now holds the newer binding, sends it up.
+            if local.meta.proxy_at > bundle_proxy_at {
+                slog!("{id}: the bundle's proxy binding is older than the one set here — kept this machine's, and it will be sent up");
+                update_state(|st| { st.pending.insert(id.to_string()); });
+                return Ok(());
+            }
             match proxy {
                 Some(mut p) => {
                     // The country tag is this machine's own reading of the exit IP.
@@ -932,6 +943,7 @@ fn apply_bundle_inner(id: &str, bytes: &[u8], keep_local_session: bool) -> Resul
                 }
                 None => local.meta.proxy_id = None,
             }
+            local.meta.proxy_at = bundle_proxy_at;
             let _ = crate::profile::save_raw(&mut local);
         }
     }
@@ -2889,6 +2901,235 @@ mod tests {
         drop(other);
         crate::process::closing_end(id);
         assert!(!working_ids().iter().any(|i| i.starts_with("count-once-")));
+    }
+
+    /// A proxy set on one machine must survive another machine, that has not heard of it, closing
+    /// the profile afterwards. (It did not: the machine that uploaded last decided the binding, the
+    /// profile came up without its proxy on the next open, and with the machine's own address a
+    /// logged-in Google account was logged out.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_proxy_set_on_one_machine_is_not_undone_by_another_closing_the_profile_later() {
+        let _g = TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-px-{}", uuid::Uuid::new_v4()));
+        for d in ["srv", "A", "B"] {
+            std::fs::create_dir_all(tmp.join(d)).unwrap();
+        }
+        crate::team_server::set_server_dir_for_tests(Some(tmp.join("srv")));
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = crate::team_server::stop();
+                crate::team_server::set_server_dir_for_tests(None);
+                store::set_data_root(None);
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(tmp.clone());
+        at(&tmp.join("srv"));
+        let token = "px-token-123456789";
+        let port = crate::team_server::start(0, token.to_string()).await.expect("start");
+        let base = format!("http://127.0.0.1:{port}");
+        let setup = |name: &str| {
+            at(&tmp.join(name));
+            let mut s = settings::load().unwrap();
+            s.sync.enabled = true;
+            s.sync.server_url = Some(base.clone());
+            s.sync.token = Some(token.to_string());
+            s.sync.device_name = Some(format!("machine-{name}"));
+            s.sync.slim_local = false;
+            settings::save(&s).unwrap();
+        };
+        let (a, b) = (tmp.join("A"), tmp.join("B"));
+        let id = "px-1";
+        setup("A");
+        setup("B");
+        at(&a);
+        let mut stored = crate::profile::StoredProfile::default();
+        stored.meta.id = id.to_string();
+        stored.config.insert("name".into(), serde_json::json!("Proxied"));
+        crate::profile::save_raw(&mut stored).unwrap();
+        sim_login_on(&a, id, 1).await;
+        let proxy_of = |root: &std::path::Path| {
+            at(root);
+            crate::profile::load_raw(id).unwrap().meta.proxy_id
+        };
+        // B has the profile, without a proxy, and has it open.
+        at(&b);
+        checkout(id).await.expect("B opens");
+        assert_eq!(proxy_of(&b), None);
+
+        // Meanwhile a person on A binds a proxy. A cannot send it: B has the profile open.
+        at(&a);
+        let p1 = crate::proxy::upsert(crate::proxy::ProxyEntry {
+            id: String::new(), name: "the proxy".into(), kind: crate::proxy::ProxyKind::Http,
+            host: "203.0.113.7".into(), port: 8080, username: "u".into(), password: "p".into(),
+            country: String::new(), notes: String::new(),
+        }).unwrap();
+        let mut p = crate::profile::load_raw(id).unwrap();
+        crate::profile::bind_proxy_stamped(&mut p.meta, Some(p1.id.clone()));
+        crate::profile::save_raw(&mut p).unwrap();
+        let _ = sync_round().await;
+
+        // B closes: its own copy, with no proxy, goes up.
+        at(&b);
+        checkin(id).await.expect("B closes");
+
+        // A hears of B's upload. B's binding is older, so A's stays — and goes up on the next round.
+        at(&a);
+        let _ = sync_round().await;
+        assert_eq!(proxy_of(&a), Some(p1.id.clone()), "the proxy set here was undone by the older upload");
+        let _ = sync_round().await;
+        assert!(!load_state().pending.contains(id), "the newer binding was sent");
+
+        // B opens again and finds the proxy.
+        at(&b);
+        checkout(id).await.expect("B opens again");
+        let got = crate::profile::load_raw(id).unwrap().meta.proxy_id.and_then(|pid| crate::proxy::get(&pid).ok().flatten());
+        assert_eq!(got.map(|p| p.host), Some("203.0.113.7".to_string()), "the other machine got the proxy");
+        checkin(id).await.expect("B closes");
+        // And a stale close after that does not undo it either.
+        at(&a);
+        let _ = sync_round().await;
+        assert_eq!(proxy_of(&a), Some(p1.id), "the proxy is still there");
+    }
+
+    /// Three machines share one profile through a long, random day: logins, proxies bound and
+    /// unbound, ordinary visits, background rounds — and power cuts, where a machine opens the
+    /// profile (sometimes logs in first) and is never closed. Once every machine has been through a
+    /// last open and close, they must all hold the newest login and the proxy that was set last: no
+    /// machine's older copy, uploaded late, may undo a newer change.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn machines_converge_on_the_newest_login_and_proxy_after_a_random_day_with_power_cuts() {
+        let _g = TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-day-{}", uuid::Uuid::new_v4()));
+        for d in ["srv", "A", "B", "C"] {
+            std::fs::create_dir_all(tmp.join(d)).unwrap();
+        }
+        crate::team_server::set_server_dir_for_tests(Some(tmp.join("srv")));
+        struct Cleanup(std::path::PathBuf);
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = crate::team_server::stop();
+                crate::team_server::set_server_dir_for_tests(None);
+                store::set_data_root(None);
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = Cleanup(tmp.clone());
+        at(&tmp.join("srv"));
+        let token = "day-token-123456789";
+        let port = crate::team_server::start(0, token.to_string()).await.expect("start");
+        let base = format!("http://127.0.0.1:{port}");
+        let id = "day-1";
+        for m in ["A", "B", "C"] {
+            at(&tmp.join(m));
+            let mut s = settings::load().unwrap();
+            s.sync.enabled = true;
+            s.sync.server_url = Some(base.clone());
+            s.sync.token = Some(token.to_string());
+            s.sync.device_name = Some(format!("machine-{m}"));
+            s.sync.slim_local = false;
+            settings::save(&s).unwrap();
+            for (pid, host) in [("px-a", "203.0.113.1"), ("px-b", "203.0.113.2")] {
+                crate::proxy::upsert(crate::proxy::ProxyEntry {
+                    id: pid.into(), name: pid.into(), kind: crate::proxy::ProxyKind::Http, host: host.into(), port: 8080,
+                    username: "u".into(), password: "p".into(), country: String::new(), notes: String::new(),
+                }).unwrap();
+            }
+        }
+        let root = |m: &str| tmp.join(m);
+        at(&root("A"));
+        let mut stored = crate::profile::StoredProfile::default();
+        stored.meta.id = id.to_string();
+        stored.config.insert("name".into(), serde_json::json!("A day"));
+        crate::profile::save_raw(&mut stored).unwrap();
+        sim_login_on(&root("A"), id, 1).await;
+
+        let mut x: u64 = 0x0dd5_eed5_1234_9876;
+        let mut next = move |n: u32| {
+            x = x.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((x >> 33) as u32) % n
+        };
+        let mut latest = 1u32;
+        let mut expected_proxy: Option<&str> = None;
+        let mut trail: Vec<String> = Vec::new();
+        for step in 0..240 {
+            let m = ["A", "B", "C"][next(3) as usize];
+            at(&root(m));
+            let what = match next(12) {
+                // an ordinary visit
+                0..=1 => {
+                    let ok = checkout(id).await.is_ok();
+                    if ok { let _ = checkin(id).await; }
+                    format!("{m} visits ({})", if ok { "ok" } else { "profile is open elsewhere" })
+                }
+                // a login, closed properly
+                2 => {
+                    if checkout(id).await.is_ok() {
+                        latest += 1;
+                        cookies::import(id, &[sim_cookie("c_user", &format!("u-{latest}")), sim_cookie("xs", &format!("x-{latest}"))]).unwrap();
+                        let _ = checkin(id).await;
+                        format!("{m} logs in ({latest})")
+                    } else { format!("{m} could not open to log in") }
+                }
+                // a login, then the computer is switched off before the close reaches the team
+                3 => {
+                    if checkout(id).await.is_ok() {
+                        latest += 1;
+                        cookies::import(id, &[sim_cookie("c_user", &format!("u-{latest}")), sim_cookie("xs", &format!("x-{latest}"))]).unwrap();
+                        format!("{m} logs in ({latest}) and is switched off")
+                    } else { format!("{m} could not open to log in") }
+                }
+                // a person binds or unbinds a proxy (the profile has to be here first)
+                4..=6 => {
+                    let choice = [Some("px-a"), Some("px-b"), None][next(3) as usize];
+                    if crate::profile::load_raw(id).is_ok() {
+                        let mut p = crate::profile::load_raw(id).unwrap();
+                        crate::profile::bind_proxy_stamped(&mut p.meta, choice.map(String::from));
+                        crate::profile::save_raw(&mut p).unwrap();
+                        expected_proxy = choice;
+                        format!("{m} binds {choice:?}")
+                    } else { format!("{m} has no copy yet") }
+                }
+                // a power cut with the profile open and nothing done
+                7..=8 => {
+                    let ok = checkout(id).await.is_ok();
+                    format!("{m} opens and is switched off ({})", if ok { "ok" } else { "refused" })
+                }
+                _ => {
+                    let _ = sync_round().await;
+                    format!("{m} background round")
+                }
+            };
+            trail.push(format!("{step}: {what}"));
+            tokio::time::sleep(Duration::from_millis(3)).await;
+
+            // Now and then everything is brought to rest — every machine opens and closes the
+            // profile, with rounds between, so no profile is left open — and then they must agree.
+            if (step + 1) % 40 == 0 {
+                settle(&[root("A"), root("B"), root("C")], id).await;
+                for m in ["A", "B", "C"] {
+                    at(&root(m));
+                    let proxy = crate::profile::load_raw(id).unwrap().meta.proxy_id;
+                    assert_eq!(proxy.as_deref(), expected_proxy, "{m}'s proxy at step {step}: {}", trail.join(" | "));
+                    assert_eq!(sim_login(id), Some(latest), "{m}'s login at step {step}: {}", trail.join(" | "));
+                }
+            }
+        }
+    }
+
+    /// Every machine opens and closes the profile, three times around, with rounds between.
+    async fn settle(roots: &[std::path::PathBuf], id: &str) {
+        for _ in 0..3 {
+            for r in roots {
+                at(r);
+                let _ = sync_round().await;
+                if checkout(id).await.is_ok() {
+                    let _ = checkin(id).await;
+                }
+                let _ = sync_round().await;
+            }
+        }
     }
 
     /// The refusal to open a profile names the member, in words the UI turns into a sentence —

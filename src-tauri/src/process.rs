@@ -41,11 +41,6 @@ pub fn closing_ids() -> Vec<String> {
     closing_set().lock().map(|s| s.iter().cloned().collect()).unwrap_or_default()
 }
 
-/// How many profiles are being saved after their browser closed.
-pub fn closing_count() -> usize {
-    closing_set().lock().map(|s| s.len()).unwrap_or(0)
-}
-
 pub(crate) fn closing_begin(id: &str) {
     if let Ok(mut s) = closing_set().lock() {
         s.insert(id.to_string());
