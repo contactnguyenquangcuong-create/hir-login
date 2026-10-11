@@ -487,6 +487,61 @@ pub fn clamp_screen_to_real_display(
     );
 }
 
+/// At launch: the browser window is made to fit this monitor, and nothing else about the screen
+/// changes — the screen the profile declares is what every machine reports.
+pub fn fit_window_to_real_display(
+    window: &tauri::WebviewWindow,
+    payload: &mut serde_json::Map<String, Value>,
+) {
+    let Some(monitor) = window
+        .primary_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.current_monitor().ok().flatten())
+    else {
+        return;
+    };
+    let scale = monitor.scale_factor();
+    if scale <= 0.0 {
+        return;
+    }
+    let phys = monitor.size();
+    let real_w = (phys.width as f64 / scale).round() as i64;
+    let real_h = (phys.height as f64 / scale).round() as i64;
+    if real_w <= 0 || real_h <= 0 {
+        return;
+    }
+    fit_window_to(payload, real_w, real_h);
+}
+
+/// Brings the profile's window block inside a display of `real_w` x `real_h`, leaving the screen
+/// block alone. A profile with no window block gets one that fills the display's available area.
+pub(crate) fn fit_window_to(payload: &mut serde_json::Map<String, Value>, real_w: i64, real_h: i64) {
+    let (fp_w, fp_h, fp_avail_w, fp_avail_h) = {
+        let scr = payload.get("screen").and_then(|v| v.as_object());
+        let n = |k: &str| scr.and_then(|s| s.get(k)).and_then(|v| v.as_i64()).unwrap_or(0);
+        (n("width"), n("height"), n("avail_width"), n("avail_height"))
+    };
+    // The menu bar / taskbar insets the profile declares.
+    let chrome_w = if fp_avail_w > 0 { (fp_w - fp_avail_w).max(0) } else { 0 };
+    let chrome_h = if fp_avail_h > 0 { (fp_h - fp_avail_h).max(0) } else { 0 };
+    let avail_w = (real_w - chrome_w).max(1);
+    let avail_h = (real_h - chrome_h).max(1);
+    let win_slot = payload
+        .entry("window")
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    let Some(win) = win_slot.as_object_mut() else { return };
+    let get = |w: &serde_json::Map<String, Value>, k: &str| w.get(k).and_then(|v| v.as_i64());
+    let outer_w = get(win, "outer_width").map_or(avail_w, |v| v.min(avail_w));
+    let outer_h = get(win, "outer_height").map_or((avail_h - 1).max(1), |v| v.min((avail_h - 1).max(1)));
+    let inner_w = get(win, "inner_width").map_or(outer_w, |v| v.min(outer_w));
+    let inner_h = get(win, "inner_height").map_or((outer_h - 87).max(1), |v| v.min(outer_h));
+    win.insert("outer_width".into(), Value::from(outer_w));
+    win.insert("outer_height".into(), Value::from(outer_h));
+    win.insert("inner_width".into(), Value::from(inner_w));
+    win.insert("inner_height".into(), Value::from(inner_h));
+}
+
 #[tauri::command]
 fn profile_save(
     window: tauri::WebviewWindow,
@@ -4340,6 +4395,52 @@ pub fn run() {
 }
 
 #[cfg(test)]
+
+#[cfg(test)]
+mod window_fit_tests {
+    use super::*;
+
+    fn cfg() -> serde_json::Map<String, Value> {
+        serde_json::json!({
+            "screen": {"width": 2194, "height": 1234, "avail_width": 2194, "avail_height": 1194, "device_pixel_ratio": 1},
+            "window": {"outer_width": 2560, "outer_height": 1399, "inner_width": 2560, "inner_height": 1312},
+        }).as_object().unwrap().clone()
+    }
+
+    /// The screen a profile declares is what every machine reports; only the window is made to
+    /// fit the monitor it opens on.
+    #[test]
+    fn fitting_the_window_to_a_small_display_leaves_the_declared_screen_alone() {
+        let mut c = cfg();
+        fit_window_to(&mut c, 1470, 956);
+        assert_eq!(c["screen"]["width"], 2194);
+        assert_eq!(c["screen"]["height"], 1234);
+        assert_eq!(c["screen"]["avail_width"], 2194);
+        assert_eq!(c["screen"]["device_pixel_ratio"], 1);
+        let w = c["window"].as_object().unwrap();
+        let n = |k: &str| w[k].as_i64().unwrap();
+        assert!(n("outer_width") <= 1470 && n("outer_height") <= 956, "the window fits the display: {w:?}");
+        assert!(n("inner_width") <= n("outer_width") && n("inner_height") <= n("outer_height"));
+    }
+
+    #[test]
+    fn a_window_that_already_fits_is_left_as_declared() {
+        let mut c = cfg();
+        fit_window_to(&mut c, 3840, 2160);
+        assert_eq!(c["window"]["outer_width"], 2560);
+        assert_eq!(c["window"]["inner_height"], 1312);
+        assert_eq!(c["screen"]["width"], 2194);
+    }
+
+    #[test]
+    fn a_profile_with_no_window_gets_one_that_fits_the_display() {
+        let mut c = cfg();
+        c.remove("window");
+        fit_window_to(&mut c, 1920, 1080);
+        assert!(c["window"]["outer_width"].as_i64().unwrap() <= 1920);
+        assert!(c["window"]["outer_height"].as_i64().unwrap() <= 1080);
+    }
+}
 
 #[cfg(test)]
 mod team_server_stop_tests {

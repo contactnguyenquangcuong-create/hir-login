@@ -113,6 +113,34 @@ fn is_zero(n: &u64) -> bool {
     *n == 0
 }
 
+/// What a profile's "auto" time zone, language and location came out as the first time it was
+/// opened, kept so that they stop following whichever machine (and address) opens it next: the same
+/// profile showing Bangkok from one machine and Ho Chi Minh City from another is two places to a
+/// site. Valid for one proxy (or none); a different binding resolves again. It travels with the
+/// profile, so every machine uses the same values.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct FpPin {
+    /// The proxy these were resolved for: its id, or `host:port` for an inline one, or "" for none.
+    pub proxy: String,
+    pub timezone: String,
+    pub locale: String,
+    #[serde(default)]
+    pub lat: Option<f64>,
+    #[serde(default)]
+    pub lng: Option<f64>,
+    /// When (ms since the epoch) they were resolved; the newer pin wins when two machines made one.
+    #[serde(default)]
+    pub at: u64,
+}
+
+/// Records `pin` for the profile without touching anything else about it.
+pub fn set_fp_pin(id: &str, pin: FpPin) -> Result<()> {
+    let _guard = file_lock();
+    let mut p = load_raw(id)?;
+    p.meta.pin = Some(pin);
+    save_raw_locked(&mut p)
+}
+
 /// Binds the profile to `proxy` (or to none), and stamps the change if it is one.
 pub fn bind_proxy_stamped(meta: &mut StoredMeta, proxy: Option<String>) {
     if meta.proxy_id != proxy {
@@ -137,6 +165,9 @@ pub struct StoredMeta {
     /// closed the profile (and the profile then opened with the machine's own address).
     #[serde(default, skip_serializing_if = "is_zero")]
     pub proxy_at: u64,
+    /// The time zone, language and location "auto" resolved to (see `FpPin`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<FpPin>,
     #[serde(default)]
     pub last_launched_at: Option<String>,
     /// "@<unix_secs>" creation marker.
@@ -465,6 +496,9 @@ fn save_raw_locked(stored: &mut StoredProfile) -> Result<()> {
             // The editor's form does not carry the stamp: keep it unless the save is the change.
             if stored.meta.proxy_at == 0 {
                 stored.meta.proxy_at = existing.meta.proxy_at;
+            }
+            if stored.meta.pin.is_none() {
+                stored.meta.pin = existing.meta.pin;
             }
             if stored.meta.last_launched_at.is_none() {
                 stored.meta.last_launched_at = existing.meta.last_launched_at;

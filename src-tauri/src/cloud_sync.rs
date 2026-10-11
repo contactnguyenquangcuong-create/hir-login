@@ -869,6 +869,16 @@ fn apply_bundle_inner(id: &str, bytes: &[u8], keep_local_session: bool) -> Resul
                 local.meta.color = remote.meta.color.clone();
                 local.meta.android_media = remote.meta.android_media;
                 bundle_proxy_at = remote.meta.proxy_at;
+                // The time zone, language and location "auto" came out as travel with the profile:
+                // the newer pin wins, so every machine shows the same ones.
+                let take_remote_pin = match (&local.meta.pin, &remote.meta.pin) {
+                    (None, Some(_)) => true,
+                    (Some(l), Some(r)) => r.at > l.at,
+                    _ => false,
+                };
+                if take_remote_pin {
+                    local.meta.pin = remote.meta.pin.clone();
+                }
                 let _ = crate::profile::save_raw(&mut local);
                 if existed {
                     // `save_raw` keeps this machine's pin and folder on purpose
@@ -3130,6 +3140,75 @@ mod tests {
                 let _ = sync_round().await;
             }
         }
+    }
+
+    /// The time zone, language and location a profile's "auto" came out as travel with it, and
+    /// the newer pin wins when two machines made one.
+    #[test]
+    fn the_pinned_time_zone_and_language_travel_with_the_profile_and_the_newer_pin_wins() {
+        let _g = TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-pin-{}", uuid::Uuid::new_v4()));
+        for d in ["A", "B"] {
+            std::fs::create_dir_all(tmp.join(d)).unwrap();
+        }
+        struct Reset(std::path::PathBuf);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                store::set_data_root(None);
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _reset = Reset(tmp.clone());
+        let id = "pin-1";
+        let make = |root: &std::path::Path| {
+            at(root);
+            let mut stored = crate::profile::StoredProfile::default();
+            stored.meta.id = id.to_string();
+            stored.config.insert("name".into(), serde_json::json!("Pinned"));
+            stored.config.insert("timezone".into(), serde_json::json!("auto"));
+            crate::profile::save_raw(&mut stored).unwrap();
+        };
+        let pin = |tz: &str, at_ms: u64| crate::profile::FpPin {
+            proxy: "px-1".into(), timezone: tz.into(), locale: "vi-VN".into(), lat: Some(21.0), lng: Some(105.8), at: at_ms,
+        };
+        let bundle_of = |root: &std::path::Path| {
+            at(root);
+            build_bundle(id).unwrap()
+        };
+        let pin_of = |root: &std::path::Path| {
+            at(root);
+            crate::profile::load_raw(id).unwrap().meta.pin
+        };
+        let (a, b) = (tmp.join("A"), tmp.join("B"));
+        make(&a);
+        make(&b);
+        at(&a);
+        crate::profile::set_fp_pin(id, pin("Asia/Bangkok", 100)).unwrap();
+
+        // B has none: it takes A's.
+        let from_a = bundle_of(&a);
+        at(&b);
+        apply_bundle(id, &from_a).unwrap();
+        assert_eq!(pin_of(&b), Some(pin("Asia/Bangkok", 100)));
+
+        // B makes a newer one (the proxy changed there): A's older bundle does not undo it.
+        at(&b);
+        crate::profile::set_fp_pin(id, pin("Asia/Ho_Chi_Minh", 200)).unwrap();
+        at(&b);
+        apply_bundle(id, &from_a).unwrap();
+        assert_eq!(pin_of(&b), Some(pin("Asia/Ho_Chi_Minh", 200)));
+
+        // A takes B's newer one, and an edit of the profile in the editor keeps the pin.
+        let from_b = bundle_of(&b);
+        at(&a);
+        apply_bundle(id, &from_b).unwrap();
+        assert_eq!(pin_of(&a), Some(pin("Asia/Ho_Chi_Minh", 200)));
+        at(&a);
+        let mut edited = crate::profile::load_raw(id).unwrap();
+        edited.meta.pin = None; // the editor's form does not carry it
+        edited.config.insert("notes".into(), serde_json::json!("edited"));
+        crate::profile::save_raw(&mut edited).unwrap();
+        assert_eq!(pin_of(&a), Some(pin("Asia/Ho_Chi_Minh", 200)), "saving the profile in the editor must not lose the pin");
     }
 
     /// The refusal to open a profile names the member, in words the UI turns into a sentence —

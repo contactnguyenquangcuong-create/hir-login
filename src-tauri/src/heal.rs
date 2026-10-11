@@ -104,7 +104,28 @@ impl Conn {
 /// what is missing, and reloads the open pages if it handed anything over. `ws_url` is the
 /// browser's own debugging address. Returns a line for the log.
 pub async fn heal(profile_id: &str, ws_url: &str) -> Result<String> {
-    let saved = crate::cookies::export(profile_id).context("read the saved cookies")?;
+    // The browser holds its cookie file while it starts (on Windows, so that it cannot be opened
+    // for a moment): ask again a few times before giving up.
+    let mut saved = None;
+    let mut last_err = None;
+    for attempt in 0..6 {
+        let id = profile_id.to_string();
+        match tokio::task::spawn_blocking(move || crate::cookies::export(&id)).await {
+            Ok(Ok(list)) => {
+                saved = Some(list);
+                break;
+            }
+            Ok(Err(e)) => last_err = Some(e),
+            Err(e) => last_err = Some(anyhow::anyhow!("{e}")),
+        }
+        if attempt < 5 {
+            tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+        }
+    }
+    let saved = match saved {
+        Some(s) => s,
+        None => return Err(last_err.unwrap_or_else(|| anyhow::anyhow!("unknown")).context("read the saved cookies")),
+    };
     if saved.is_empty() {
         return Ok("no saved cookies to compare".into());
     }

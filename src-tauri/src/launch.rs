@@ -176,7 +176,10 @@ pub async fn launch_profile_synced(
     // the window has to fit this monitor. "real" mode skips — the core drops it anyway.
     if settings::load()?.screen_resolution_mode.as_deref() != Some("real") {
         if let Some(w) = crate::main_window() {
-            crate::clamp_screen_to_real_display(&w, &mut raw);
+            // Only the window is fitted to this monitor. The screen the profile declares is left as
+            // it is: replacing it with this monitor's size made the same profile report a
+            // different screen from every machine it was opened on.
+            crate::fit_window_to_real_display(&w, &mut raw);
         }
     }
     let json = serde_json::to_string(&raw).context("serialize profile")?;
@@ -279,6 +282,17 @@ pub async fn launch_profile_synced(
         cmd.arg("--disable-background-timer-throttling");
     }
 
+    // A debugging port on this machine only, through which `heal` hands the browser the saved
+    // cookies it did not take from its file (see `heal.rs`), for every ordinary interactive launch.
+    // With the port open the browser stops answering its proxy's login challenge by itself — a
+    // "Sign in: the proxy requires a username and password" box on the first page it restores
+    // (reproduced with the real engine: no box without the port, the box with it) — so a proxy that
+    // has a login goes through the local forwarder, which adds the login and leaves the browser
+    // with a proxy that asks for none. That is only done for an HTTP proxy; for any other kind of
+    // proxy with a login there is no hand-over rather than a box.
+    let (heal_cookies, forwarder_for_login) =
+        debug_port_plan(enable_cdp, headless, stored.meta.temporary, bound_proxy.as_ref());
+
     if let Some(p) = bound_proxy.as_ref() {
         // Never hand the engine a proxy setting it would silently drop: that is a
         // direct connection from this machine's real IP.
@@ -288,9 +302,9 @@ pub async fn launch_profile_synced(
                 p.host, p.port
             );
         }
-        let proxy_arg = if crate::proxy_relay::needs_relay(p) {
+        let proxy_arg = if crate::proxy_relay::needs_relay(p) || forwarder_for_login {
             let port = crate::proxy_relay::start(profile_id, p).await?;
-            eprintln!("[launcher] proxy {}:{} has `=`/`;`/`,` in its login — forwarding through 127.0.0.1:{port}", p.host, p.port);
+            eprintln!("[launcher] proxy {}:{} goes through the local forwarder 127.0.0.1:{port} (login with `=`/`;`/`,`, or a debugging port is open)", p.host, p.port);
             format!("http://127.0.0.1:{port}")
         } else {
             p.to_engine_arg()
@@ -393,7 +407,6 @@ pub async fn launch_profile_synced(
     // interactive browser is given a debugging port on this machine only, through which `heal`
     // compares what the file holds with what the browser has a moment after it starts, and hands
     // over whatever it lacks — the cookies then travel with the browser itself, sealed by it.
-    let heal_cookies = !enable_cdp && !headless && !stored.meta.temporary;
     if heal_cookies {
         let _ = std::fs::remove_file(udd.join("DevToolsActivePort"));
         cmd.arg("--remote-debugging-port=0");
@@ -564,6 +577,53 @@ async fn read_devtools_endpoint(udd: &Path) -> Option<process::CdpInfo> {
     None
 }
 
+/// Whether an interactive launch gets the cookie hand-over (a debugging port on this machine, see
+/// `heal`), and whether the proxy has to go through the local forwarder because of it. With the
+/// port open the browser stops answering a proxy's login challenge by itself, so an HTTP proxy
+/// that has a login is reached through the forwarder (which adds the login); any other kind of
+/// proxy with a login gets no hand-over rather than a login box. Automation launches have the
+/// port anyway and get the forwarder under the same rule. Returns (hand-over, forwarder).
+pub(crate) fn debug_port_plan(enable_cdp: bool, headless: bool, temporary: bool, proxy: Option<&proxy::ProxyEntry>) -> (bool, bool) {
+    let has_login = |p: &proxy::ProxyEntry| !p.username.is_empty() || !p.password.is_empty();
+    let is_http = |p: &proxy::ProxyEntry| matches!(p.kind, proxy::ProxyKind::Http);
+    let interactive = !enable_cdp && !headless && !temporary;
+    let heal = interactive && proxy.map_or(true, |p| !has_login(p) || is_http(p));
+    let forwarder = (heal || enable_cdp) && proxy.map_or(false, |p| has_login(p) && is_http(p));
+    (heal, forwarder)
+}
+
+#[cfg(test)]
+mod debug_port_tests {
+    use super::*;
+
+    fn p(kind: proxy::ProxyKind, user: &str) -> proxy::ProxyEntry {
+        proxy::ProxyEntry {
+            id: "p".into(), name: "p".into(), kind, host: "h".into(), port: 1,
+            username: user.into(), password: if user.is_empty() { String::new() } else { "pw".into() },
+            country: String::new(), notes: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_hand_over_and_the_forwarder_follow_the_proxy_and_the_kind_of_launch() {
+        use proxy::ProxyKind::*;
+        // No proxy, or a proxy with no login: the hand-over, no forwarder.
+        assert_eq!(debug_port_plan(false, false, false, None), (true, false));
+        assert_eq!(debug_port_plan(false, false, false, Some(&p(Http, ""))), (true, false));
+        // An HTTP proxy with a login: the hand-over, through the forwarder (no login box).
+        assert_eq!(debug_port_plan(false, false, false, Some(&p(Http, "u"))), (true, true));
+        // Another kind with a login: no hand-over, rather than a login box.
+        assert_eq!(debug_port_plan(false, false, false, Some(&p(Socks5, "u"))), (false, false));
+        assert_eq!(debug_port_plan(false, false, false, Some(&p(Https, "u"))), (false, false));
+        // A temporary profile, a headless one: nothing.
+        assert_eq!(debug_port_plan(false, false, true, Some(&p(Http, "u"))), (false, false));
+        assert_eq!(debug_port_plan(false, true, false, None), (false, false));
+        // Automation has its own port: the forwarder under the same rule, no hand-over.
+        assert_eq!(debug_port_plan(true, false, false, Some(&p(Http, "u"))), (false, true));
+        assert_eq!(debug_port_plan(true, false, false, Some(&p(Socks5, "u"))), (false, false));
+    }
+}
+
 /// Resolve "auto" sentinels in profile JSON; with proxy: live → cached → country tag → host warn.
 async fn resolve_auto_fields(
     profile_id: &str,
@@ -593,9 +653,20 @@ async fn resolve_auto_fields(
         proxy_opt.map(|p| format!("{}:{}", p.host, p.port)).unwrap_or_else(|| "(direct)".into()),
     );
 
+    // The values this profile's "auto" fields came out as the first time (see `profile::FpPin`):
+    // used again as long as it connects the same way, so they do not change with the machine or
+    // the address that happens to open it. Nothing is looked up then.
+    let proxy_key = proxy_opt
+        .map(|p| if p.id.is_empty() { format!("{}:{}", p.host, p.port) } else { p.id.clone() })
+        .unwrap_or_default();
+    let pin = profile::load_raw(profile_id)
+        .ok()
+        .and_then(|p| p.meta.pin)
+        .filter(|p| p.proxy == proxy_key && !p.timezone.is_empty());
+
     // ---- geo source ----
     let mut source = "";
-    let geo: Option<proxy::GeoInfo> = match proxy_opt {
+    let geo: Option<proxy::GeoInfo> = if pin.is_some() { source = "pinned"; None } else { match proxy_opt {
         Some(p) => {
             match proxy::geo_check_cached(p).await {
                 Ok(g) => {
@@ -653,7 +724,7 @@ async fn resolve_auto_fields(
                 }
             }
         }
-    };
+    } };
 
     let host_warn = || {
         if proxy_opt.is_some() {
@@ -667,7 +738,9 @@ async fn resolve_auto_fields(
     };
 
     // ---- concrete tz/locale/lat/lng ----
-    let (resolved_tz, resolved_locale, resolved_lat, resolved_lng) = match geo {
+    let (resolved_tz, resolved_locale, resolved_lat, resolved_lng) = if let Some(p) = &pin {
+        (p.timezone.clone(), p.locale.clone(), p.lat, p.lng)
+    } else { match geo {
         Some(ref g) => {
             let tz = if !g.timezone.is_empty() {
                 g.timezone.clone()
@@ -698,11 +771,28 @@ async fn resolve_auto_fields(
                 )
             }
         }
-    };
+    } };
 
     eprintln!(
         "[launcher] resolved tz={resolved_tz} locale={resolved_locale} (source={source})"
     );
+    // Read off a live look-up (not a fallback), the values are kept for the next open, here or on
+    // any other machine of the team.
+    if pin.is_none() && matches!(source, "proxy-live" | "direct-live") && !resolved_tz.is_empty() {
+        let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        let kept = profile::set_fp_pin(profile_id, profile::FpPin {
+            proxy: proxy_key.clone(),
+            timezone: resolved_tz.clone(),
+            locale: resolved_locale.clone(),
+            lat: resolved_lat,
+            lng: resolved_lng,
+            at,
+        });
+        crate::cloud_sync::log_line(&format!(
+            "launch {profile_id}: time zone {resolved_tz}, language {resolved_locale} are now fixed for this profile{}",
+            if kept.is_err() { " (could not be saved)" } else { "" },
+        ));
+    }
     // Where the sites will think this profile is, written down: a profile with no proxy exits from
     // each machine's own address and takes that machine's time zone and language, so the same
     // login seen from two machines looks like two places — often what a site logs out for.
@@ -711,7 +801,7 @@ async fn resolve_auto_fields(
         geo.as_ref().map(|g| g.ip.as_str()).filter(|s| !s.is_empty()).unwrap_or("an address that could not be read"),
         geo.as_ref().map(|g| g.country_code.as_str()).filter(|s| !s.is_empty()).unwrap_or("country unknown"),
         geo.as_ref().map(|g| g.city.as_str()).filter(|s| !s.is_empty()).map(|c| format!(", {c}")).unwrap_or_default(),
-        if source.is_empty() { "this computer's own settings" } else { source },
+        match source { "" => "this computer's own settings", "pinned" => "the values fixed for this profile", other => other },
     ));
 
     if want_tz_auto {
