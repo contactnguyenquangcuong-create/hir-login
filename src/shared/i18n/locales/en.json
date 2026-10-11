@@ -906,7 +906,7 @@
   "profileRow.statusIdle": "Idle",
   "profileRow.statusRunning": "Running",
   "profileRow.statusSyncing": "Syncing",
-  "profileRow.statusElsewhere": "Open elsewhere",
+  "profileRow.statusElsewhere": "Elsewhere",
   "profileRowActions.clone": "Clone",
   "profileRowActions.delete": "Delete",
   "profileRowActions.edit": "Edit",

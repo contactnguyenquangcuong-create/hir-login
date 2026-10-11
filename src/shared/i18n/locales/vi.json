@@ -906,7 +906,7 @@
   "profileRow.statusIdle": "Chưa chạy",
   "profileRow.statusRunning": "Đang chạy",
   "profileRow.statusSyncing": "Đang đồng bộ",
-  "profileRow.statusElsewhere": "Máy khác đang dùng",
+  "profileRow.statusElsewhere": "Máy khác",
   "profileRowActions.clone": "Nhân bản",
   "profileRowActions.delete": "Xoá",
   "profileRowActions.edit": "Sửa",

@@ -50,12 +50,12 @@ export function ProfileRowActions({ profile, onMore }: {
           mode="lighter"
           size="xsmall"
           fullRadius
-          className="min-w-[84px] max-w-[190px]"
+          className="w-[150px] max-w-[150px] justify-start overflow-hidden"
           leftIcon={elsewhere.saving ? <span className="spin-icon inline-grid place-items-center"><PlayIcon className="size-3.5" /></span> : <PlayIcon className="size-3.5" />}
           disabled
           title={elsewhere.saving ? t("profileRowActions.savedByTitle", { who: elsewhere.by }) : t("profileRowActions.usedByTitle", { who: elsewhere.by })}
         >
-          <span className="truncate">{elsewhere.saving ? t("profileRowActions.savedBy", { who: elsewhere.by }) : t("profileRowActions.usedBy", { who: elsewhere.by })}</span>
+          <span className="min-w-0 truncate">{elsewhere.saving ? t("profileRowActions.savedBy", { who: elsewhere.by }) : t("profileRowActions.usedBy", { who: elsewhere.by })}</span>
         </Button>
       ) : (
         <Button

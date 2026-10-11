@@ -132,8 +132,8 @@ export function ProfileRow({ profile, proxy, onMenu }: {
           </div>
           <div className="mono mt-0.5 overflow-hidden text-ellipsis whitespace-nowrap text-[10.5px] text-text-disabled-300">{p.id.slice(0, 8)}</div>
         </div>
-        <div>
-          <Badge color={isSyncing || elsewhere ? "warning" : isRunning ? "success" : "gray"} variant='filled' size="small" dot>
+        <div className="min-w-0 overflow-hidden" title={elsewhere ? t(elsewhere.saving ? "profileRowActions.savedByTitle" : "profileRowActions.usedByTitle", { who: elsewhere.by }) : undefined}>
+          <Badge color={isSyncing || elsewhere ? "warning" : isRunning ? "success" : "gray"} variant='filled' size="small" dot className="max-w-full truncate">
             {isSyncing || elsewhere?.saving ? t("profileRow.statusSyncing") : elsewhere ? t("profileRow.statusElsewhere") : isRunning ? t("profileRow.statusRunning") : t("profileRow.statusIdle")}
           </Badge>
         </div>
