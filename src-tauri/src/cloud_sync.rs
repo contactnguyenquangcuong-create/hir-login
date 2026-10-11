@@ -91,7 +91,19 @@ impl Drop for BusyGuard {
 /// How many profiles are being synced or saved right now: what must not be cut short by quitting
 /// the app or shutting the computer down.
 pub fn working() -> usize {
-    busy_map().lock().map(|m| m.len()).unwrap_or(0) + crate::process::closing_count()
+    working_ids().len()
+}
+
+/// The profiles being synced or saved: one profile counted once, however many ways it is busy (a
+/// profile whose browser has just closed is "closing" and, while its upload runs, "pushing" too —
+/// counting both made one profile look like two).
+fn working_ids() -> std::collections::HashSet<String> {
+    let mut ids: std::collections::HashSet<String> = busy_map()
+        .lock()
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    ids.extend(crate::process::closing_ids());
+    ids
 }
 
 /// Tells the window (a banner that says to wait) and the system (a computer that is being shut
@@ -2861,6 +2873,22 @@ mod tests {
             checkin("sess-1").await.expect("close");
             assert!(!load_state().pending.contains("sess-1"));
         }).await;
+    }
+
+    /// One profile that is both closing and being uploaded is one profile of work, not two.
+    #[test]
+    fn a_profile_that_is_closing_and_uploading_counts_once() {
+        let id = "count-once-1";
+        crate::process::closing_begin(id);
+        let guard = try_begin(id, "push").expect("free");
+        let other = try_begin("count-once-2", "pull").expect("free");
+        let ids = working_ids();
+        assert!(ids.contains(id) && ids.contains("count-once-2"));
+        assert_eq!(ids.iter().filter(|i| i.starts_with("count-once-")).count(), 2, "{ids:?}");
+        drop(guard);
+        drop(other);
+        crate::process::closing_end(id);
+        assert!(!working_ids().iter().any(|i| i.starts_with("count-once-")));
     }
 
     /// The refusal to open a profile names the member, in words the UI turns into a sentence —

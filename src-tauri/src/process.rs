@@ -46,14 +46,14 @@ pub fn closing_count() -> usize {
     closing_set().lock().map(|s| s.len()).unwrap_or(0)
 }
 
-fn closing_begin(id: &str) {
+pub(crate) fn closing_begin(id: &str) {
     if let Ok(mut s) = closing_set().lock() {
         s.insert(id.to_string());
     }
     crate::cloud_sync::notify_working();
 }
 
-fn closing_end(id: &str) {
+pub(crate) fn closing_end(id: &str) {
     if let Ok(mut s) = closing_set().lock() {
         s.remove(id);
     }
