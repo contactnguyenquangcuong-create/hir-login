@@ -175,7 +175,7 @@ export function InlineEditor({
       <div className="absolute left-0 top-0 h-full w-[3px] bg-primary-base" />
       {/* The buttons are at the top and stay there while the form scrolls: a person who has filled
           the page in should not have to scroll to the bottom to find "Save". */}
-      <div className="sticky top-0 z-10 -mx-[18px] -mt-4 mb-4 flex items-center justify-between gap-3 border-b border-stroke-soft-200 bg-bg-weak-50/95 px-[18px] py-2.5 pl-[22px] backdrop-blur">
+      <div className="sticky top-[-1.5rem] z-10 -mx-[18px] -mt-4 mb-4 flex items-center justify-between gap-3 border-b border-stroke-soft-200 bg-bg-weak-50/95 px-[18px] py-2.5 pl-[22px] backdrop-blur">
         <span className="min-w-0 truncate text-label-md text-text-strong-950">
           {f.id ? `${t("inlineEditor.saveChanges")} · ${f.name || ""}` : t("inlineEditor.createProfile")}
         </span>
