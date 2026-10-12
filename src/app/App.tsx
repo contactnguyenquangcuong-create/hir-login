@@ -9,6 +9,7 @@ import { SyncWorkingBanner } from "../widgets/SyncWorkingBanner/SyncWorkingBanne
 import { HelperWatcher } from "../widgets/HelperWatcher";
 import { WhatsNewGate } from "../widgets/WhatsNewGate";
 import { BrowsersPage } from "../pages/browsers";
+import { ProxiesPage } from "../pages/proxies";
 import { ProxyShardPage } from "../pages/proxyshard";
 import { ExtensionsPage } from "../pages/extensions";
 import { BookmarksPage } from "../pages/bookmarks";
@@ -48,6 +49,7 @@ export function App() {
               {/* Kept mounted while another page is open: coming back is instant and an
                   unfinished "new profile" form is still there. */}
               <div className={section === "browsers" ? "" : "hidden"}><BrowsersPage /></div>
+              {section === "proxies" && <ProxiesPage />}
               {section === "proxyshard" && <ProxyShardPage />}
               {section === "extensions" && <ExtensionsPage />}
               {section === "bookmarks" && <BookmarksPage />}

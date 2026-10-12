@@ -868,8 +868,35 @@ fn apply_bundle_inner(id: &str, bytes: &[u8], keep_local_session: bool) -> Resul
                 let existed = crate::profile::load_raw(id).is_ok();
                 let mut local = crate::profile::load_raw(id).unwrap_or(remote.clone());
                 local.config = remote.config;
-                // How the team organises the profile follows it across machines.
-                local.meta.extensions = remote.meta.extensions.clone();
+                // How the team organises the profile follows it across machines — the extension
+                // list by the newer change: a list set here after the machine that uploaded this
+                // bundle last heard of it is not undone by it, and goes up from here.
+                match local.meta.extensions_at.cmp(&remote.meta.extensions_at) {
+                    std::cmp::Ordering::Less => {
+                        local.meta.extensions = remote.meta.extensions.clone();
+                        local.meta.extensions_at = remote.meta.extensions_at;
+                    }
+                    std::cmp::Ordering::Greater => {
+                        if local.meta.extensions != remote.meta.extensions {
+                            slog!("{id}: the bundle's extension list is older than the one set here — kept this machine's, and it will be sent up");
+                            update_state(|st| { st.pending.insert(id.to_string()); });
+                        }
+                    }
+                    std::cmp::Ordering::Equal => {
+                        // Neither has been changed since stamps began (or both agree): the union,
+                        // so that nothing either list holds is lost.
+                        let mut merged = remote.meta.extensions.clone();
+                        for e in &local.meta.extensions {
+                            if !merged.contains(e) {
+                                merged.push(e.clone());
+                            }
+                        }
+                        if merged != remote.meta.extensions {
+                            update_state(|st| { st.pending.insert(id.to_string()); });
+                        }
+                        local.meta.extensions = merged;
+                    }
+                }
                 local.meta.color = remote.meta.color.clone();
                 local.meta.android_media = remote.meta.android_media;
                 bundle_proxy_at = remote.meta.proxy_at;
@@ -883,7 +910,7 @@ fn apply_bundle_inner(id: &str, bytes: &[u8], keep_local_session: bool) -> Resul
                 if take_remote_pin {
                     local.meta.pin = remote.meta.pin.clone();
                 }
-                let _ = crate::profile::save_raw(&mut local);
+                let _ = crate::profile::save_raw_exact(&mut local);
                 if existed {
                     // `save_raw` keeps this machine's pin and folder on purpose
                     // (they have their own setters), so set them explicitly.
@@ -3216,6 +3243,85 @@ mod tests {
         edited.config.insert("notes".into(), serde_json::json!("edited"));
         crate::profile::save_raw(&mut edited).unwrap();
         assert_eq!(pin_of(&a), Some(pin("Asia/Ho_Chi_Minh", 200)), "saving the profile in the editor must not lose the pin");
+    }
+
+    /// The extensions a profile loads travel with it, and the newer change wins: an extension added
+    /// to every profile here is not undone by another machine, that had not heard of it, uploading
+    /// the profile afterwards; and where neither side has a stamp the lists are united.
+    #[test]
+    fn an_extension_added_here_is_not_undone_by_an_older_upload_from_another_machine() {
+        let _g = TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-extsync-{}", uuid::Uuid::new_v4()));
+        for d in ["A", "B"] {
+            std::fs::create_dir_all(tmp.join(d)).unwrap();
+        }
+        struct Reset(std::path::PathBuf);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                store::set_data_root(None);
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _reset = Reset(tmp.clone());
+        let id = "ext-1";
+        let make = |root: &std::path::Path| {
+            at(root);
+            let mut stored = crate::profile::StoredProfile::default();
+            stored.meta.id = id.to_string();
+            stored.config.insert("name".into(), serde_json::json!("Extended"));
+            crate::profile::save_raw(&mut stored).unwrap();
+        };
+        let list_of = |root: &std::path::Path| {
+            at(root);
+            crate::profile::load_raw(id).unwrap().meta.extensions
+        };
+        let bundle_of = |root: &std::path::Path| {
+            at(root);
+            build_bundle(id).unwrap()
+        };
+        let (a, b) = (tmp.join("A"), tmp.join("B"));
+        make(&a);
+        make(&b);
+
+        // A adds an extension to every profile; B has not heard of it.
+        at(&a);
+        assert_eq!(crate::profile::add_extension_to_all("ext-x").unwrap(), 1);
+        let from_b_old = bundle_of(&b);
+
+        // B's older upload arrives at A: A keeps its list, and holds the newer copy.
+        at(&a);
+        apply_bundle(id, &from_b_old).unwrap();
+        assert_eq!(list_of(&a), vec!["ext-x".to_string()], "the extension was undone by the older upload");
+        assert!(load_state().pending.contains(id), "the newer list is to be sent up");
+
+        // A's bundle reaches B: B takes it, stamp included, so a later upload of B's keeps it.
+        let from_a = bundle_of(&a);
+        at(&b);
+        apply_bundle(id, &from_a).unwrap();
+        assert_eq!(list_of(&b), vec!["ext-x".to_string()]);
+        let from_b_new = bundle_of(&b);
+        at(&a);
+        apply_bundle(id, &from_b_new).unwrap();
+        assert_eq!(list_of(&a), vec!["ext-x".to_string()]);
+
+        // Lists nobody has stamped (older builds) are united, never replaced.
+        let (c, d) = (tmp.join("A"), tmp.join("B"));
+        at(&c);
+        let mut p = crate::profile::load_raw(id).unwrap();
+        p.meta.extensions = vec!["old-1".into()];
+        p.meta.extensions_at = 0;
+        crate::profile::save_raw_exact(&mut p).unwrap();
+        at(&d);
+        let mut q = crate::profile::load_raw(id).unwrap();
+        q.meta.extensions = vec!["old-2".into()];
+        q.meta.extensions_at = 0;
+        crate::profile::save_raw_exact(&mut q).unwrap();
+        let from_d = bundle_of(&d);
+        at(&c);
+        apply_bundle(id, &from_d).unwrap();
+        let mut united = list_of(&c);
+        united.sort();
+        assert_eq!(united, vec!["old-1".to_string(), "old-2".to_string()]);
     }
 
     /// The refusal to open a profile names the member, in words the UI turns into a sentence —

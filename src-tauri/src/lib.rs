@@ -1183,9 +1183,10 @@ fn extension_import(paths: Vec<String>) -> Result<Vec<extensions::ExtensionEntry
     let mut out = Vec::new();
     let mut errs = Vec::new();
     for p in &paths {
-        match extensions::import(std::path::Path::new(p)) {
-            Ok(e) => out.push(e),
-            Err(e) => errs.push(format!("{p}: {e}")),
+        // A folder or an archive is searched for the extensions it holds (itself, or any number below it).
+        match extensions::import_many(std::path::Path::new(p)) {
+            Ok(mut found) => out.append(&mut found),
+            Err(e) => errs.push(format!("{p}: {e:#}")),
         }
     }
     if out.is_empty() && !errs.is_empty() {

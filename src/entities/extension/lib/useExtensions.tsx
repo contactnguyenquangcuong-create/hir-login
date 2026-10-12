@@ -116,9 +116,11 @@ export const useExtensions = create<ExtensionStore>((set, get) => ({
       const added = await extensionImport([dir]);
       await get().reload();
       if (get().everywhere) for (const e of added) await get().applyAll(e);
-      toast.ok(added.length > 0
-        ? t("useExtensions.addedFolderNamed", { name: added[0].name })
-        : t("useExtensions.nothingAdded"));
+      toast.ok(added.length > 1
+        ? t("useExtensions.addedCountMany", { n: added.length })
+        : added.length === 1
+          ? t("useExtensions.addedFolderNamed", { name: added[0].name })
+          : t("useExtensions.nothingAdded"));
     } catch (e) { toast.err(t("useExtensions.importFolderFailed", { error: String(e) })); }
     finally { set({ busy: false }); }
   },

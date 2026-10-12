@@ -300,6 +300,39 @@ fn dir_size(dir: &Path) -> u64 {
     total
 }
 
+/// The folders under `src` that hold an extension (a `manifest.json`), looking down at most three
+/// levels and not into one once it is found. Picking a folder that holds several extensions — a
+/// "my extensions" folder, or a store's `<id>/<version>/` layout — used to be refused as "not an
+/// extension" because only the folder itself, or a single folder directly under it, was looked at.
+pub fn roots_in(src: &Path) -> Vec<PathBuf> {
+    fn walk(dir: &Path, depth: u32, out: &mut Vec<PathBuf>) {
+        if dir.join("manifest.json").is_file() {
+            out.push(dir.to_path_buf());
+            return;
+        }
+        if depth == 0 {
+            return;
+        }
+        let Ok(rd) = fs::read_dir(dir) else { return };
+        let mut subs: Vec<PathBuf> = rd
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .filter(|p| {
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                !name.starts_with('.') && name != "node_modules" && name != "__MACOSX"
+            })
+            .collect();
+        subs.sort();
+        for sub in subs {
+            walk(&sub, depth - 1, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(src, 3, &mut out);
+    out
+}
+
 /// Import a .crx, a .zip or an already-unpacked folder. Returns the new entry.
 pub fn import(src: &Path) -> Result<ExtensionEntry> {
     let id = uuid::Uuid::new_v4().simple().to_string();
@@ -333,6 +366,46 @@ pub fn import(src: &Path) -> Result<ExtensionEntry> {
     // already here — never a second one.
     let id = settle_under_canonical_id(&dst, &id)?;
     read_entry(&id)
+}
+
+/// Import whatever `src` holds: an unpacked folder, a .crx or a .zip. A folder or an archive that
+/// holds several extensions, or one nested a few folders down (a zip of "my extensions", of a
+/// store's `<id>/<version>/` layout, of a repository with the extension in a subfolder), gives each
+/// of them; before, an archive had to hold the extension at its top or directly under one folder.
+pub fn import_many(src: &Path) -> Result<Vec<ExtensionEntry>> {
+    let mut staging = None;
+    let roots = if src.is_dir() {
+        roots_in(src)
+    } else {
+        let tmp = std::env::temp_dir().join(format!("hir-ext-unpack-{}", uuid::Uuid::new_v4().simple()));
+        fs::create_dir_all(&tmp)?;
+        if let Err(e) = unpack_archive(src, &tmp) {
+            let _ = fs::remove_dir_all(&tmp);
+            return Err(e);
+        }
+        let roots = roots_in(&tmp);
+        staging = Some(tmp);
+        roots
+    };
+    let result = if roots.is_empty() {
+        Err(anyhow::anyhow!(
+            "no manifest.json in it or in the folders under it (three levels deep) — not an extension"
+        ))
+    } else {
+        let mut out = Vec::new();
+        let mut errs = Vec::new();
+        for r in &roots {
+            match import(r) {
+                Ok(e) => out.push(e),
+                Err(e) => errs.push(format!("{}: {e:#}", r.display())),
+            }
+        }
+        if out.is_empty() { Err(anyhow::anyhow!(errs.join("; "))) } else { Ok(out) }
+    };
+    if let Some(tmp) = staging {
+        let _ = fs::remove_dir_all(&tmp);
+    }
+    result
 }
 
 /// Import from a Web Store page, a bare extension id, or a direct .crx / .zip
@@ -424,9 +497,17 @@ fn unpack_archive(src: &Path, dst: &Path) -> Result<()> {
     let mut zip = zip::ZipArchive::new(cursor).context("not a zip/crx archive")?;
     for i in 0..zip.len() {
         let mut f = zip.by_index(i)?;
-        let Some(rel) = f.enclosed_name() else { continue };
+        // Some tools write `folder\file` into a zip; read that as a path, on a Mac too.
+        let name = f.name().replace('\\', "/");
+        let rel = PathBuf::from(&name);
+        if rel.is_absolute()
+            || name.starts_with('/')
+            || rel.components().any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::Prefix(_)))
+        {
+            continue;
+        }
         let out = dst.join(rel);
-        if f.is_dir() {
+        if f.is_dir() || name.ends_with('/') {
             fs::create_dir_all(&out)?;
             continue;
         }
@@ -502,5 +583,118 @@ mod tests {
         );
         assert!(super::resolve_download_url("not a link").is_err());
         assert!(super::resolve_download_url("").is_err());
+    }
+}
+
+
+#[cfg(test)]
+mod roots_tests {
+    use super::*;
+
+    fn ext(dir: &Path) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("manifest.json"), r#"{"name":"x","version":"1.0"}"#).unwrap();
+    }
+
+    /// A folder is taken for what it holds: the extension itself, or every extension under it.
+    #[test]
+    fn a_folder_of_extensions_gives_every_extension_in_it() {
+        let tmp = std::env::temp_dir().join(format!("hir-ext-{}", uuid::Uuid::new_v4()));
+        // The extension's own folder.
+        ext(&tmp.join("one"));
+        assert_eq!(roots_in(&tmp.join("one")), vec![tmp.join("one")]);
+        // A folder holding three, one of them two levels down (a store's <id>/<version>/ layout).
+        ext(&tmp.join("many").join("a"));
+        ext(&tmp.join("many").join("b"));
+        ext(&tmp.join("many").join("store-id").join("1.2.3_0"));
+        fs::create_dir_all(tmp.join("many").join("node_modules").join("c")).unwrap();
+        ext(&tmp.join("many").join("node_modules").join("c"));
+        fs::create_dir_all(tmp.join("many").join(".git")).unwrap();
+        let found = roots_in(&tmp.join("many"));
+        assert_eq!(found.len(), 3, "{found:?}");
+        assert!(found.iter().any(|p| p.ends_with("1.2.3_0")));
+        // An extension's own subfolders are not extensions: the search stops where it finds one.
+        ext(&tmp.join("outer"));
+        ext(&tmp.join("outer").join("lib").join("inner"));
+        assert_eq!(roots_in(&tmp.join("outer")), vec![tmp.join("outer")]);
+        // Nothing in it: nothing found.
+        fs::create_dir_all(tmp.join("empty").join("sub")).unwrap();
+        assert!(roots_in(&tmp.join("empty")).is_empty());
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Archives are read like folders: the extension at the top, one folder down, several side by
+    /// side, or a few levels deep — and a .crx's header is skipped. Paths written with backslashes
+    /// and entries that climb out of the folder are handled.
+    #[test]
+    fn archives_give_every_extension_in_them() {
+        use std::io::Write;
+        let _g = crate::cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-extzip-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(tmp.join("lib")).unwrap();
+        store::set_data_root(Some(tmp.join("lib")));
+        struct Reset(PathBuf);
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                store::set_data_root(None);
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let _reset = Reset(tmp.clone());
+        let zip_of = |name: &str, files: &[(&str, &str)], crx: bool| -> PathBuf {
+            let path = tmp.join(name);
+            let mut buf = Vec::new();
+            {
+                let mut w = zip::ZipWriter::new(std::io::Cursor::new(&mut buf));
+                let opts = zip::write::SimpleFileOptions::default();
+                for (n, body) in files {
+                    w.start_file(*n, opts).unwrap();
+                    w.write_all(body.as_bytes()).unwrap();
+                }
+                w.finish().unwrap();
+            }
+            if crx {
+                let mut with = b"Cr24".to_vec();
+                with.extend_from_slice(&3u32.to_le_bytes());
+                with.extend_from_slice(&4u32.to_le_bytes());
+                with.extend_from_slice(&[0, 0, 0, 0]);
+                with.extend_from_slice(&buf);
+                buf = with;
+            }
+            fs::write(&path, buf).unwrap();
+            path
+        };
+        let m = |name: &str| format!(r#"{{"name":"{name}","version":"1.0","manifest_version":3}}"#);
+
+        // At the top of the zip.
+        let top = zip_of("top.zip", &[("manifest.json", &m("Top")), ("a.js", "1")], false);
+        assert_eq!(import_many(&top).unwrap().len(), 1);
+        // Under one folder, and with backslashes in the names.
+        let one = zip_of("one.zip", &[("Folder\\manifest.json", &m("One")), ("Folder\\a.js", "1")], false);
+        let got = import_many(&one).unwrap();
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].name, "One");
+        // Several side by side, one of them two folders down, plus macOS litter.
+        let many = zip_of(
+            "many.zip",
+            &[
+                ("pack/a/manifest.json", &m("A")),
+                ("pack/b/manifest.json", &m("B")),
+                ("pack/store/1.2_0/manifest.json", &m("C")),
+                ("__MACOSX/pack/a/manifest.json", "junk"),
+            ],
+            false,
+        );
+        let got = import_many(&many).unwrap();
+        assert_eq!(got.len(), 3, "{got:?}");
+        // A .crx with its header.
+        let crx = zip_of("x.crx", &[("manifest.json", &m("Crx"))], true);
+        assert_eq!(import_many(&crx).unwrap().len(), 1);
+        // Nothing in it, and a file that is no archive: refused, and nothing left behind.
+        let none = zip_of("none.zip", &[("readme.txt", "hi")], false);
+        assert!(import_many(&none).is_err());
+        let junk = tmp.join("junk.zip");
+        fs::write(&junk, b"not a zip at all, long enough to look at").unwrap();
+        assert!(import_many(&junk).is_err());
     }
 }

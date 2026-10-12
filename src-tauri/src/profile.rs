@@ -197,6 +197,12 @@ pub struct StoredMeta {
     /// Extension ids from the library.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extensions: Vec<String>,
+    /// When (ms since the epoch) the list above was last changed by a person (added to every
+    /// profile, picked in the editor). On a sync the newer list wins: before this, whichever
+    /// machine uploaded the profile last decided the list, so an extension added to all profiles
+    /// here vanished from those another machine, which had not heard of it, uploaded afterwards.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub extensions_at: u64,
     /// Answer media questions like a real Android device; phone profiles only.
     /// Blending in and playing video pull apart here, so the operator chooses.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -478,6 +484,24 @@ pub fn save_raw(stored: &mut StoredProfile) -> Result<()> {
 /// Body of `save_raw` for callers already holding the lock. It reloads the file
 /// itself, so a caller that loaded first must hold the lock across both halves.
 fn save_raw_locked(stored: &mut StoredProfile) -> Result<()> {
+    save_raw_locked_with(stored, true)
+}
+
+/// `save_raw` for a profile that arrives from the team: its extension list and the stamp that goes
+/// with it are written as they are, never stamped "now" for being different from what was here.
+pub fn save_raw_exact(stored: &mut StoredProfile) -> Result<()> {
+    let _guard = file_lock();
+    save_raw_locked_with(stored, false)
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn save_raw_locked_with(stored: &mut StoredProfile, stamp_changes: bool) -> Result<()> {
     let is_new = stored.meta.id.is_empty();
     if is_new {
         stored.meta.id = uuid::Uuid::new_v4().to_string();
@@ -499,6 +523,13 @@ fn save_raw_locked(stored: &mut StoredProfile) -> Result<()> {
             }
             if stored.meta.pin.is_none() {
                 stored.meta.pin = existing.meta.pin;
+            }
+            // A change to the extension list made by this save is stamped now; a save that does
+            // not touch it (the editor's form carries no stamp) keeps the stamp it had.
+            if stamp_changes && stored.meta.extensions != existing.meta.extensions && stored.meta.extensions_at == existing.meta.extensions_at {
+                stored.meta.extensions_at = now_ms();
+            } else if stored.meta.extensions_at == 0 {
+                stored.meta.extensions_at = existing.meta.extensions_at;
             }
             if stored.meta.last_launched_at.is_none() {
                 stored.meta.last_launched_at = existing.meta.last_launched_at;
@@ -970,6 +1001,7 @@ pub fn add_extension_to_all(ext_id: &str) -> Result<usize> {
             continue;
         }
         stored.meta.extensions.push(ext_id.to_string());
+        stored.meta.extensions_at = now_ms();
         let out = serde_json::to_string_pretty(&stored)?;
         write_atomic(&entry.path(), out.as_bytes())?;
         n += 1;
