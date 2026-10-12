@@ -98,9 +98,13 @@ pub fn working() -> usize {
 /// profile whose browser has just closed is "closing" and, while its upload runs, "pushing" too —
 /// counting both made one profile look like two).
 fn working_ids() -> std::collections::HashSet<String> {
+    // Only what is being SENT to the team counts: that is what an app quit or a computer switched
+    // off would cut short. A profile being brought down from the team (a colleague changed it, a
+    // round after the computer was switched on) is not — it showed "syncing" boxes at random and
+    // asked people to wait for something that costs nothing to interrupt.
     let mut ids: std::collections::HashSet<String> = busy_map()
         .lock()
-        .map(|m| m.keys().cloned().collect())
+        .map(|m| m.iter().filter(|(_, phase)| **phase == "push").map(|(id, _)| id.clone()).collect())
         .unwrap_or_default();
     ids.extend(crate::process::closing_ids());
     ids
@@ -2903,12 +2907,15 @@ mod tests {
         let id = "count-once-1";
         crate::process::closing_begin(id);
         let guard = try_begin(id, "push").expect("free");
-        let other = try_begin("count-once-2", "pull").expect("free");
+        let other = try_begin("count-once-2", "push").expect("free");
+        let pulling = try_begin("count-once-3", "pull").expect("free");
         let ids = working_ids();
         assert!(ids.contains(id) && ids.contains("count-once-2"));
+        assert!(!ids.contains("count-once-3"), "a profile being brought down is not work that must not be cut short");
         assert_eq!(ids.iter().filter(|i| i.starts_with("count-once-")).count(), 2, "{ids:?}");
         drop(guard);
         drop(other);
+        drop(pulling);
         crate::process::closing_end(id);
         assert!(!working_ids().iter().any(|i| i.starts_with("count-once-")));
     }

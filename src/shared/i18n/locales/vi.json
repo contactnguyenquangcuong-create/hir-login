@@ -346,6 +346,7 @@
   "inlineEditor.refreshRateLabel": "Tần số quét màn hình",
   "inlineEditor.resolutionHelp": "Chỉ những gì màn hình này hiển thị được — {w} × {h}. Khai báo lớn hơn sẽ bị chính cửa sổ trình duyệt phản bác.",
   "inlineEditor.resolutionHelpNoHost": "Không có màn hình để đo, nên mọi độ phân giải đều được đưa ra.",
+  "inlineEditor.resolutionCap": "Cửa sổ trình duyệt không thể phóng to hơn độ phân giải này (trang web cũng không thấy nó lớn hơn). Cần toàn màn hình thì chọn bằng độ phân giải màn hình của bạn.",
   "inlineEditor.resolutionLabel": "Độ phân giải màn hình",
   "inlineEditor.resolutionTemplate": "Theo đúng fingerprint",
   "inlineEditor.saveChanges": "Lưu thay đổi",

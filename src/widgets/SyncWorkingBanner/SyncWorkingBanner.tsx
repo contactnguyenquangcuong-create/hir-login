@@ -47,7 +47,7 @@ export function SyncWorkingBanner() {
             <circle cx="11" cy="11" r="8.5" fill="none" strokeWidth="3" strokeLinecap="round" strokeDasharray="13 41" className="stroke-primary-base" />
           </svg>
           <div className="flex flex-col">
-            <span className="text-label-sm text-text-strong-950">Đang đồng bộ {n} profile với nhóm</span>
+            <span className="text-label-sm text-text-strong-950">Đang lưu {n} profile lên nhóm</span>
             <span className="text-paragraph-xs text-text-sub-600">Đợi xong rồi hãy tắt máy hoặc thoát app, kẻo mất đăng nhập.</span>
           </div>
         </>

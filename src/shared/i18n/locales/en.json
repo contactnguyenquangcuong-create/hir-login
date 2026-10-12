@@ -346,6 +346,7 @@
   "inlineEditor.refreshRateLabel": "Screen refresh rate",
   "inlineEditor.resolutionHelp": "Only what this monitor can show — {w} × {h}. A larger claim is contradicted by the window itself.",
   "inlineEditor.resolutionHelpNoHost": "No monitor to measure, so every resolution is offered.",
+  "inlineEditor.resolutionCap": "The browser window cannot be made larger than this resolution (pages never see it larger either). To use the whole monitor, pick your monitor's resolution.",
   "inlineEditor.resolutionLabel": "Screen resolution",
   "inlineEditor.resolutionTemplate": "As in the fingerprint",
   "inlineEditor.saveChanges": "Save changes",

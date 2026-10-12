@@ -37,7 +37,7 @@ export function ProfileRowActions({ profile, onMore }: {
           mode="lighter"
           size="xsmall"
           fullRadius
-          className="min-w-[84px]"
+          className="w-[120px] flex-none"
           leftIcon={<span className="spin-icon inline-grid place-items-center"><PlayIcon className="size-3.5" /></span>}
           disabled
           title={t("profileRowActions.syncingTitle")}
@@ -50,7 +50,7 @@ export function ProfileRowActions({ profile, onMore }: {
           mode="lighter"
           size="xsmall"
           fullRadius
-          className="w-[150px] max-w-[150px] justify-start overflow-hidden"
+          className="w-[120px] max-w-[120px] flex-none justify-start overflow-hidden"
           leftIcon={elsewhere.saving ? <span className="spin-icon inline-grid place-items-center"><PlayIcon className="size-3.5" /></span> : <PlayIcon className="size-3.5" />}
           disabled
           title={elsewhere.saving ? t("profileRowActions.savedByTitle", { who: elsewhere.by }) : t("profileRowActions.usedByTitle", { who: elsewhere.by })}
@@ -63,7 +63,7 @@ export function ProfileRowActions({ profile, onMore }: {
           mode="lighter"
           size="xsmall"
           fullRadius
-          className="min-w-[84px]"
+          className="w-[120px] flex-none"
           leftIcon={
             isRunning
               ? <StopIcon className="size-3.5" />

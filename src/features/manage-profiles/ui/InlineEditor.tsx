@@ -98,8 +98,13 @@ export function InlineEditor({
     const fits = SCREEN_RESOLUTIONS.filter(
       ([w, h]) => !hostScreen || (w <= hostScreen[0] && h <= hostScreen[1]),
     );
-    return ["", ...fits.map(([w, h]) => `${w}x${h}`)];
-  }, [hostScreen]);
+    const list = fits.map(([w, h]) => `${w}x${h}`);
+    // The size the profile has now is always in the list, even when this machine's monitor is too
+    // small for it (or it is a phone's): a select that shows nothing for the current value hides
+    // why the browser window will not grow.
+    const now = f.screen_w > 0 && f.screen_h > 0 ? `${f.screen_w}x${f.screen_h}` : "";
+    return ["", ...(now && !list.includes(now) ? [now] : []), ...list];
+  }, [hostScreen, f.screen_w, f.screen_h]);
 
   /// Pick GPU = full fingerprint snap (fetched lazily); toStored re-fetches
   /// the payload at save time since the bulk list doesn't carry it.
@@ -124,13 +129,20 @@ export function InlineEditor({
     } catch {
       // Fall back to preset's nav defaults if Rust enrich fails.
     }
+    // Going from a phone to a computer (or back) leaves behind what only made sense for the other:
+    // the screen size the form still holds (a phone's, kept as "the operator's choice" and written
+    // over the new template's own) and the "answers media questions the Android way" switch. That
+    // is why a profile switched back to a computer kept looking like a phone.
+    const nextUa = nav.user_agent ?? f.user_agent;
+    const kindChanged = claimsMobile(f) !== claimsMobile({ user_agent: nextUa });
     setDraft({
       ...f,
       gpu_preset_id: id,
       hardware_concurrency: picks.hardware_concurrency ?? nav.hardware_concurrency ?? f.hardware_concurrency,
       device_memory: picks.device_memory ?? nav.device_memory ?? f.device_memory,
       platform_version: picks.platform_version ?? f.platform_version,
-      user_agent: nav.user_agent ?? f.user_agent,
+      user_agent: nextUa,
+      ...(kindChanged ? { screen_w: 0, screen_h: 0, android_media: false } : {}),
     });
   };
 
@@ -163,8 +175,12 @@ export function InlineEditor({
 
   const pickOs = (os: string) => {
     setOsFilter(os);
-    // Switch GPU to first of new OS if current doesn't match.
-    if (currentFp && !matchesOs(currentFp.platform, os)) {
+    // Switch GPU to first of new OS if current doesn't match — also when the bound preset is not
+    // in the library any more, where the user agent still says what the profile is now.
+    const mismatch = currentFp
+      ? !matchesOs(currentFp.platform, os)
+      : claimsMobile(f) !== (os === "Android");
+    if (mismatch) {
       const first = fingerprints.find((g) => matchesOs(g.platform, os));
       if (first) setGpu(first.id);
     }
@@ -346,6 +362,7 @@ export function InlineEditor({
                     ? t("inlineEditor.resolutionHelp", { w: hostScreen[0], h: hostScreen[1] })
                     : t("inlineEditor.resolutionHelpNoHost")}
                 </Hint>
+                <Hint>{t("inlineEditor.resolutionCap")}</Hint>
               </>
             )}
           </Card>
