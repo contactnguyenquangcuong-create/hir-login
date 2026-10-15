@@ -672,9 +672,35 @@ fn build_bundle(id: &str) -> Result<Vec<u8>> {
 
         let udd = store::user_data_root()?.join(id);
         if udd.exists() {
+            // A site's own store of what it made (Google Flow keeps every generated video there:
+            // 300 MB in one profile) is a cache, not the login, and made every open and close of
+            // that profile a long wait. Such a site stays out of the bundle; the receiving machine
+            // keeps the one it has (see `apply_bundle_inner`).
+            let left_out = oversized_indexeddb(&udd.join(INDEXEDDB));
+            if !left_out.is_empty() {
+                slog!("{id}: left out of the bundle as a site cache: {}", left_out.iter().map(|(o, n)| format!("{o} ({} MB)", n / 1_000_000)).collect::<Vec<_>>().join(", "));
+            }
+            let skip: std::collections::HashSet<String> = left_out.iter().map(|(o, _)| o.clone()).collect();
+            zip.start_file(LEFT_OUT_FILE, opts)?;
+            zip.write_all(serde_json::to_string(&skip.iter().collect::<Vec<_>>())?.as_bytes())?;
             for rel in raw_paths() {
                 let src = udd.join(rel);
-                if src.is_dir() {
+                if rel == INDEXEDDB && src.is_dir() {
+                    if let Ok(rd) = fs::read_dir(&src) {
+                        for e in rd.flatten() {
+                            let name = e.file_name().to_string_lossy().to_string();
+                            if skip.contains(indexeddb_origin(&name)) {
+                                continue;
+                            }
+                            let child = format!("user-data/{rel}/{name}");
+                            if e.path().is_dir() {
+                                add_dir(&mut zip, &e.path(), &child, opts)?;
+                            } else {
+                                add_file(&mut zip, &e.path(), &child, opts)?;
+                            }
+                        }
+                    }
+                } else if src.is_dir() {
                     add_dir(&mut zip, &src, &format!("user-data/{rel}"), opts)?;
                 } else if src.is_file() {
                     add_file(&mut zip, &src, &format!("user-data/{rel}"), opts)?;
@@ -764,6 +790,49 @@ fn build_bundle(id: &str) -> Result<Vec<u8>> {
     Ok(buf.into_inner())
 }
 
+/// Where a profile's IndexedDB lives, as a synced path.
+const INDEXEDDB: &str = "Default/IndexedDB";
+/// In a bundle: the IndexedDB origins left out of it (a JSON list).
+const LEFT_OUT_FILE: &str = "left-out.json";
+/// A site's IndexedDB bigger than this in one profile is a cache of what it made, not a login.
+const INDEXEDDB_ORIGIN_LIMIT: u64 = 50 * 1024 * 1024;
+
+/// The origin an IndexedDB entry belongs to: `https_flow.google.com_0.indexeddb.leveldb` and
+/// `….indexeddb.blob` are one site's.
+fn indexeddb_origin(name: &str) -> &str {
+    name.split(".indexeddb.").next().unwrap_or(name)
+}
+
+/// The sites whose IndexedDB (database and stored blobs together) is over the limit, with its size.
+fn oversized_indexeddb(dir: &Path) -> Vec<(String, u64)> {
+    fn size(p: &Path) -> u64 {
+        if p.is_file() {
+            return fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        }
+        fs::read_dir(p).map(|rd| rd.flatten().map(|e| size(&e.path())).sum()).unwrap_or(0)
+    }
+    let mut by_origin: HashMap<String, u64> = HashMap::new();
+    if let Ok(rd) = fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            *by_origin.entry(indexeddb_origin(&name).to_string()).or_default() += size(&e.path());
+        }
+    }
+    let mut big: Vec<(String, u64)> = by_origin.into_iter().filter(|(_, n)| *n > INDEXEDDB_ORIGIN_LIMIT).collect();
+    big.sort();
+    big
+}
+
+/// Files that are compressed already (pictures, video, fonts, archives, a site's stored blobs):
+/// deflating them again costs time and saves nothing.
+fn is_precompressed(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains(".indexeddb.blob/")
+        || [".png", ".jpg", ".jpeg", ".webp", ".gif", ".mp4", ".webm", ".mp3", ".woff", ".woff2", ".zip", ".crx", ".gz", ".br", ".wasm"]
+            .iter()
+            .any(|ext| lower.ends_with(ext))
+}
+
 fn add_file<W: Write + std::io::Seek>(
     zip: &mut zip::ZipWriter<W>,
     src: &Path,
@@ -771,6 +840,7 @@ fn add_file<W: Write + std::io::Seek>(
     opts: zip::write::SimpleFileOptions,
 ) -> Result<()> {
     let Ok(bytes) = fs::read(src) else { return Ok(()) };
+    let opts = if is_precompressed(name) { opts.compression_method(zip::CompressionMethod::Stored) } else { opts };
     zip.start_file(name, opts)?;
     zip.write_all(&bytes)?;
     Ok(())
@@ -844,8 +914,35 @@ fn apply_bundle_inner(id: &str, bytes: &[u8], keep_local_session: bool) -> Resul
     if keep_local_session {
         roots.clear();
     }
+    // Sites the sending machine left out as caches: this machine's own copy of them stays.
+    let left_out: std::collections::HashSet<String> = zip
+        .by_name(LEFT_OUT_FILE)
+        .ok()
+        .and_then(|mut f| {
+            let mut buf = String::new();
+            f.read_to_string(&mut buf).ok()?;
+            serde_json::from_str::<Vec<String>>(&buf).ok()
+        })
+        .map(|v| v.into_iter().collect())
+        .unwrap_or_default();
     for root in roots {
         let p = udd.join(root);
+        if root == INDEXEDDB && p.is_dir() && !left_out.is_empty() {
+            if let Ok(rd) = fs::read_dir(&p) {
+                for e in rd.flatten() {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    if left_out.contains(indexeddb_origin(&name)) {
+                        continue;
+                    }
+                    if e.path().is_dir() {
+                        let _ = fs::remove_dir_all(e.path());
+                    } else {
+                        let _ = fs::remove_file(e.path());
+                    }
+                }
+            }
+            continue;
+        }
         if p.is_dir() {
             let _ = fs::remove_dir_all(&p);
         } else if p.is_file() {
@@ -2426,6 +2523,68 @@ mod tests {
         let _ = std::fs::remove_dir_all(&a);
         let _ = std::fs::remove_dir_all(&b);
         assert_eq!(found.as_deref(), Some("100012345"), "the login must still be there on the second machine");
+    }
+
+    /// A site's own store of what it made (Google Flow: hundreds of MB of generated video in
+    /// IndexedDB) stays out of the bundle — it made every open and close of the profile a long
+    /// wait — and the machine that receives the bundle keeps the copy it has. A small site's
+    /// store still travels, and already-compressed files are stored rather than deflated again.
+    #[test]
+    fn a_big_site_cache_stays_out_of_the_bundle_and_the_receiver_keeps_its_own() {
+        let _g = TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let a = std::env::temp_dir().join(format!("hir-idb-a-{}", uuid::Uuid::new_v4()));
+        let b = std::env::temp_dir().join(format!("hir-idb-b-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let id = "idb-1";
+        let make = |root: &std::path::Path| {
+            store::set_data_root(Some(root.to_path_buf()));
+            let mut st = crate::profile::StoredProfile::default();
+            st.meta.id = id.to_string();
+            crate::profile::save_raw(&mut st).unwrap();
+            store::user_data_root().unwrap().join(id).join(INDEXEDDB)
+        };
+
+        // Machine A: Flow's store is over the limit, Shopee's is small.
+        let idb_a = make(&a);
+        let flow_blob = idb_a.join("https_flow.google.com_0.indexeddb.blob/1/00");
+        std::fs::create_dir_all(&flow_blob).unwrap();
+        std::fs::write(flow_blob.join("a1"), vec![7u8; (INDEXEDDB_ORIGIN_LIMIT + 1024 * 1024) as usize]).unwrap();
+        std::fs::create_dir_all(idb_a.join("https_flow.google.com_0.indexeddb.leveldb")).unwrap();
+        std::fs::write(idb_a.join("https_flow.google.com_0.indexeddb.leveldb/CURRENT"), b"from A").unwrap();
+        std::fs::create_dir_all(idb_a.join("https_shopee.sg_0.indexeddb.leveldb")).unwrap();
+        std::fs::write(idb_a.join("https_shopee.sg_0.indexeddb.leveldb/000003.log"), b"shopee from A").unwrap();
+        std::fs::create_dir_all(idb_a.join("https_shopee.sg_0.indexeddb.blob/1/00")).unwrap();
+        std::fs::write(idb_a.join("https_shopee.sg_0.indexeddb.blob/1/00/b1"), b"small blob").unwrap();
+        let bytes = build_bundle(id).unwrap();
+        let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes.clone())).unwrap();
+        let names: Vec<String> = (0..z.len()).map(|i| z.by_index(i).unwrap().name().to_string()).collect();
+        let stored_blob = z.by_name("user-data/Default/IndexedDB/https_shopee.sg_0.indexeddb.blob/1/00/b1").map(|f| f.compression()).ok();
+
+        // Machine B: its own Flow store, an older Shopee one, and a site A no longer has.
+        let idb_b = make(&b);
+        std::fs::create_dir_all(idb_b.join("https_flow.google.com_0.indexeddb.leveldb")).unwrap();
+        std::fs::write(idb_b.join("https_flow.google.com_0.indexeddb.leveldb/CURRENT"), b"B's own").unwrap();
+        std::fs::create_dir_all(idb_b.join("https_shopee.sg_0.indexeddb.leveldb")).unwrap();
+        std::fs::write(idb_b.join("https_shopee.sg_0.indexeddb.leveldb/000001.log"), b"old").unwrap();
+        std::fs::create_dir_all(idb_b.join("https_gone.example_0.indexeddb.leveldb")).unwrap();
+        apply_bundle(id, &bytes).unwrap();
+        let flow_b = std::fs::read(idb_b.join("https_flow.google.com_0.indexeddb.leveldb/CURRENT")).ok();
+        let shopee_b = std::fs::read(idb_b.join("https_shopee.sg_0.indexeddb.leveldb/000003.log")).ok();
+        let old_shopee = idb_b.join("https_shopee.sg_0.indexeddb.leveldb/000001.log").exists();
+        let gone = idb_b.join("https_gone.example_0.indexeddb.leveldb").exists();
+
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+        assert!(!names.iter().any(|n| n.contains("flow.google.com")), "the big site stays out: {names:?}");
+        assert!(names.iter().any(|n| n.contains("shopee.sg_0.indexeddb.leveldb")), "the small one travels: {names:?}");
+        assert!(bytes.len() < 5 * 1024 * 1024, "the bundle is small: {} bytes", bytes.len());
+        assert_eq!(stored_blob, Some(zip::CompressionMethod::Stored), "a stored blob is not deflated again");
+        assert_eq!(flow_b.as_deref(), Some(&b"B's own"[..]), "the receiver keeps its own copy of the big site");
+        assert_eq!(shopee_b.as_deref(), Some(&b"shopee from A"[..]), "the small site arrives");
+        assert!(!old_shopee, "whole, not mixed with the older one");
+        assert!(!gone, "a site the sender no longer has goes, as before");
     }
 
     /// A profile can hold two cookie databases: the one the browser reads (Network/Cookies) and

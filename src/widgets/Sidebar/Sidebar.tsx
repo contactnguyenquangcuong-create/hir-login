@@ -6,7 +6,6 @@ import {
   NavBrowsersIcon,
   RouteIcon,
   NavSettingsIcon,
-  NavPatchLogIcon,
   NavExtensionsIcon,
   NavBookmarksIcon,
   FolderIcon,
@@ -65,7 +64,6 @@ export function Sidebar() {
       label: t("sidebar.groupSystem"),
       items: [
         { id: "trash", label: t("sidebar.navTrash"), svg: <NavTrashIcon className="size-[18px]" /> },
-        { id: "patchlog", label: t("sidebar.navPatchLog"), svg: <NavPatchLogIcon className="size-[18px]" /> },
         { id: "settings", label: t("sidebar.navSettings"), svg: <NavSettingsIcon className="size-[18px]" /> },
       ],
     },

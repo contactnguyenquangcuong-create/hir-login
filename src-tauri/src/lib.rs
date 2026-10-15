@@ -514,8 +514,12 @@ pub fn fit_window_to_real_display(
     fit_window_to(payload, real_w, real_h);
 }
 
-/// Brings the profile's window block inside a display of `real_w` x `real_h`, leaving the screen
-/// block alone. A profile with no window block gets one that fills the display's available area.
+/// Makes the profile's window fill the available area of a display of `real_w` x `real_h`,
+/// leaving the screen block alone: the resolution a profile declares is what pages are told, and
+/// the window opens as big as the monitor of whatever machine it is opened on.
+///
+/// The window used to keep the size of the fingerprint template it came from (often smaller than
+/// the monitor), so a profile opened in a small window and had to be enlarged by hand each time.
 pub(crate) fn fit_window_to(payload: &mut serde_json::Map<String, Value>, real_w: i64, real_h: i64) {
     let (fp_w, fp_h, fp_avail_w, fp_avail_h) = {
         let scr = payload.get("screen").and_then(|v| v.as_object());
@@ -531,11 +535,15 @@ pub(crate) fn fit_window_to(payload: &mut serde_json::Map<String, Value>, real_w
         .entry("window")
         .or_insert_with(|| Value::Object(serde_json::Map::new()));
     let Some(win) = win_slot.as_object_mut() else { return };
+    // The whole available area of this monitor; the page area is the window less the browser's
+    // own bars, as the template had it (87 px of tabs and toolbar when it says nothing).
     let get = |w: &serde_json::Map<String, Value>, k: &str| w.get(k).and_then(|v| v.as_i64());
-    let outer_w = get(win, "outer_width").map_or(avail_w, |v| v.min(avail_w));
-    let outer_h = get(win, "outer_height").map_or((avail_h - 1).max(1), |v| v.min((avail_h - 1).max(1)));
-    let inner_w = get(win, "inner_width").map_or(outer_w, |v| v.min(outer_w));
-    let inner_h = get(win, "inner_height").map_or((outer_h - 87).max(1), |v| v.min(outer_h));
+    let bars_w = match (get(win, "outer_width"), get(win, "inner_width")) { (Some(o), Some(i)) if o >= i => o - i, _ => 0 };
+    let bars_h = match (get(win, "outer_height"), get(win, "inner_height")) { (Some(o), Some(i)) if o > i => o - i, _ => 87 };
+    let outer_w = avail_w;
+    let outer_h = (avail_h - 1).max(1);
+    let inner_w = (outer_w - bars_w).max(1);
+    let inner_h = (outer_h - bars_h).max(1);
     win.insert("outer_width".into(), Value::from(outer_w));
     win.insert("outer_height".into(), Value::from(outer_h));
     win.insert("inner_width".into(), Value::from(inner_w));
@@ -4424,13 +4432,23 @@ mod window_fit_tests {
         assert!(n("inner_width") <= n("outer_width") && n("inner_height") <= n("outer_height"));
     }
 
+    /// The report: the browser did not open as big as the screen. A profile declaring 1366 x 768
+    /// (pages are told that) opens a window as big as this monitor, whatever its template said,
+    /// and the same profile does the same on a bigger monitor.
     #[test]
-    fn a_window_that_already_fits_is_left_as_declared() {
-        let mut c = cfg();
-        fit_window_to(&mut c, 3840, 2160);
-        assert_eq!(c["window"]["outer_width"], 2560);
-        assert_eq!(c["window"]["inner_height"], 1312);
-        assert_eq!(c["screen"]["width"], 2194);
+    fn the_window_fills_the_monitor_and_the_declared_screen_stays() {
+        let mut c: serde_json::Map<String, Value> = serde_json::json!({
+            "screen": {"width": 1366, "height": 768, "avail_width": 1366, "avail_height": 728},
+            "window": {"outer_width": 1200, "outer_height": 700, "inner_width": 1200, "inner_height": 613},
+        }).as_object().unwrap().clone();
+        fit_window_to(&mut c, 1920, 1080);
+        assert_eq!(c["screen"]["width"], 1366, "the declared screen is what pages are told");
+        assert_eq!(c["screen"]["height"], 768);
+        assert_eq!(c["window"]["outer_width"], 1920, "the window fills this monitor");
+        assert_eq!(c["window"]["outer_height"], 1080 - 40 - 1);
+        assert_eq!(c["window"]["inner_height"], 1080 - 40 - 1 - 87, "less the browser's own bars");
+        fit_window_to(&mut c, 2560, 1440);
+        assert_eq!(c["window"]["outer_width"], 2560, "and a bigger monitor, all of it");
     }
 
     #[test]

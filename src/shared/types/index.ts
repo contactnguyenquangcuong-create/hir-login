@@ -9,7 +9,6 @@ export type Section =
   | "folders"
   | "automation"
   | "trash"
-  | "patchlog"
   | "settings";
 
 export type ToastItem = { id: number; kind: "ok" | "err" | "info"; text: string; detail?: string };

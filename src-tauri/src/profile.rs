@@ -264,6 +264,10 @@ fn is_false(b: &bool) -> bool {
 /// Called right before every launch; a no-op (and harmless) if the saved
 /// placement is already a reasonable desktop size, or absent, or the profile
 /// is genuinely a phone (where narrow is correct, not a bug).
+///
+/// A desktop profile opens as big as the monitor of the machine it is on (see `fit_window_to`):
+/// any saved window that is not maximized — a narrow leftover, or a size from a smaller monitor —
+/// is dropped, so the engine opens the full-size window instead of restoring the old one.
 pub fn sanitize_window_placement(user_data_dir: &std::path::Path, is_mobile: bool) {
     if is_mobile {
         return;
@@ -273,12 +277,8 @@ pub fn sanitize_window_placement(user_data_dir: &std::path::Path, is_mobile: boo
     let Ok(mut root) = serde_json::from_str::<serde_json::Value>(&text) else { return };
     let Some(browser) = root.get_mut("browser").and_then(|b| b.as_object_mut()) else { return };
     let Some(wp) = browser.get("window_placement").and_then(|w| w.as_object()) else { return };
-    let get = |k: &str| wp.get(k).and_then(|v| v.as_i64());
-    let (Some(left), Some(top), Some(right), Some(bottom)) = (get("left"), get("top"), get("right"), get("bottom")) else { return };
-    const MIN_DESKTOP_WIDTH: i64 = 600;
-    const MIN_DESKTOP_HEIGHT: i64 = 400;
-    if right - left >= MIN_DESKTOP_WIDTH && bottom - top >= MIN_DESKTOP_HEIGHT {
-        return; // already a sane size — leave the operator's own resize alone
+    if wp.get("maximized").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return; // maximized already: it opens as big as the monitor
     }
     browser.remove("window_placement");
     if let Ok(out) = serde_json::to_string(&root) {
@@ -1136,13 +1136,17 @@ mod window_placement_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A reasonably sized window — the operator's own deliberate resize — is
-    /// never second-guessed.
+    /// A saved window that is not maximized, whatever its size, gives way, so a desktop profile
+    /// opens as big as the monitor every time; a maximized one is already that and stays.
     #[test]
-    fn a_normal_sized_window_is_left_alone() {
+    fn a_desktop_profile_opens_as_big_as_the_monitor() {
         let (dir, path) = prefs_with(serde_json::json!({"left": 100, "top": 100, "right": 1380, "bottom": 900, "maximized": false}));
         sanitize_window_placement(&dir, false);
-        assert!(placement_of(&path).is_some(), "a normal-sized window must survive");
+        assert_eq!(placement_of(&path), None, "a smaller saved window is dropped");
+        let _ = std::fs::remove_dir_all(&dir);
+        let (dir, path) = prefs_with(serde_json::json!({"left": 0, "top": 0, "right": 1920, "bottom": 1040, "maximized": true}));
+        sanitize_window_placement(&dir, false);
+        assert!(placement_of(&path).is_some(), "a maximized one stays");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

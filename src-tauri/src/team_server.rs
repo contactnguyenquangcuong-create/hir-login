@@ -510,14 +510,34 @@ async fn get_bundle(
     }
     let dir = match bundles_dir() { Ok(d) => d, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok":false,"error":e.to_string()}))).into_response() };
     let path = dir.join(format!("{id}.zip"));
-    match tokio::fs::read(&path).await {
-        Ok(bytes) => {
+    // Sent as it is read, a piece at a time: reading a whole bundle into memory first kept the
+    // other machine waiting with nothing (1.5 s before the first byte of a 340 MB one).
+    match tokio::fs::File::open(&path).await {
+        Ok(file) => {
+            let len = file.metadata().await.map(|m| m.len()).ok();
             let mut headers_map = HeaderMap::new();
             headers_map.insert("Content-Type", "application/zip".parse().unwrap());
+            if let Some(n) = len {
+                if let Ok(val) = n.to_string().parse() { headers_map.insert("Content-Length", val); }
+            }
             if let Some(e) = &etag {
                 if let Ok(val) = e.parse() { headers_map.insert("ETag", val); }
             }
-            (StatusCode::OK, headers_map, Body::from(bytes)).into_response()
+            let stream = futures_util::stream::unfold(Some(file), |state| async move {
+                use tokio::io::AsyncReadExt;
+                let mut f = state?;
+                let mut buf = vec![0u8; 256 * 1024];
+                match f.read(&mut buf).await {
+                    Ok(0) => None,
+                    Ok(n) => {
+                        buf.truncate(n);
+                        Some((Ok::<_, std::io::Error>(axum::body::Bytes::from(buf)), Some(f)))
+                    }
+                    // Ends the body there: the client sees a short download and fetches again.
+                    Err(e) => Some((Err(e), None)),
+                }
+            });
+            (StatusCode::OK, headers_map, Body::from_stream(stream)).into_response()
         }
         Err(_) => (StatusCode::NOT_FOUND, Json(json!({"ok":false,"error":"no bundle yet"}))).into_response(),
     }
