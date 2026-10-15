@@ -487,6 +487,35 @@ pub fn clamp_screen_to_real_display(
     );
 }
 
+/// The smallest screen a desktop profile may declare. The engine never opens a window bigger
+/// than the screen a profile declares, so a 1366 x 768 profile was a 1366 x 768 window on every
+/// monitor; at 1920 x 1080 it fills the usual monitor and fits a smaller one.
+pub(crate) const MIN_SCREEN: (i64, i64) = (1920, 1080);
+
+/// Raises a desktop profile's declared screen to `MIN_SCREEN` when it is smaller, keeping the
+/// template's taskbar / menu-bar insets for the available area; the window block goes (the launch
+/// sizes the window to the monitor). Phone profiles are left alone: a phone's screen is small.
+pub(crate) fn enforce_min_screen(obj: &mut serde_json::Map<String, Value>) {
+    if profile::claims_mobile(obj) {
+        return;
+    }
+    let slot = obj.entry("screen").or_insert_with(|| Value::Object(serde_json::Map::new()));
+    let Some(scr) = slot.as_object_mut() else { return };
+    let n = |s: &serde_json::Map<String, Value>, k: &str| s.get(k).and_then(|v| v.as_i64()).unwrap_or(0);
+    let (w, h) = (n(scr, "width"), n(scr, "height"));
+    if w >= MIN_SCREEN.0 && h >= MIN_SCREEN.1 {
+        return;
+    }
+    let (aw, ah) = (n(scr, "avail_width"), n(scr, "avail_height"));
+    let inset_w = if aw > 0 && w > 0 { (w - aw).max(0) } else { 0 };
+    let inset_h = if ah > 0 && h > 0 { (h - ah).max(0) } else { 40 };
+    scr.insert("width".into(), Value::from(MIN_SCREEN.0));
+    scr.insert("height".into(), Value::from(MIN_SCREEN.1));
+    scr.insert("avail_width".into(), Value::from(MIN_SCREEN.0 - inset_w));
+    scr.insert("avail_height".into(), Value::from(MIN_SCREEN.1 - inset_h));
+    obj.remove("window");
+}
+
 /// At launch: the browser window is made to fit this monitor, and nothing else about the screen
 /// changes — the screen the profile declares is what every machine reports.
 pub fn fit_window_to_real_display(
@@ -588,6 +617,13 @@ pub fn save_profile_core(
     if is_new && enrich {
         if let Some(obj) = payload.as_object_mut() {
             enrich_new_config(window, obj);
+        }
+    }
+    // Every new desktop profile declares at least 1920 x 1080 (after the clamp above, which
+    // would otherwise bring it down to a small laptop's screen).
+    if is_new {
+        if let Some(obj) = payload.as_object_mut() {
+            enforce_min_screen(obj);
         }
     }
 
@@ -4409,6 +4445,34 @@ pub fn run() {
 mod window_fit_tests {
     use super::*;
 
+    /// "Never smaller than 1920 x 1080": a new desktop profile from a small template is raised to
+    /// it, keeping the template's taskbar; one already as big is untouched; a phone keeps its own.
+    #[test]
+    fn a_new_desktop_profile_declares_at_least_1920_by_1080() {
+        let mut small: serde_json::Map<String, Value> = serde_json::json!({
+            "screen": {"width": 1366, "height": 768, "avail_width": 1366, "avail_height": 728},
+            "window": {"outer_width": 1366, "outer_height": 727},
+        }).as_object().unwrap().clone();
+        enforce_min_screen(&mut small);
+        assert_eq!(small["screen"]["width"], 1920);
+        assert_eq!(small["screen"]["height"], 1080);
+        assert_eq!(small["screen"]["avail_height"], 1040, "the template's 40 px taskbar is kept");
+        assert!(small.get("window").is_none(), "the launch sizes the window to the monitor");
+
+        let mut big: serde_json::Map<String, Value> = serde_json::json!({
+            "screen": {"width": 2560, "height": 1440, "avail_width": 2560, "avail_height": 1400},
+        }).as_object().unwrap().clone();
+        enforce_min_screen(&mut big);
+        assert_eq!(big["screen"]["width"], 2560, "a bigger screen is left as it is");
+
+        let mut phone: serde_json::Map<String, Value> = serde_json::json!({
+            "screen": {"width": 360, "height": 806},
+            "client_hints": {"mobile": true, "platform": "Android"},
+        }).as_object().unwrap().clone();
+        enforce_min_screen(&mut phone);
+        assert_eq!(phone["screen"]["width"], 360, "a phone keeps its own screen");
+    }
+
     fn cfg() -> serde_json::Map<String, Value> {
         serde_json::json!({
             "screen": {"width": 2194, "height": 1234, "avail_width": 2194, "avail_height": 1194, "device_pixel_ratio": 1},
@@ -4779,6 +4843,12 @@ mod bulk_file_tests {
                 assert!(nav.get("languages").and_then(|v| v.as_array()).is_some(), "row {i}: languages must be derived");
             }
             if let Some((want_w, want_h)) = parse_bulk_resolution(resolutions[i % resolutions.len()]).unwrap() {
+                // Never below 1920 x 1080: a smaller one asked for is raised to it (`enforce_min_screen`).
+                let (want_w, want_h) = if (want_w as i64) < MIN_SCREEN.0 || (want_h as i64) < MIN_SCREEN.1 {
+                    (MIN_SCREEN.0 as u32, MIN_SCREEN.1 as u32)
+                } else {
+                    (want_w, want_h)
+                };
                 let screen = stored.config.get("screen").cloned().unwrap_or(Value::Null);
                 assert_eq!(screen.get("width").and_then(|v| v.as_u64()), Some(want_w as u64), "row {i}");
                 assert_eq!(screen.get("height").and_then(|v| v.as_u64()), Some(want_h as u64), "row {i}");

@@ -91,20 +91,16 @@ export function InlineEditor({
   );
 
   const hostScreen = useHostScreen();
-  // Never larger than this machine's monitor: the window would be clamped to it
-  // at launch anyway, and a screen wider than the window it contains is the
-  // kind of disagreement a page gets for free.  "" is the template's own.
+  // Never smaller than 1920 x 1080: the engine opens no window bigger than the screen a profile
+  // declares, so a smaller one meant a small window on every monitor. On a smaller monitor the
+  // window simply fits it (a window smaller than its screen is ordinary). New profiles are raised
+  // to it on save as well (`enforce_min_screen`). "" — the template's own — is offered only to a
+  // profile that has it now, so opening an older profile never changes its screen by itself.
   const resolutionOptions = useMemo(() => {
-    const fits = SCREEN_RESOLUTIONS.filter(
-      ([w, h]) => !hostScreen || (w <= hostScreen[0] && h <= hostScreen[1]),
-    );
-    const list = fits.map(([w, h]) => `${w}x${h}`);
-    // The size the profile has now is always in the list, even when this machine's monitor is too
-    // small for it (or it is a phone's): a select that shows nothing for the current value hides
-    // why the browser window will not grow.
+    const list = SCREEN_RESOLUTIONS.filter(([w, h]) => w >= 1920 && h >= 1080).map(([w, h]) => `${w}x${h}`);
     const now = f.screen_w > 0 && f.screen_h > 0 ? `${f.screen_w}x${f.screen_h}` : "";
-    return ["", ...(now && !list.includes(now) ? [now] : []), ...list];
-  }, [hostScreen, f.screen_w, f.screen_h]);
+    return [...(now === "" ? [""] : []), ...(now && !list.includes(now) ? [now] : []), ...list];
+  }, [f.screen_w, f.screen_h]);
 
   /// Pick GPU = full fingerprint snap (fetched lazily); toStored re-fetches
   /// the payload at save time since the bulk list doesn't carry it.

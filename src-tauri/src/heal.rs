@@ -187,6 +187,77 @@ pub async fn heal(profile_id: &str, ws_url: &str) -> Result<String> {
     ))
 }
 
+/// A tab with nothing of the person's in it: a blank page, a new-tab page, or the engine's own
+/// start page (`chrome://shardx/`). They piled up — one more each time the profile opened.
+pub(crate) fn is_blank_tab(url: &str) -> bool {
+    let u = url.trim().to_ascii_lowercase();
+    u.is_empty()
+        || u == "about:blank"
+        || u.starts_with("chrome://shardx")
+        || u.starts_with("chrome://newtab")
+        || u.starts_with("chrome://new-tab-page")
+        || u.starts_with("chrome-search://local-ntp")
+}
+
+/// Which tabs go, from (target id, url) of every open page: with any page of the person's open,
+/// every blank one goes; with none, exactly one stays (`Some(id)` when it is not `about:blank`
+/// yet and should be turned into one). Returns (to close, to blank).
+pub(crate) fn plan_tab_cleanup(tabs: &[(String, String)]) -> (Vec<String>, Option<String>) {
+    let blanks: Vec<&(String, String)> = tabs.iter().filter(|(_, u)| is_blank_tab(u)).collect();
+    if blanks.len() < tabs.len() {
+        return (blanks.iter().map(|(id, _)| id.clone()).collect(), None);
+    }
+    // Only blank ones: keep one, an about:blank if there is one.
+    let keep = blanks.iter().find(|(_, u)| u.trim().eq_ignore_ascii_case("about:blank")).or(blanks.first());
+    let Some((keep_id, keep_url)) = keep else { return (Vec::new(), None) };
+    let close = blanks.iter().filter(|(id, _)| id != keep_id).map(|(id, _)| id.clone()).collect();
+    let navigate = (!keep_url.trim().eq_ignore_ascii_case("about:blank")).then(|| keep_id.clone());
+    (close, navigate)
+}
+
+/// Once the browser has brought back the last session: the tabs the person had open stay, and
+/// nothing else — no blank tab, no new-tab page, no engine start page on top of them; a profile
+/// with nothing to bring back opens on a single blank tab. Returns a line for the log.
+pub async fn tidy_tabs(ws_url: &str) -> Result<String> {
+    let (stream, _) = tokio_tungstenite::connect_async(ws_url).await.context("connect")?;
+    let (sink, source) = stream.split();
+    let mut c = Conn { sink, source, next: 0 };
+    let pages = |v: &Value| -> Vec<(String, String)> {
+        v.get("targetInfos").and_then(|x| x.as_array()).map(|a| {
+            a.iter()
+                .filter(|t| t.get("type").and_then(|x| x.as_str()) == Some("page"))
+                .map(|t| {
+                    let s = |k: &str| t.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    (s("targetId"), s("url"))
+                })
+                .collect()
+        }).unwrap_or_default()
+    };
+    // The session comes back over a moment: wait until the list of tabs stops changing.
+    let mut last: Vec<(String, String)> = Vec::new();
+    for _ in 0..12 {
+        let now = pages(&c.call("Target.getTargets", json!({}), None).await?);
+        if !now.is_empty() && now == last {
+            break;
+        }
+        last = now;
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    }
+    let (close, navigate) = plan_tab_cleanup(&last);
+    if let Some(id) = &navigate {
+        if let Ok(a) = c.call("Target.attachToTarget", json!({ "targetId": id, "flatten": true }), None).await {
+            if let Some(session) = a.get("sessionId").and_then(|v| v.as_str()).map(String::from) {
+                let _ = c.call("Page.navigate", json!({ "url": "about:blank" }), Some(&session)).await;
+                let _ = c.call("Target.detachFromTarget", json!({ "sessionId": session }), None).await;
+            }
+        }
+    }
+    for id in &close {
+        let _ = c.call("Target.closeTarget", json!({ "targetId": id }), None).await;
+    }
+    Ok(format!("{} tab(s) open, {} blank one(s) closed", last.len(), close.len()))
+}
+
 /// How long a cookie the site meant to last "until the browser closes" is kept instead: long
 /// enough to cover weeks away from a profile, under the 400 days the browser itself allows.
 const SESSION_KEPT_SECS: f64 = 180.0 * 86_400.0;
@@ -298,6 +369,29 @@ mod tests {
         // A file that spells the domain without the dot is still the same cookie.
         let browser = vec![("google.com".to_string(), "SID".to_string(), "/".to_string())];
         assert!(!missing(&saved, &browser, 1.7e9).iter().any(|c| c.name == "SID"));
+    }
+
+    #[test]
+    fn blank_and_engine_tabs_go_and_the_persons_pages_stay() {
+        let t = |id: &str, url: &str| (id.to_string(), url.to_string());
+        // The person's pages, with blank ones and the engine's start page among them.
+        let (close, nav) = plan_tab_cleanup(&[
+            t("1", "https://shopee.sg/"), t("2", "about:blank"), t("3", "chrome://shardx/"),
+            t("4", "https://www.facebook.com/"), t("5", "chrome://new-tab-page/"), t("6", "chrome://newtab/"),
+        ]);
+        assert_eq!(close, vec!["2", "3", "5", "6"]);
+        assert_eq!(nav, None, "no blank tab is kept when there is a real page");
+        // Nothing of the person's: exactly one about:blank stays.
+        let (close, nav) = plan_tab_cleanup(&[t("1", "chrome://shardx/"), t("2", "about:blank"), t("3", "about:blank")]);
+        assert_eq!(close, vec!["1", "3"]);
+        assert_eq!(nav, None, "the kept one is already about:blank");
+        // Only the engine's page: it stays, turned into about:blank.
+        let (close, nav) = plan_tab_cleanup(&[t("1", "chrome://shardx/")]);
+        assert!(close.is_empty());
+        assert_eq!(nav.as_deref(), Some("1"));
+        // One real page alone: nothing to do.
+        let (close, nav) = plan_tab_cleanup(&[t("1", "https://mail.google.com/")]);
+        assert!(close.is_empty() && nav.is_none());
     }
 
     #[test]

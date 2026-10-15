@@ -526,6 +526,11 @@ pub async fn launch_profile_synced(
                 crate::cloud_sync::log_line(&format!("heal {id}: the browser did not report its debugging port"));
                 return;
             };
+            // The tabs the profile had open, and no blank or engine page on top of them.
+            match crate::heal::tidy_tabs(&c.web_socket_debugger_url).await {
+                Ok(line) => crate::cloud_sync::log_line(&format!("tabs {id}: {line}")),
+                Err(e) => crate::cloud_sync::log_line(&format!("tabs {id}: could not tidy the tabs: {e:#}")),
+            }
             match crate::heal::heal(&id, &c.web_socket_debugger_url).await {
                 Ok(line) => crate::cloud_sync::log_line(&format!("heal {id}: {line}")),
                 Err(e) => crate::cloud_sync::log_line(&format!("heal {id}: could not compare the cookies: {e:#}")),

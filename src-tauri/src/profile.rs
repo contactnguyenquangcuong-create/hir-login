@@ -936,6 +936,8 @@ pub fn clone_profile(id: &str) -> Result<ProfileMeta> {
     src.meta.id = new_id.clone();
     src.meta.last_launched_at = None;
     src.meta.created_at = None;
+    // A copy is a new profile: at least 1920 x 1080, like every other new one.
+    crate::enforce_min_screen(&mut src.config);
     src.meta.pinned = false;
     src.config
         .insert("name".into(), serde_json::Value::String(format!("{old_name} (copy)")));
