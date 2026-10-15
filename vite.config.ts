@@ -9,6 +9,12 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(async () => ({
   plugins: [tailwindcss(), react()],
 
+  // The app has one page. Without this the dependency scan looks for every `.html` in the whole
+  // project — `src-tauri/target` included, which after a few builds holds hundreds of thousands
+  // of files — and the dev server answers nothing (a blank window) until it is done.
+  optimizeDeps: {
+    entries: ["index.html"],
+  },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //

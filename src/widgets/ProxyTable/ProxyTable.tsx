@@ -38,7 +38,7 @@ export function ProxyTable() {
   return (
     <>
       <div className="overflow-hidden rounded-12 bg-bg-white-0 shadow-[var(--shadow-xs)] ring-1 ring-inset ring-stroke-soft-200">
-        <div className="p-cols w-full justify-between border-b border-stroke-soft-200 bg-bg-weak-50 text-subheading-2xs text-text-soft-400">
+        <div className="p-cols p-head w-full justify-between border-b border-stroke-soft-200 bg-bg-weak-50 text-subheading-2xs text-text-soft-400">
           <div>
             <Checkbox
               title={t("proxyTable.selectAllOnPage")}
@@ -49,9 +49,8 @@ export function ProxyTable() {
           </div>
           <div>{t("proxyTable.colName")}</div>
           <div>{t("proxyTable.colType")}</div>
-          <div>{t("proxyTable.colHostPort")}</div>
           <div>{t("proxyTable.colCountry")}</div>
-          <div>{t("proxyTable.colProfiles")}</div>
+          <div className="cell-count">{t("proxyTable.colProfiles")}</div>
           <div>{t("proxyTable.colTestResult")}</div>
           <div></div>
         </div>

@@ -68,20 +68,31 @@
 /* Profile table columns */
 .t-cols {
   display: grid;
-  gap: 10px;
-  padding: 10px 16px;
+  column-gap: 16px;
+  padding: 0 16px;
+  min-height: 52px;
   align-items: center;
+  /* dot · check · name · status · proxy · notes · time · last run · actions */
   grid-template-columns:
-    4px 28px minmax(140px, 1.2fr) 100px
-    minmax(160px, 1.4fr) minmax(120px, 1.1fr)
-    minmax(70px, 90px) minmax(110px, 130px) 296px;
+    6px 20px minmax(170px, 1.3fr) 112px
+    minmax(220px, 1.6fr) minmax(140px, 1.2fr)
+    76px 132px 156px;
+}
+/* The column titles: a shorter row than the profiles under them. */
+.t-cols.t-head {
+  min-height: 36px;
+}
+.t-cols > .cell-time,
+.t-cols > .head-time {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 @media (max-width: 1280px) {
   .t-cols {
     grid-template-columns:
-      4px 28px minmax(120px, 1.2fr) 90px
-      minmax(140px, 1.3fr) minmax(100px, 1fr)
-      minmax(60px, 80px) 296px;
+      6px 20px minmax(140px, 1.3fr) 104px
+      minmax(180px, 1.5fr) minmax(110px, 1fr)
+      70px 156px;
   }
   .t-cols > .cell-lastrun,
   .t-cols > .head-lastrun {
@@ -105,22 +116,24 @@
   pointer-events: none;
 }
 
-/* Proxy table columns */
+/* Proxy table columns: check · name (+ address) · type · country · profiles · last test · actions.
+   The address is under the name rather than in a column of its own: most names are the address. */
 .p-cols {
   display: grid;
-  gap: 10px;
-  padding: 10px 16px;
+  column-gap: 16px;
+  padding: 0 16px;
+  min-height: 52px;
   align-items: center;
   grid-template-columns:
-    28px minmax(160px, 1.4fr) 80px minmax(140px, 1.2fr)
-    minmax(110px, 0.8fr) 64px minmax(180px, 1.4fr) minmax(180px, auto);
+    20px minmax(200px, 1.6fr) 72px minmax(100px, 0.9fr)
+    64px minmax(280px, 1.6fr) 112px;
 }
-@media (max-width: 1366px) {
-  .p-cols {
-    grid-template-columns:
-      28px minmax(120px, 1.4fr) 72px minmax(120px, 1.2fr)
-      minmax(80px, 0.8fr) 56px minmax(140px, 1.2fr) minmax(140px, auto);
-  }
+.p-cols.p-head {
+  min-height: 36px;
+}
+.p-cols > .cell-count {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 /* Proxy bulk-importer preview rows: check · type · host · status · action */

@@ -25,6 +25,8 @@ export function FolderListButton({
   counts,
   className,
   extra,
+  label,
+  count,
 }: {
   folders: string[];
   /** The open folder, or "" / "all" / anything that is not one of `folders`. */
@@ -34,6 +36,10 @@ export function FolderListButton({
   className?: string;
   /** Items kept above the list, such as "all profiles". */
   extra?: { id: string; label: string }[];
+  /** The button's text ("Thư mục" when not given). */
+  label?: string;
+  /** The number beside it (every folder when not given). */
+  count?: number;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -85,8 +91,8 @@ export function FolderListButton({
         aria-expanded={open}
         title="Xem toàn bộ danh sách thư mục"
       >
-        Thư mục
-        <span className="rounded-full bg-bg-weak-50 px-1.5 py-px text-[10px] font-semibold text-text-sub-600">{folders.length}</span>
+        {label ?? "Thư mục"}
+        <span className="rounded-full bg-bg-weak-50 px-1.5 py-px text-[10px] font-semibold text-text-sub-600">{count ?? folders.length}</span>
         <span aria-hidden className="text-[9px]">▾</span>
       </button>
       {open && anchor && createPortal(

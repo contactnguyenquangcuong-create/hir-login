@@ -1,21 +1,18 @@
 import { Button } from "@proxyshard/shardx-ui-kit";
-import {
-  InfoIcon,
-  RefreshIcon,
-  EditIcon,
-  DeleteIcon,
-} from "../../../shared/icons";
+import { MoreIcon, RefreshIcon } from "../../../shared/icons";
 import { useProxy, type ProxyEntry } from "../../../entities/proxy";
 import { useT } from "../../../shared/i18n";
 
-export function ProxyRowActions({ proxy }: { proxy: ProxyEntry }) {
+/// What a row offers at a glance: test it (the thing done most), and ⋮ for details, edit and
+/// delete — the same as right-click. Four icon buttons per row, one of them a solid red delete,
+/// were the loudest thing on the page.
+export function ProxyRowActions({ proxy, onMore }: {
+  proxy: ProxyEntry;
+  onMore: (e: React.MouseEvent) => void;
+}) {
   const t = useT();
   const busy = useProxy((s) => !!s.proxyTesting[proxy.id]);
   const testProxy = useProxy((s) => s.testProxy);
-  const removeProxy = useProxy((s) => s.removeProxy);
-  const setEditing = useProxy((s) => s.setEditing);
-  const setInfoFor = useProxy((s) => s.setInfoFor);
-  const isInfoOpen = useProxy((s) => s.infoFor?.proxy.id === proxy.id);
 
   return (
     <div className="flex justify-end gap-1">
@@ -23,28 +20,24 @@ export function ProxyRowActions({ proxy }: { proxy: ProxyEntry }) {
         variant="neutral"
         mode="stroke"
         size="xsmall"
+        className="w-[72px] flex-none"
+        leftIcon={<span className={busy ? "spin-icon inline-grid place-items-center" : "inline-grid place-items-center"}><RefreshIcon className="size-3.5" /></span>}
+        onClick={() => testProxy(proxy)}
+        disabled={busy}
+        title={t("proxyRowActions.testTitle")}
+      >
+        {t("proxyRowActions.test")}
+      </Button>
+      <Button
+        variant="neutral"
+        mode="stroke"
+        size="xsmall"
+        onlyIcon
         onMouseDown={(e) => e.stopPropagation()}
-        onClick={(e) =>
-          isInfoOpen
-            ? setInfoFor(null)
-            : setInfoFor({ proxy, anchor: { x: e.clientX, y: e.clientY } })
-        }
-        title={t("proxyRowActions.detailsTitle")}
-        leftIcon={<InfoIcon />}
-      >
-      </Button>
-      <Button variant="neutral" mode="stroke" size="xsmall"  onlyIcon onClick={() => testProxy(proxy)} disabled={busy} title={t("proxyRowActions.testTitle")}
-        leftIcon={<RefreshIcon />}
-      >
-      </Button>
-      <Button variant="neutral" mode="stroke" size="xsmall"  onlyIcon onClick={() => setEditing(proxy)} title={t("proxyRowActions.editTitle")}
-        leftIcon={<EditIcon />}
-      >
-      </Button>
-      <Button variant="error" mode='filled' size="xsmall"  onlyIcon onClick={() => removeProxy(proxy.id)} title={t("proxyRowActions.deleteTitle")}
-        leftIcon={<DeleteIcon />}
-      >
-      </Button>
+        onClick={onMore}
+        title={t("proxyRowActions.more")}
+        leftIcon={<MoreIcon className="size-4" />}
+      />
     </div>
   );
 }

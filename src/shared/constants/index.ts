@@ -32,7 +32,20 @@ export const TIMEZONES = [
 ];
 
 /// Current UTC offset of an IANA zone in minutes (DST-aware, as of now).
+/// Each zone's offset is worked out once and kept: building an `Intl.DateTimeFormat` is slow, and
+/// sorting the zone list called this a few thousand times — every time a profile form opened it
+/// froze the window for close to half a second.
+const tzOffsetCache = new Map<string, number>();
+
 export function tzOffsetMinutes(tz: string): number {
+  const known = tzOffsetCache.get(tz);
+  if (known !== undefined) return known;
+  const mins = computeTzOffsetMinutes(tz);
+  tzOffsetCache.set(tz, mins);
+  return mins;
+}
+
+function computeTzOffsetMinutes(tz: string): number {
   try {
     const part = new Intl.DateTimeFormat("en-US", { timeZone: tz, timeZoneName: "longOffset" })
       .formatToParts(new Date())

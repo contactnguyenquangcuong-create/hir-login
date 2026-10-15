@@ -1,9 +1,5 @@
 import { Button } from "@proxyshard/shardx-ui-kit";
 import {
-  PinIconApp,
-  EditIcon,
-  CopyIcon,
-  DeleteIcon,
   MoreIcon,
   PlayIcon,
   StopIcon,
@@ -24,10 +20,6 @@ export function ProfileRowActions({ profile, onMore }: {
   const isSaving = useProfile((s) => s.syncing.has(p.id));
   const elsewhere = useProfile((s) => s.elsewhere[p.id]);
   const startStop = useProfile((s) => s.startStop);
-  const togglePin = useProfile((s) => s.togglePin);
-  const cloneProfile = useProfile((s) => s.cloneProfile);
-  const remove = useProfile((s) => s.remove);
-  const expand = useProfile((s) => s.expand);
 
   return (
     <div className="flex justify-end gap-1">
@@ -76,29 +68,8 @@ export function ProfileRowActions({ profile, onMore }: {
           {isRunning ? t("profileRowActions.stop") : isStarting ? t("profileRowActions.starting") : t("profileRowActions.start")}
         </Button>
       )}
-      <Button
-        variant={p.pinned ? "primary" : "neutral"}
-        mode={p.pinned ? "lighter" : "stroke"}
-        size="xsmall"
-        onlyIcon
-        onClick={() => togglePin(p)}
-        title={p.pinned ? t("profileRowActions.unpin") : t("profileRowActions.pinToTop")}
-        leftIcon={<PinIconApp className="size-4" />}
-      >
-      
-      </Button>
-      <Button variant="neutral" mode="stroke" size="xsmall" onlyIcon onClick={() => expand(p.id)} title={t("profileRowActions.edit")}
-        leftIcon={<EditIcon className="size-4" />}
-      >
-      </Button>
-      <Button variant="neutral" mode="stroke" size="xsmall" onlyIcon onClick={() => cloneProfile(p.id)} title={t("profileRowActions.clone")}
-        leftIcon={<CopyIcon className="size-4" />}
-      >
-      </Button>
-      <Button variant="error" mode="lighter" size="xsmall" onlyIcon onClick={() => remove(p.id)} title={t("profileRowActions.delete")}
-        leftIcon={<DeleteIcon className="size-4" />}
-      >
-      </Button>
+      {/* Pin, edit, clone and delete are in the ⋮ menu (and on right-click): five icon buttons
+          on every row were most of the table's width and most of its noise. */}
       <Button
         variant="neutral"
         mode="stroke"

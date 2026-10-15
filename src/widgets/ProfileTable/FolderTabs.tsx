@@ -103,15 +103,6 @@ export function FolderTabs() {
       >
         {t("folderTabs.allTab")}<span className={badge(folder === "all")}>{profiles.length}</span>
       </button>
-      {hidden > 0 && (
-        <FolderListButton
-          folders={folders}
-          value={folder}
-          onPick={setFolder}
-          counts={counts}
-          className={cn(tabBase, "border-b-transparent text-primary-base hover:text-primary-base")}
-        />
-      )}
       {inline.map((f) => (
         <button
           key={f}
@@ -125,6 +116,18 @@ export function FolderTabs() {
           <span className={badge(folder === f)}>{counts.get(f) ?? 0}</span>
         </button>
       ))}
+      {/* After the folders it holds the rest of: "the other folders", at the end of the row. */}
+      {hidden > 0 && (
+        <FolderListButton
+          folders={folders}
+          value={folder}
+          onPick={setFolder}
+          counts={counts}
+          label={t("folderTabs.moreFolders")}
+          count={hidden}
+          className={cn(tabBase, "border-b-transparent text-primary-base hover:text-primary-base")}
+        />
+      )}
       {canShare(role, configured) && folder !== "all" && (
         <button
           className="ml-auto flex-none cursor-pointer whitespace-nowrap border-0 bg-transparent px-3 py-2 text-label-xs text-text-sub-600 hover:text-primary-base"

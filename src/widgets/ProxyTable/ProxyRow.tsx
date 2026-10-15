@@ -1,6 +1,5 @@
 import { useRef } from "react";
 import { Checkbox } from "@proxyshard/shardx-ui-kit";
-import Badge from "../../shared/ui/Badge";
 import type { ContextItem } from "../../shared/types";
 import { useT } from "../../shared/i18n";
 import {
@@ -31,6 +30,16 @@ export function ProxyRow({ proxy, profileCount, onMenu }: {
   // row twice, and applying the range twice would undo it.
   const shiftPress = useRef(false);
 
+  // One list for right-click and the ⋮ button.
+  const menu = (e: React.MouseEvent): ContextItem[] => [
+    { label: t("proxyRow.menuTest"), onClick: () => testProxy(proxy) },
+    { label: t("proxyRow.menuViewDetails"), onClick: () => setInfoFor({ proxy, anchor: { x: e.clientX, y: e.clientY } }) },
+    { label: t("proxyRow.menuEdit"), onClick: () => setEditing(proxy) },
+    { sep: true, label: "", onClick: () => { } },
+    { label: t("proxyRow.menuDelete"), onClick: () => removeProxy(proxy.id), danger: true },
+  ];
+  const address = `${proxy.host}:${proxy.port}`;
+
   return (
     <div
       className="relative border-t border-stroke-soft-200 first:border-t-0"
@@ -44,15 +53,7 @@ export function ProxyRow({ proxy, profileCount, onMenu }: {
         selectRangeTo(proxy.id);
       }}
       onClick={(e) => { if (shiftPress.current) e.preventDefault(); }}
-      onContextMenu={(e) =>
-        onMenu(e, [
-          { label: t("proxyRow.menuTest"), onClick: () => testProxy(proxy) },
-          { label: t("proxyRow.menuViewDetails"), onClick: () => setInfoFor({ proxy, anchor: { x: e.clientX, y: e.clientY } }) },
-          { label: t("proxyRow.menuEdit"), onClick: () => setEditing(proxy) },
-          { sep: true, label: "", onClick: () => { } },
-          { label: t("proxyRow.menuDelete"), onClick: () => removeProxy(proxy.id), danger: true },
-        ])
-      }
+      onContextMenu={(e) => onMenu(e, menu(e))}
     >
       <div className="p-cols transition-colors hover:bg-bg-weak-50">
         <div>
@@ -61,27 +62,29 @@ export function ProxyRow({ proxy, profileCount, onMenu }: {
             onChange={() => { if (!shiftPress.current) selectProxy(!isSel, [proxy]); }}
           />
         </div>
-        <RenameProxyCell proxy={proxy} />
-        <div><ProxyTypeBadge kind={proxy.kind} /></div>
-        <div className="min-w-0 overflow-hidden">
-          <span
-            className="mono small inline-block max-w-full cursor-pointer overflow-hidden text-ellipsis whitespace-nowrap align-middle text-text-sub-600 transition-colors hover:text-primary-base"
-            onClick={() => { if (!shiftPress.current) setEditing(proxy); }}
-            title={t("proxyRow.editProxyTitle")}
-          >
-            {proxy.host}:{proxy.port}
-          </span>
+        {/* The name, and under it the address — only when the name is not the address already,
+            which it is for most proxies (it had a column of its own that repeated the name). */}
+        <div className="min-w-0">
+          <RenameProxyCell proxy={proxy} />
+          {proxy.name !== address && (
+            <span
+              className="mono mt-0.5 block max-w-full cursor-pointer truncate text-[10.5px] text-text-soft-400 transition-colors hover:text-primary-base"
+              onClick={() => { if (!shiftPress.current) setEditing(proxy); }}
+              title={t("proxyRow.editProxyTitle")}
+            >
+              {address}
+            </span>
+          )}
         </div>
-        <div><ProxyCountryCell snap={snap} fallback={proxy.country} /></div>
-        <div>
-          <Badge color="gray" variant='filled' size="small" title={t("proxyRow.boundProfilesTitle", { n: profileCount })}>
-            {profileCount}
-          </Badge>
+        <div><ProxyTypeBadge kind={proxy.kind} /></div>
+        <div className="min-w-0"><ProxyCountryCell snap={snap} fallback={proxy.country} /></div>
+        <div className="cell-count text-paragraph-xs text-text-sub-600" title={t("proxyRow.boundProfilesTitle", { n: profileCount })}>
+          {profileCount > 0 ? profileCount : <span className="text-text-soft-400">0</span>}
         </div>
         <div className="min-w-0">
           <ProxyTestResult snap={snap} kind={proxy.kind} busy={busy} />
         </div>
-        <ProxyRowActions proxy={proxy} />
+        <ProxyRowActions proxy={proxy} onMore={(e) => { e.stopPropagation(); onMenu(e, menu(e)); }} />
       </div>
     </div>
   );

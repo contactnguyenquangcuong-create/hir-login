@@ -13,6 +13,7 @@ import {
   ProfileTemplatePicker,
   ProfileFolderModal,
   ProfileQuickEdit,
+  BulkActionsBar,
 } from "../../features/manage-profiles";
 
 /** Android profiles open as a phone-sized window (360 px wide, full height) that
@@ -53,18 +54,27 @@ export function BrowsersPage() {
     <section className="flex flex-col">
       <Topbar crumbs={[t("browsers.crumbWorkspace"), t("browsers.crumbBrowsers")]} search={search} onSearch={setSearch} />
 
-      <BrowsersMetrics />
       <AndroidNotice />
 
-      {/* Wraps: with a selection the toolbar is wider than most windows, and as a
-          non-wrapping right-hand block it squeezed the title into two lines and
-          ran its own buttons off the edge of the screen. */}
-      <div className="mb-3.5 flex flex-wrap items-end justify-between gap-x-4 gap-y-3">
-        <div className="flex min-w-[16rem] flex-1 flex-col gap-3.5">
-          <h1 className="m-0 whitespace-nowrap text-title-h5 text-text-strong-950">{t("browsers.title")}</h1>
+      {/* Title and counts, then one toolbar row: where the profiles are (folder tabs) on the left,
+          what can be done with them on the right. A selection gets its own strip right above the
+          rows it acts on instead of squeezing into the toolbar and wrapping it. */}
+      <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-2">
+        <h1 className="m-0 whitespace-nowrap text-title-h5 text-text-strong-950">{t("browsers.title")}</h1>
+        <BrowsersMetrics />
+      </div>
+      <div className="mb-3 flex flex-wrap items-end justify-between gap-x-4 gap-y-2 border-b border-stroke-soft-200">
+        {/* The row draws the line under the tabs across its whole width (the tabs' own line stops
+            where they do); the active tab's underline sits on it. */}
+        <div className="min-w-[16rem] flex-1 [&>div]:border-b-0">
           <FolderTabs />
         </div>
-        <ProfileToolbar />
+        <div className="pb-2">
+          <ProfileToolbar />
+        </div>
+      </div>
+      <div className="mb-2 empty:hidden">
+        <BulkActionsBar />
       </div>
 
       <ProfileTable />

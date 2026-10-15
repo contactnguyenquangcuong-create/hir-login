@@ -74,7 +74,7 @@ export function ProfileTable() {
         {/* The column titles stay at the top of the page while the rows scroll under them. A sticky
             box is placed from the inner edge of the page's padding (1.5rem), hence the offset. */}
         {!editing && (
-        <div className="t-cols sticky top-[-1.5rem] z-10 border-b border-stroke-soft-200 bg-bg-weak-50 text-subheading-2xs text-text-soft-400">
+        <div className="t-cols t-head sticky top-[-1.5rem] z-10 border-b border-stroke-soft-200 bg-bg-weak-50 text-subheading-2xs text-text-soft-400">
           <div></div>
           <div>
             <Checkbox
@@ -89,8 +89,8 @@ export function ProfileTable() {
           <div>{t("profileTable.colStatus")}</div>
           <div>{t("profileTable.colProxy")}</div>
           <div>{t("profileTable.colNotes")}</div>
-          <div>{t("profileTable.colTime")}</div>
-          <div>{t("profileTable.colLastRun")}</div>
+          <div className="head-time">{t("profileTable.colTime")}</div>
+          <div className="head-lastrun">{t("profileTable.colLastRun")}</div>
           <div></div>
         </div>
         )}

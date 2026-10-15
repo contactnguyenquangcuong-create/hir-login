@@ -49,8 +49,10 @@ export function ProxyTestResult({ snap, kind, busy }: {
       )}
       {snap.tcp_ms != null && snap.ip && (
         <span
-          className="mono max-w-[15ch] overflow-hidden text-ellipsis whitespace-nowrap rounded-4 bg-primary-alpha-10 px-1.5 py-px text-[11.5px] text-primary-base"
-          title={snap.isp}
+          // The whole address, always: a cut-off IP is no use for telling exits apart. A long
+          // (IPv6) one goes to the next line rather than being shortened.
+          className="mono whitespace-nowrap rounded-4 bg-primary-alpha-10 px-1.5 py-px text-[11.5px] text-primary-base"
+          title={snap.isp ? `${snap.ip} · ${snap.isp}` : snap.ip}
         >
           {snap.ip}
         </span>

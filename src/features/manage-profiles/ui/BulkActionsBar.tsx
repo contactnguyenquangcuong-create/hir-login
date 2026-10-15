@@ -2,7 +2,6 @@ import { Button } from "@proxyshard/shardx-ui-kit";
 import {
   PlayIcon,
   StopIcon,
-  UploadIcon,
   DeleteIcon,
   SyncIcon,
 } from "../../../shared/icons";
@@ -16,7 +15,6 @@ export function BulkActionsBar() {
   const bulkLaunch = useProfile((s) => s.bulkLaunch);
   const bulkLaunchSynced = useProfile((s) => s.bulkLaunchSynced);
   const bulkStop = useProfile((s) => s.bulkStop);
-  const bulkExport = useProfile((s) => s.bulkExport);
   const bulkDelete = useProfile((s) => s.bulkDelete);
   const bulkAndroidToDesktop = useProfile((s) => s.bulkAndroidToDesktop);
   const bulkUnbindProxy = useProfile((s) => s.bulkUnbindProxy);
@@ -67,7 +65,6 @@ export function BulkActionsBar() {
           Đổi {androidCount} Android sang máy tính
         </Button>
       )}
-      <Button variant="neutral" mode="stroke" className="pl-2" size="2xsmall" leftIcon={<UploadIcon className="size-3.5" />} onClick={bulkExport}>{t("bulkActionsBar.export")}</Button>
       <Button variant="error" mode="stroke" className="pr-2" size="2xsmall" leftIcon={<DeleteIcon className="size-3.5" />} onClick={bulkDelete}>{t("bulkActionsBar.delete")}</Button>
       <Button variant="neutral" mode="ghost" className="pr-2" size="2xsmall" onClick={clearSelected}>{t("bulkActionsBar.clear")}</Button>
     </div>

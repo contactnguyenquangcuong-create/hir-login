@@ -152,13 +152,14 @@ export function ProfileRow({ profile, proxy, onMenu }: {
                 {proxy.kind.toUpperCase()}
               </Badge>
               <span className="flex min-w-0 items-center gap-1.5 overflow-hidden">
+                {/* The flag says the country; the code beside it said it again and pushed the
+                    port off the end of the column. */}
                 {proxy.country && (
-                  <>
+                  <span className="inline-flex flex-none" title={proxy.country}>
                     <CountryFlag cc={proxy.country} />
-                    <span className="inline-block rounded-4 bg-bg-weak-50 px-1.5 py-0.5 text-[10.5px] font-bold tracking-[0.5px] text-text-sub-600">{proxy.country}</span>
-                  </>
+                  </span>
                 )}
-                <span className="mono small text-text-sub-600">{proxy.host}:{proxy.port}</span>
+                <span className="mono small min-w-0 truncate text-text-sub-600" title={`${proxy.host}:${proxy.port}`}>{proxy.host}:{proxy.port}</span>
               </span>
             </div>
           ) : <span className="text-paragraph-xs text-text-soft-400">{t("profileRow.noProxy")}</span>}
@@ -179,7 +180,7 @@ export function ProfileRow({ profile, proxy, onMenu }: {
             })()}
           </span>
         </div>
-        <div className="cell-lastrun"><span className="text-paragraph-xs text-text-soft-400">{p.last_launched_at ? fmtTs(p.last_launched_at) : t("profileRow.neverLaunched")}</span></div>
+        <div className="cell-lastrun whitespace-nowrap"><span className="text-paragraph-xs text-text-sub-600">{p.last_launched_at ? fmtTs(p.last_launched_at) : t("profileRow.neverLaunched")}</span></div>
         <ProfileRowActions
           profile={p}
           onMore={(e) => { e.stopPropagation(); onMenu(e, menu()); }}

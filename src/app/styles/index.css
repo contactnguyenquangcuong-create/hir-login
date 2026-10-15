@@ -4,7 +4,9 @@
  * this file only wires Tailwind, scans the kit dist for used utilities,
  * and adds app-chrome basics (scrollbars, titlebar var, base font).
  * ==========================================================================*/
-@import "tailwindcss";
+/* Classes are looked for in `src` only (and the kit, below). Left to scan the whole project it
+   walked the Rust build folder as well, and the dev server hung on it: a blank window. */
+@import "tailwindcss" source("../..");
 @import "@proxyshard/shardx-ui-kit/tokens.css";
 
 /* Generate Tailwind utilities used inside the kit's prebuilt components. */
