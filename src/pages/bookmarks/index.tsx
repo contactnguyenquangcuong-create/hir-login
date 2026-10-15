@@ -101,54 +101,63 @@ export function BookmarksPage() {
   ];
   const tabClass = (on: boolean) =>
     cn(
-      "flex max-w-[200px] items-center gap-1.5 rounded-6 px-2.5 py-1 text-label-xs ring-1 ring-inset transition-colors",
-      on
-        ? "bg-primary-alpha-10 text-primary-base ring-primary-alpha-24"
-        : "text-text-sub-600 ring-stroke-soft-200 hover:bg-bg-weak-50",
+      "relative -mb-px flex max-w-[200px] flex-none cursor-pointer items-center gap-1.5 whitespace-nowrap border-0 border-b-2 bg-transparent px-3.5 py-2 text-label-xs transition-colors",
+      on ? "border-b-primary-base text-text-strong-950" : "border-b-transparent text-text-sub-600 hover:text-text-strong-950",
     );
+  const countBadge = (on: boolean) =>
+    cn("rounded-full px-1.5 py-px text-[10px] font-semibold", on ? "bg-primary-alpha-10 text-primary-base" : "bg-bg-weak-50 text-text-sub-600");
+  // How many bookmarks each tab holds.
+  const tabCount = (id: string) =>
+    id === "all" ? items.length : items.filter((b) => b.folder === (id === "__any__" ? "" : id)).length;
 
   return (
     <section className="flex flex-col">
       <Topbar crumbs={[t("bookmarks.crumbLibrary"), t("bookmarks.crumbBookmarks")]} search={search} onSearch={setSearch} />
 
-      <div className="mb-3.5 flex items-end justify-between gap-4">
-        <div className="flex min-w-0 flex-1 flex-col gap-3.5">
-          <div>
-            <h1 className="m-0 text-title-h5 text-text-strong-950">{t("bookmarks.heading")}</h1>
-            <p className="m-0 mt-1 max-w-[70ch] text-paragraph-xs text-text-soft-400">
-              {t("bookmarks.subtitle")}
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-1.5">
-            {tabs.map((tab) => (
-              <button
-                key={tab.id}
-                type="button"
-                onClick={() => setFolder(tab.id)}
-                className={tabClass(folder === tab.id)}
-                title={tab.label}
-              >
-                <span className="truncate">{tab.label}</span>
-              </button>
-            ))}
-            {folders.length > tabs.length - 2 && (
-              <FolderListButton
-                folders={folders}
-                value={folder}
-                onPick={setFolder}
-                className={cn(tabClass(false), "text-primary-base")}
-                extra={[{ id: "all", label: t("bookmarks.tabAll") }, { id: "__any__", label: t("bookmarks.tabEveryProfile") }]}
-              />
-            )}
-          </div>
+      <div className="mb-3">
+        <h1 className="m-0 text-title-h5 text-text-strong-950">{t("bookmarks.heading")}</h1>
+        <p className="m-0 mt-1 max-w-[70ch] text-paragraph-xs text-text-soft-400">
+          {t("bookmarks.subtitle")}
+        </p>
+      </div>
+
+      {/* Where the bookmarks go on the left, as tabs; the rest of the folders at the end of them;
+          the button that adds one on the right — the same row as the Profiles page. */}
+      <div className="mb-3 flex flex-wrap items-end justify-between gap-x-4 gap-y-2 border-b border-stroke-soft-200">
+        <div className="flex min-w-0 flex-1 items-center overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          {tabs.map((tab) => (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setFolder(tab.id)}
+              className={tabClass(folder === tab.id)}
+              title={tab.label}
+            >
+              <span className="truncate">{tab.label}</span>
+              <span className={countBadge(folder === tab.id)}>{tabCount(tab.id)}</span>
+            </button>
+          ))}
+          {folders.length > tabs.length - 2 && (
+            <FolderListButton
+              folders={folders}
+              value={folder}
+              onPick={setFolder}
+              label={t("folderTabs.moreFolders")}
+              count={folders.length - (tabs.length - 2)}
+              className={cn(tabClass(false), "text-primary-base hover:text-primary-base")}
+              extra={[{ id: "all", label: t("bookmarks.tabAll") }, { id: "__any__", label: t("bookmarks.tabEveryProfile") }]}
+            />
+          )}
         </div>
-        <Button
-          variant="primary" mode="filled" size="small"
-          leftIcon={<AddIcon className="size-4" />}
-          onClick={() => setEditing(emptyBookmark(folder === "all" || folder === "__any__" ? "" : folder))}
-        >
-          {t("bookmarks.newButton")}
-        </Button>
+        <div className="pb-2">
+          <Button
+            variant="primary" mode="filled" size="small"
+            leftIcon={<AddIcon className="size-4" />}
+            onClick={() => setEditing(emptyBookmark(folder === "all" || folder === "__any__" ? "" : folder))}
+          >
+            {t("bookmarks.newButton")}
+          </Button>
+        </div>
       </div>
 
       <div className="overflow-hidden rounded-12 bg-bg-white-0 shadow-[var(--shadow-xs)] ring-1 ring-inset ring-stroke-soft-200">
