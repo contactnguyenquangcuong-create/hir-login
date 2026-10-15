@@ -679,7 +679,11 @@ fn export_one(id: &str, stored: &StoredProfile, out_dir: &Path) -> Result<()> {
     let udd = store::user_data_root()?.join(id);
     if udd.exists() {
         let dst = out_dir.join("userdata");
-        for rel in crate::cloud_sync::synced_paths() {
+        // Cookies, saved passwords and `Local State` (the key they are sealed with) are this
+        // machine's alone: copied as they are, they arrive on another machine unreadable and the
+        // profile opens logged out. They go as portable copies instead, sealed again on import.
+        crate::cloud_sync::export_login(&udd, out_dir)?;
+        for rel in crate::cloud_sync::raw_paths() {
             let src = udd.join(rel);
             let to = dst.join(rel);
             if let Some(parent) = to.parent() {
@@ -831,7 +835,15 @@ fn import_one_profile_dir(dir: &Path, warnings: &mut Vec<String>) -> Result<()> 
 
     let src_userdata = if profile_json.exists() { dir.join("userdata") } else { dir.to_path_buf() };
     if src_userdata.exists() {
-        let copied = user_data_dir(&new_id).and_then(|dst| copy_tree_tolerant(&src_userdata, &dst));
+        let copied = user_data_dir(&new_id).and_then(|dst| {
+            copy_tree_tolerant(&src_userdata, &dst)?;
+            // The login, from the portable copies an export carries (none in an older export or a
+            // bare browser folder, whose files are taken as they are).
+            if profile_json.exists() {
+                crate::cloud_sync::import_login(&dst, dir)?;
+            }
+            Ok(())
+        });
         if let Err(e) = copied {
             let _ = delete(&new_id);
             return Err(e);
@@ -1256,8 +1268,12 @@ mod bundle_tests {
         save_raw(&mut sp).unwrap();
         let udd = user_data_dir(&sp.meta.id).unwrap();
         fs::create_dir_all(udd.join("Default/Local Storage/leveldb")).unwrap();
-        fs::write(udd.join("Default/Cookies"), format!("cookies-of-{name}")).unwrap();
-        fs::write(udd.join("Local State"), b"{}").unwrap();
+        // A real login, sealed with this machine's key the way the browser keeps it.
+        let login: crate::cookies::Cookie = serde_json::from_value(serde_json::json!({
+            "domain": ".shopee.sg", "name": "SPC_ST", "value": format!("cookies-of-{name}"), "path": "/",
+            "expires": 1893456000.0, "secure": true
+        })).unwrap();
+        crate::cookies::import(&sp.meta.id, &[login]).unwrap();
         fs::write(udd.join("Default/Local Storage/leveldb/000003.log"), b"ls").unwrap();
         fs::write(udd.join("Default/Local Storage/leveldb/LOCK"), b"").unwrap();
         // The bulk of a real profile — must not travel.
@@ -1318,8 +1334,9 @@ mod bundle_tests {
         let b = dest.join("Slim");
         assert!(b.join("profile.json").is_file());
         assert!(b.join("proxy.json").is_file());
-        assert_eq!(fs::read_to_string(b.join("userdata/Default/Cookies")).unwrap(), "cookies-of-Slim");
-        assert!(b.join("userdata/Local State").is_file());
+        assert!(b.join("portable/Cookies").is_file(), "the login travels as a portable copy");
+        assert!(!b.join("userdata/Default/Network/Cookies").exists(), "never the file sealed with this machine's key");
+        assert!(!b.join("userdata/Local State").exists(), "nor the key itself");
         assert!(b.join("userdata/Default/Local Storage/leveldb/000003.log").is_file());
         assert!(!b.join("userdata/Default/Cache").exists(), "cache must not travel");
         assert!(!b.join("userdata/GrShaderCache").exists(), "cache must not travel");
@@ -1349,8 +1366,8 @@ mod bundle_tests {
         assert_eq!(proxies.len(), 1, "one shared proxy, not one per profile");
         for p in &listed {
             assert_eq!(p.proxy_id.as_deref(), Some(proxies[0].id.as_str()), "{} lost its proxy", p.name);
-            let udd = user_data_dir(&p.id).unwrap();
-            assert_eq!(fs::read_to_string(udd.join("Default/Cookies")).unwrap(), format!("cookies-of-{}", p.name), "{} lost its login", p.name);
+            let login = crate::cookies::export(&p.id).unwrap().into_iter().find(|c| c.name == "SPC_ST").map(|c| c.value);
+            assert_eq!(login, Some(format!("cookies-of-{}", p.name)), "{} lost its login", p.name);
         }
     }
 
@@ -1399,7 +1416,7 @@ mod bundle_tests {
         let ids: Vec<String> = (0..3).map(|i| make(&format!("H{i}"), None)).collect();
         let dest = root.dir.join("bundle");
         export_bundle(&ids, &dest).unwrap();
-        let locked = dest.join("H1/userdata/Default/Cookies");
+        let locked = dest.join("H1/userdata/Default/Local Storage/leveldb/000003.log");
         fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
         // Running as root would read it anyway; nothing to prove then.
         if fs::read(&locked).is_ok() {
@@ -1479,7 +1496,7 @@ mod bundle_tests {
         let _ = crate::process::Tracker::shared().kill(&meta.id).await;
         assert_eq!((rep.exported, rep.failed.len()), (1, 0), "{rep:?}");
         assert_eq!(rep.warnings.len(), 1, "a running profile must be flagged: {rep:?}");
-        assert!(files.iter().any(|f| f.ends_with("Local State")), "{files:?}");
+        assert!(dest.join("Live/portable/Cookies").is_file(), "{files:?}");
     }
 
     fn walk(dir: &Path) -> Vec<String> {

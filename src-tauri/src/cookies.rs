@@ -988,7 +988,7 @@ pub fn census(profile_id: &str) -> String {
 /// How many long-lived cookies (the ones that keep a site logged in across restarts — not the
 /// session cookies the browser drops when it closes) the cookie database at `db` holds. `None`
 /// when the file cannot be opened or read at all (missing, damaged).
-fn long_lived(db: &Path) -> Option<i64> {
+pub(crate) fn long_lived(db: &Path) -> Option<i64> {
     let conn = rusqlite::Connection::open_with_flags(db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
     conn.query_row("SELECT count(1) FROM cookies WHERE has_expires = 1", [], |r| r.get(0)).ok()
 }
@@ -1029,6 +1029,20 @@ pub fn snapshot(profile_id: &str) -> Result<bool> {
         remove_db(&tmp);
         return Ok(false);
     }
+    // The two copies before it move one place down, so a bad copy (a login the site had already
+    // ended, a file damaged in a way the check above cannot see) never costs the older good ones.
+    // Done at most once a day: three copies of the last three minutes protect nothing.
+    let older = |n: u32| db.with_file_name(if n == 1 { "Cookies.hir-backup".to_string() } else { format!("Cookies.hir-backup{n}") });
+    let day_old = std::fs::metadata(&backup)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .map_or(true, |age| age.as_secs() >= 86_400);
+    if backup.exists() && day_old {
+        let _ = std::fs::remove_file(older(3));
+        let _ = std::fs::rename(older(2), older(3));
+        let _ = std::fs::rename(&backup, older(2));
+    }
     let _ = std::fs::remove_file(&backup);
     std::fs::rename(&tmp, &backup)?;
     Ok(true)
@@ -1040,11 +1054,11 @@ pub fn snapshot(profile_id: &str) -> Result<bool> {
 pub fn restore_if_lost(profile_id: &str) -> Option<String> {
     let udd = profile::user_data_dir(profile_id).ok()?;
     let db = cookies_db_path(&udd);
-    let backup = backup_path(&db);
-    if !backup.exists() {
-        return None;
-    }
-    let kept = long_lived(&backup).filter(|n| *n >= MIN_KEPT)?;
+    // The newest copy that still holds logins; the older ones are there for when it does not.
+    let (backup, kept) = [backup_path(&db), db.with_file_name("Cookies.hir-backup2"), db.with_file_name("Cookies.hir-backup3")]
+        .into_iter()
+        .filter(|b| b.exists())
+        .find_map(|b| long_lived(&b).filter(|n| *n >= MIN_KEPT).map(|n| (b, n)))?;
     let live = long_lived(&db);
     if live.is_some_and(|n| n * 3 >= kept) {
         return None;

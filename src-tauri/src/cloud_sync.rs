@@ -630,7 +630,7 @@ fn is_unportable(rel: &str) -> bool {
 }
 
 /// What travels as plain files: everything in `synced_paths` that is not sealed.
-fn raw_paths() -> impl Iterator<Item = &'static str> {
+pub(crate) fn raw_paths() -> impl Iterator<Item = &'static str> {
     synced_paths().filter(|p| !is_unportable(p))
 }
 
@@ -710,6 +710,21 @@ fn build_bundle(id: &str) -> Result<Vec<u8>> {
                 };
                 let held = cache_load(id, name);
                 let outgoing = match (local, held) {
+                    // Cookies go up as this machine left them: one browser's state, whole. United
+                    // with the server's copy they were two machines' cookies at once — a device id
+                    // (Shopee's SPC_F) from one beside the Local Storage of the other, cookies a
+                    // site had deleted come back — which a site that checks them against each
+                    // other answers with a logout. Only a machine that has plainly lost the login
+                    // (under half the server's long-lived cookies) sends the server's copy back.
+                    (Some(mine), Some(theirs)) if *kind == cookies::Sealed::Cookies => {
+                        let (m, t) = (long_lived_in(&mine), long_lived_in(&theirs));
+                        if m * 2 < t {
+                            slog!("{id}: {name}: this machine has {m} long-lived cookies against the server's {t} — it looks logged out, so the server's copy is sent back unchanged");
+                            theirs
+                        } else {
+                            mine
+                        }
+                    }
                     (Some(mine), Some(theirs)) => match union_portable(&mine, &theirs, *kind) {
                         Ok((united, added)) => {
                             if added > 0 {
@@ -801,6 +816,14 @@ fn apply_bundle_with(id: &str, bytes: &[u8], keep_local_session: bool) -> Result
 }
 
 fn apply_bundle_inner(id: &str, bytes: &[u8], keep_local_session: bool) -> Result<()> {
+    // The session arrives whole or not at all (see `incoming_login_is_worse`).
+    let keep_local_session = keep_local_session || {
+        let worse = incoming_login_is_worse(id, bytes);
+        if worse {
+            update_state(|st| { st.pending.insert(id.to_string()); });
+        }
+        worse
+    };
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes))?;
     let udd = store::user_data_root()?.join(id);
     fs::create_dir_all(&udd)?;
@@ -1013,6 +1036,72 @@ fn cache_load(id: &str, name: &str) -> Option<Vec<u8>> {
     fs::read(cache_file(id, name)?).ok()
 }
 
+/// Writes the profile's login (cookies, saved passwords) into `out` as portable copies, the way a
+/// sync bundle carries it: `out/portable/Cookies` and the rest. For a profile exported to a
+/// folder — the sealed files themselves open only on the machine that sealed them.
+/// Returns how many were written.
+pub(crate) fn export_login(udd: &Path, out: &Path) -> Result<usize> {
+    let mut n = 0;
+    for (rel, name, kind) in SEALED {
+        let src = if *kind == cookies::Sealed::Cookies { cookies::cookie_db(udd) } else { udd.join(rel) };
+        if !src.is_file() {
+            continue;
+        }
+        let (bytes, _) = cookies::portable_copy(udd, &src, *kind).with_context(|| format!("prepare {rel}"))?;
+        let to = out.join(name);
+        if let Some(parent) = to.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(to, bytes)?;
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// Seals the portable login in `dir` (written by `export_login`) with this machine's key and puts
+/// it where the browser of the profile at `udd` reads it. Returns how many were installed.
+pub(crate) fn import_login(udd: &Path, dir: &Path) -> Result<usize> {
+    let mut n = 0;
+    for (rel, name, kind) in SEALED {
+        let Ok(bytes) = fs::read(dir.join(name)) else { continue };
+        install_portable(udd, rel, &bytes, *kind).with_context(|| format!("restore {rel}"))?;
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// How many long-lived cookies a cookie database held in memory has (0 when it cannot be read).
+fn long_lived_in(bytes: &[u8]) -> i64 {
+    let path = std::env::temp_dir().join(format!("hir-count-{}.db", uuid::Uuid::new_v4()));
+    if fs::write(&path, bytes).is_err() {
+        return 0;
+    }
+    let n = cookies::long_lived(&path).unwrap_or(0);
+    let _ = fs::remove_file(&path);
+    n
+}
+
+/// Whether a bundle's login should be refused in favour of the one this machine has: it holds
+/// under half of this machine's long-lived cookies — what a machine that lost the login sends.
+/// The answer covers the whole session (cookies and Local Storage, IndexedDB…), which only make
+/// sense together.
+fn incoming_login_is_worse(id: &str, bytes: &[u8]) -> bool {
+    let Ok(mut zip) = zip::ZipArchive::new(std::io::Cursor::new(bytes)) else { return false };
+    let Ok(mut f) = zip.by_name("portable/Cookies") else { return false };
+    let mut buf = Vec::new();
+    if f.read_to_end(&mut buf).is_err() {
+        return false;
+    }
+    let Ok(udd) = store::user_data_root().map(|r| r.join(id)) else { return false };
+    let here = cookies::long_lived(&cookies::cookie_db(&udd)).unwrap_or(0);
+    let incoming = long_lived_in(&buf);
+    if here > 0 && incoming * 2 < here {
+        slog!("{id}: the arriving copy has {incoming} long-lived cookies against this machine's {here} — kept this machine's whole session (cookies and site storage), and it will be sent up");
+        return true;
+    }
+    false
+}
+
 /// `mine` with every row of `theirs` that it lacks (or has an older version of) added: the union of
 /// two portable logins. Returns the result and how many rows came from `theirs`.
 fn union_portable(mine: &[u8], theirs: &[u8], kind: cookies::Sealed) -> Result<(Vec<u8>, usize)> {
@@ -1067,8 +1156,14 @@ fn install_portable(udd: &Path, dest_rel: &str, bytes: &[u8], kind: cookies::Sea
                 slog!("{dest_rel}: of this machine's own {looked} sealed values, {opened} can be opened with the key assumed here{verdict}");
             }
         }
-        let swapped = if here > 0 {
-            // This machine already has a login of its own. It is merged with the incoming one,
+        let swapped = if here > 0 && kind == cookies::Sealed::Cookies {
+            // Cookies are taken whole, as the machine that closed the profile last left them, so
+            // they match the site storage that arrives with them (a login that would lose to
+            // this machine's was refused before anything was touched: `incoming_login_is_worse`).
+            slog!("{dest_rel}: this machine's {here} values replaced by the arriving copy, whole");
+            Ok(tmp.clone())
+        } else if here > 0 {
+            // This machine already has saved passwords of its own. They are merged with the incoming ones,
             // not replaced by it: whichever of the two is more recent stays for each cookie, and
             // nothing this machine has is lost. A copy pushed by a machine that had gone logged out
             // can therefore add what was missing and take nothing away.
@@ -2313,6 +2408,10 @@ mod tests {
         crate::profile::save_raw(&mut stored_b).unwrap();
         cookies::import(id, &[cookie]).unwrap();
         apply_bundle(id, &empty_bundle).unwrap();
+        // The login kept here is the better one, so it is marked to go up.
+        let marked = load_state().pending.remove(id);
+        // (Sync is off in this test, where a marked profile counts as a team's and is not opened.)
+        update_state(|st| { st.pending.remove(id); });
         let kept = cookies::export(id).unwrap();
         let log = log_tail(20);
 
@@ -2320,15 +2419,120 @@ mod tests {
         let _ = std::fs::remove_dir_all(&a);
         let _ = std::fs::remove_dir_all(&b);
         assert_eq!(kept.iter().find(|c| c.name == "c_user").map(|c| c.value.as_str()), Some("100077"), "the login must survive an empty one arriving");
-        assert!(log.contains("merged with this machine's own"), "and the log says what was done: {log}");
+        assert!(log.contains("kept this machine's whole session"), "and the log says what was done: {log}");
+        assert!(marked, "and this machine's login is marked to be sent up");
     }
 
-    /// The login that arrives is merged with the one that is here: for each cookie the more recent
-    /// one stays, a cookie only one side has is kept, and nothing is lost. Before, the incoming
-    /// database replaced the local one, so a machine that had gone logged out and pushed that state
-    /// took the login away from every other machine on its next background pull.
+    /// A profile exported to a folder and imported on another machine opens logged in: the login
+    /// travels as a portable copy and is sealed again there, and this machine's key (`Local State`)
+    /// and sealed files stay behind.
     #[test]
-    fn an_arriving_login_is_merged_and_the_newer_cookie_wins_in_both_directions() {
+    fn a_profile_exported_to_a_folder_opens_logged_in_on_another_machine() {
+        let _g = TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let a = std::env::temp_dir().join(format!("hir-exp-a-{}", uuid::Uuid::new_v4()));
+        let b = std::env::temp_dir().join(format!("hir-exp-b-{}", uuid::Uuid::new_v4()));
+        let out = std::env::temp_dir().join(format!("hir-exp-out-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let id = "export-1";
+
+        store::set_data_root(Some(a.clone()));
+        let mut stored = crate::profile::StoredProfile::default();
+        stored.meta.id = id.to_string();
+        stored.config.insert("name".into(), serde_json::json!("Shop 1"));
+        crate::profile::save_raw(&mut stored).unwrap();
+        let cookie: cookies::Cookie = serde_json::from_value(serde_json::json!({
+            "domain": ".shopee.sg", "name": "SPC_ST", "value": "login-token", "path": "/",
+            "expires": 1893456000.0, "secure": true
+        })).unwrap();
+        cookies::import(id, &[cookie]).unwrap();
+        let udd_a = store::user_data_root().unwrap().join(id);
+        std::fs::create_dir_all(udd_a.join("Default/Local Storage/leveldb")).unwrap();
+        std::fs::write(udd_a.join("Default/Local Storage/leveldb/000003.log"), b"site storage").unwrap();
+        let rep = crate::profile::export_bundle(&[id.to_string()], &out).unwrap();
+        assert_eq!(rep.exported, 1, "{:?}", rep.failed);
+        let folder = out.join("Shop 1");
+        let raw_local_state = folder.join("userdata/Local State").exists();
+        let raw_cookies = folder.join("userdata/Default/Network/Cookies").exists();
+        let portable = folder.join("portable/Cookies").is_file();
+
+        store::set_data_root(Some(b.clone()));
+        let rep = crate::profile::import_bundle(&out).unwrap();
+        let imported = crate::profile::list_all().unwrap();
+        let new_id = imported.first().map(|p| p.id.clone()).unwrap_or_default();
+        let got = cookies::export(&new_id).unwrap_or_default().into_iter().find(|c| c.name == "SPC_ST").map(|c| c.value);
+        let storage = std::fs::read(store::user_data_root().unwrap().join(&new_id).join("Default/Local Storage/leveldb/000003.log")).ok();
+
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&a);
+        let _ = std::fs::remove_dir_all(&b);
+        let _ = std::fs::remove_dir_all(&out);
+        assert!(!raw_local_state, "this machine's key must not be exported");
+        assert!(!raw_cookies, "the sealed cookie file must not be exported as it is");
+        assert!(portable, "the login goes as a portable copy");
+        assert_eq!(rep.imported, 1, "{:?}", rep.failed);
+        assert_eq!(got.as_deref(), Some("login-token"), "the login opens on the other machine");
+        assert_eq!(storage.as_deref(), Some(&b"site storage"[..]), "with its site storage");
+    }
+
+    /// What goes up is this machine's cookies as its browser left them: a cookie the site deleted
+    /// here is not put back from the server's copy. Only a machine that lost the login sends the
+    /// server's copy back instead of its own.
+    #[test]
+    fn the_cookies_sent_up_are_this_machines_own_unless_it_lost_the_login() {
+        let _g = TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let root = std::env::temp_dir().join(format!("hir-up-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let id = "up-1";
+        let ck = |name: &str| -> cookies::Cookie {
+            serde_json::from_value(serde_json::json!({
+                "domain": ".shopee.sg", "name": name, "value": "v", "path": "/", "expires": 1893456000.0, "secure": true
+            })).unwrap()
+        };
+        let sent = |bytes: &[u8]| -> Vec<String> {
+            let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).unwrap();
+            let mut buf = Vec::new();
+            z.by_name("portable/Cookies").unwrap().read_to_end(&mut buf).unwrap();
+            let p = std::env::temp_dir().join(format!("hir-up-read-{}.db", uuid::Uuid::new_v4()));
+            std::fs::write(&p, &buf).unwrap();
+            let conn = rusqlite::Connection::open(&p).unwrap();
+            let mut st = conn.prepare("SELECT name FROM cookies ORDER BY name").unwrap();
+            let names = st.query_map([], |r| r.get::<_, String>(0)).unwrap().filter_map(|r| r.ok()).collect();
+            drop(st);
+            drop(conn);
+            let _ = std::fs::remove_file(&p);
+            names
+        };
+        store::set_data_root(Some(root.clone()));
+        let mut st = crate::profile::StoredProfile::default();
+        st.meta.id = id.to_string();
+        crate::profile::save_raw(&mut st).unwrap();
+        let udd = store::user_data_root().unwrap().join(id);
+
+        // First upload: the server now holds SPC_F, SPC_ST and an old device id.
+        cookies::import(id, &[ck("SPC_F"), ck("SPC_ST"), ck("OLD_DEVICE")]).unwrap();
+        let _ = build_bundle(id).unwrap();
+        // The site deleted OLD_DEVICE here.
+        let _ = std::fs::remove_dir_all(udd.join("Default"));
+        cookies::import(id, &[ck("SPC_F"), ck("SPC_ST")]).unwrap();
+        let second = sent(&build_bundle(id).unwrap());
+        // This machine then lost the login altogether.
+        let _ = std::fs::remove_dir_all(udd.join("Default"));
+        cookies::import(id, &[]).unwrap();
+        let third = sent(&build_bundle(id).unwrap());
+
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(second, vec!["SPC_F", "SPC_ST"], "a cookie deleted here does not come back from the server's copy");
+        assert_eq!(third, vec!["SPC_F", "SPC_ST"], "a machine that lost the login sends the server's copy back");
+    }
+
+    /// The cookies that arrive replace the ones here whole: one browser's state, the one that
+    /// matches the site storage arriving with them — merged, a site saw one machine's device id
+    /// beside another's storage (Shopee logged such profiles out). A copy from a machine that lost
+    /// the login (under half the long-lived cookies here) is refused, so it cannot log out the rest.
+    #[test]
+    fn an_arriving_login_replaces_the_one_here_whole_unless_it_lost_the_login() {
         let _g = TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let a = std::env::temp_dir().join(format!("hir-merge-a-{}", uuid::Uuid::new_v4()));
         let b = std::env::temp_dir().join(format!("hir-merge-b-{}", uuid::Uuid::new_v4()));
@@ -2390,9 +2594,9 @@ mod tests {
             key_check.contains("of this machine's own 2 sealed values, 2 can be opened with the key assumed here") && !key_check.contains("NONE of them"),
             "the log says the assumed key opens this machine's own cookies: {key_check}"
         );
-        assert_eq!(newer_here_wins.0.as_deref(), Some("from-B-newer"), "an older incoming cookie must not replace a newer one");
-        assert_eq!(newer_here_wins.1.as_deref(), Some("a"), "a cookie only the incoming copy has is added");
-        assert_eq!(newer_here_wins.2.as_deref(), Some("b"), "a cookie only this machine has is kept");
+        assert_eq!(newer_here_wins.0.as_deref(), Some("from-A-older"), "the arriving copy is taken as it was left");
+        assert_eq!(newer_here_wins.1.as_deref(), Some("a"), "with every cookie it holds");
+        assert_eq!(newer_here_wins.2, None, "and nothing of this machine's mixed into it");
         assert_eq!(newer_incoming_wins.as_deref(), Some("from-A-newer"), "a newer incoming cookie does replace an older one");
         assert_eq!(after_empty.as_deref(), Some("from-A-newer"), "an empty login takes nothing away");
     }
@@ -2441,7 +2645,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&a);
         let _ = std::fs::remove_dir_all(&b);
         assert_eq!(got.as_deref(), Some("100555"), "the cookie that arrives must be the one that can be read: {log}");
-        assert!(log.contains("could not be opened with the key used here"), "and the log says what was dropped: {log}");
+        assert!(log.contains("replaced by the arriving copy, whole"), "and the log says what was done: {log}");
     }
 
     /// A copy that was restored by an earlier build may have its login in the wrong place or sealed

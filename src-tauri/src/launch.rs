@@ -266,8 +266,20 @@ pub async fn launch_profile_synced(
         .get("webgpu")
         .map(|v| !v.is_null())
         .unwrap_or(false);
+    // Device-bound sessions (Google's sign-in and the web standard) tie a login to a key in this
+    // computer's TPM and keep the login cookie only hours long, renewed by signing with that key.
+    // A profile is meant to keep its login wherever it is opened and however long it sits closed:
+    // a key that stays behind on one machine (or a renewal that never ran) is a login lost two or
+    // three days later. Chromium honours only the last `--disable-features`, so they go in one.
+    let mut disabled = vec!["EnableBoundSessionCredentials", "DeviceBoundSessions"];
     if !webgpu_present {
-        cmd.arg("--disable-features=WebGPU");
+        disabled.push("WebGPU");
+    }
+    cmd.arg(format!("--disable-features={}", disabled.join(",")));
+    // A binding made before this (or on another machine and carried in the Preferences file)
+    // points at a key the browser will no longer use: drop it so the login is not held to it.
+    if let Err(e) = strip_bound_sessions(&udd) {
+        eprintln!("[launcher] could not clear device-bound sessions: {e:#}");
     }
 
     // Interactive launches: suppress the crash bubble. Restoring the session is
@@ -518,6 +530,8 @@ pub async fn launch_profile_synced(
                 Ok(line) => crate::cloud_sync::log_line(&format!("heal {id}: {line}")),
                 Err(e) => crate::cloud_sync::log_line(&format!("heal {id}: could not compare the cookies: {e:#}")),
             }
+            // Then, for as long as the browser runs, logins that would end with it are given a date.
+            crate::heal::keep_sessions(id, c.web_socket_debugger_url).await;
         });
     }
 
@@ -553,6 +567,27 @@ pub async fn launch_profile_synced(
 const CDP_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Poll `<udd>/DevToolsActivePort`; line 1 = port, line 2 = ws path.
+/// The Preferences key where the browser keeps its device-bound sign-in sessions (each with the
+/// TPM-wrapped key it was made with).
+const BOUND_SESSIONS_PREF: &str = "bound_session_credentials_bound_session_params";
+
+/// Removes every device-bound session from the profile's Preferences. Returns whether any was there.
+pub(crate) fn strip_bound_sessions(udd: &Path) -> Result<bool> {
+    let path = udd.join("Default").join("Preferences");
+    let Ok(text) = std::fs::read_to_string(&path) else { return Ok(false) };
+    let mut prefs: serde_json::Value = serde_json::from_str(&text).context("read Preferences")?;
+    let Some(obj) = prefs.as_object_mut() else { return Ok(false) };
+    let had = obj
+        .get(BOUND_SESSIONS_PREF)
+        .is_some_and(|v| v.as_object().map_or(true, |o| !o.is_empty()));
+    if !had {
+        return Ok(false);
+    }
+    obj.remove(BOUND_SESSIONS_PREF);
+    std::fs::write(&path, serde_json::to_vec(&prefs)?).context("write Preferences")?;
+    Ok(true)
+}
+
 async fn read_devtools_endpoint(udd: &Path) -> Option<process::CdpInfo> {
     let file = udd.join("DevToolsActivePort");
     let deadline = std::time::Instant::now() + CDP_WAIT;
@@ -590,6 +625,29 @@ pub(crate) fn debug_port_plan(enable_cdp: bool, headless: bool, temporary: bool,
     let heal = interactive && proxy.map_or(true, |p| !has_login(p) || is_http(p));
     let forwarder = (heal || enable_cdp) && proxy.map_or(false, |p| has_login(p) && is_http(p));
     (heal, forwarder)
+}
+
+#[cfg(test)]
+mod bound_session_tests {
+    use super::*;
+
+    #[test]
+    fn a_device_bound_session_is_dropped_and_the_rest_of_the_preferences_kept() {
+        let udd = std::env::temp_dir().join(format!("hir-bound-{}", std::process::id()));
+        let def = udd.join("Default");
+        std::fs::create_dir_all(&def).unwrap();
+        let prefs = def.join("Preferences");
+        std::fs::write(&prefs, r#"{"bound_session_credentials_bound_session_params":{"https://google.com/":{"gapsts_session":"x"}},"intl":{"accept_languages":"vi"}}"#).unwrap();
+        assert!(strip_bound_sessions(&udd).unwrap());
+        let v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&prefs).unwrap()).unwrap();
+        assert!(v.get(BOUND_SESSIONS_PREF).is_none());
+        assert_eq!(v["intl"]["accept_languages"], "vi");
+        // Nothing left to drop, and an empty one is not rewritten.
+        assert!(!strip_bound_sessions(&udd).unwrap());
+        std::fs::write(&prefs, r#"{"bound_session_credentials_bound_session_params":{}}"#).unwrap();
+        assert!(!strip_bound_sessions(&udd).unwrap());
+        let _ = std::fs::remove_dir_all(&udd);
+    }
 }
 
 #[cfg(test)]

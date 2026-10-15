@@ -187,6 +187,81 @@ pub async fn heal(profile_id: &str, ws_url: &str) -> Result<String> {
     ))
 }
 
+/// How long a cookie the site meant to last "until the browser closes" is kept instead: long
+/// enough to cover weeks away from a profile, under the 400 days the browser itself allows.
+const SESSION_KEPT_SECS: f64 = 180.0 * 86_400.0;
+
+/// The session cookies in the browser's own list (`Storage.getCookies`), as `Storage.setCookies`
+/// parameters with an expiry set. A site that logs a person in with a cookie that carries no expiry
+/// loses that login the moment the browser closes or restarts and asks for it again — a profile
+/// that is opened every few days is "a new device" every time. Another way of keeping such a login
+/// is to give the cookie a date, which is what this does. Partitioned (third-party embed) cookies
+/// are left alone.
+pub(crate) fn persist_params(browser_cookies: &[Value], now: f64) -> Vec<Value> {
+    browser_cookies
+        .iter()
+        .filter(|c| c.get("session").and_then(|v| v.as_bool()).unwrap_or(false))
+        .filter(|c| c.get("partitionKey").map_or(true, |p| p.is_null()))
+        .filter(|c| c.get("value").and_then(|v| v.as_str()).is_some_and(|v| !v.is_empty()))
+        .filter_map(|c| {
+            let s = |k: &str| c.get(k).and_then(|v| v.as_str()).map(String::from);
+            let mut p = json!({
+                "name": s("name")?,
+                "value": s("value")?,
+                "domain": s("domain")?,
+                "path": s("path").filter(|p| !p.is_empty()).unwrap_or_else(|| "/".into()),
+                "secure": c.get("secure").and_then(|v| v.as_bool()).unwrap_or(false),
+                "httpOnly": c.get("httpOnly").and_then(|v| v.as_bool()).unwrap_or(false),
+                "expires": (now + SESSION_KEPT_SECS).floor(),
+            });
+            for k in ["sameSite", "priority", "sourceScheme"] {
+                if let Some(v) = c.get(k).filter(|v| v.is_string()) {
+                    p[k] = v.clone();
+                }
+            }
+            if let Some(port) = c.get("sourcePort").filter(|v| v.is_number()) {
+                p["sourcePort"] = port.clone();
+            }
+            Some(p)
+        })
+        .collect()
+}
+
+/// One pass over a running browser: its session cookies get an expiry. Returns how many.
+async fn persist_sessions_once(ws_url: &str) -> Result<usize> {
+    let (stream, _) = tokio_tungstenite::connect_async(ws_url).await.context("connect")?;
+    let (sink, source) = stream.split();
+    let mut c = Conn { sink, source, next: 0 };
+    let have = c.call("Storage.getCookies", json!({}), None).await?;
+    let list = have.get("cookies").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+    let params = persist_params(&list, now);
+    if params.is_empty() {
+        return Ok(0);
+    }
+    let n = params.len();
+    c.call("Storage.setCookies", json!({ "cookies": params }), None).await?;
+    Ok(n)
+}
+
+/// Keeps the logins that would end with the browser: for as long as the profile runs, once a
+/// minute, every session cookie is given an expiry (see `persist_params`). A cookie the site sets
+/// again as a session cookie is caught by the next pass, so at most a minute of a new login is
+/// unprotected; the first pass waits a little for the browser to settle.
+pub async fn keep_sessions(profile_id: String, ws_url: String) {
+    tokio::time::sleep(std::time::Duration::from_secs(25)).await;
+    let mut first = true;
+    while crate::process::Tracker::shared().is_running(&profile_id) {
+        match persist_sessions_once(&ws_url).await {
+            Ok(n) if n > 0 && first => crate::cloud_sync::log_line(&format!("sessions {profile_id}: {n} session cookie(s) given an expiry")),
+            Ok(_) => {}
+            Err(e) => eprintln!("[heal] keep_sessions({profile_id}): {e:#}"),
+        }
+        first = false;
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,6 +298,23 @@ mod tests {
         // A file that spells the domain without the dot is still the same cookie.
         let browser = vec![("google.com".to_string(), "SID".to_string(), "/".to_string())];
         assert!(!missing(&saved, &browser, 1.7e9).iter().any(|c| c.name == "SID"));
+    }
+
+    #[test]
+    fn only_session_cookies_get_a_date_and_nothing_else_changes() {
+        let list = vec![
+            json!({"name":"sess","value":"v","domain":".site.com","path":"/","session":true,"secure":true,"httpOnly":true,"sameSite":"Lax","priority":"Medium","sourceScheme":"Secure","sourcePort":443}),
+            json!({"name":"long","value":"v","domain":".site.com","path":"/","session":false,"expires":2e9}),
+            json!({"name":"empty","value":"","domain":".site.com","path":"/","session":true}),
+            json!({"name":"part","value":"v","domain":".x.com","path":"/","session":true,"partitionKey":{"topLevelSite":"https://a.com"}}),
+        ];
+        let out = persist_params(&list, 1.7e9);
+        assert_eq!(out.len(), 1, "only the plain session cookie with a value");
+        assert_eq!(out[0]["name"], "sess");
+        assert_eq!(out[0]["expires"], (1.7e9 + SESSION_KEPT_SECS).floor());
+        assert_eq!(out[0]["secure"], true);
+        assert_eq!(out[0]["sameSite"], "Lax");
+        assert_eq!(out[0]["domain"], ".site.com");
     }
 
     #[test]
