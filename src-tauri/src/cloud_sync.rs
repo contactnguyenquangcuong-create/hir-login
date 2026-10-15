@@ -1344,6 +1344,10 @@ fn report_checkin_failed(profile_id: &str, err: &anyhow::Error) {
 /// no-op when sync isn't configured.
 pub async fn checkout(profile_id: &str) -> Result<()> {
     let Some((cfg, base, token)) = active_config()? else { return Ok(()) };
+    // A personal profile opens like on a machine in no team: nothing to lock or bring down.
+    if stays_personal(&base, &token, profile_id).await {
+        return Ok(());
+    }
     let started = std::time::Instant::now();
     let _busy = begin_wait(profile_id, "pull").await;
     let holder = device_name(&cfg);
@@ -1535,6 +1539,10 @@ fn local_data_time_ms(id: &str) -> u64 {
 /// fatal — the operator still has their local copy either way.
 pub async fn checkin(profile_id: &str) -> Result<()> {
     let Some((cfg, base, token)) = active_config()? else { return Ok(()) };
+    // A personal profile is not sent to the team when it closes either.
+    if stays_personal(&base, &token, profile_id).await {
+        return Ok(());
+    }
     let _busy = begin_wait(profile_id, "push").await;
     let holder = device_name(&cfg);
     let c = client();
@@ -1912,9 +1920,117 @@ async fn sync_library(base: &str, token: &str) -> usize {
 
 // ---- background sync ----
 
+// ---- what goes to the team ----
+//
+// Joining a team used to send every profile on the machine to it: a person's own profiles became
+// the team's, and every admin's machine took them down. A profile goes to the team now only when
+// the team already has it, or when it is in one of the team's folders (made on the Folders page);
+// the rest stay on this machine, as they were before it joined.
+
+/// What of this machine goes to the team.
+#[derive(Clone)]
+enum TeamScope {
+    /// The machine holds the server's own token: it is the team's home, everything on it is the team's.
+    Everything,
+    /// Profiles in these folders (the team's, as this person sees them).
+    Folders(std::collections::HashSet<String>),
+}
+
+/// What of this machine goes to the team, as the server says; kept for a minute (a round asks about
+/// every local profile). `None` when the server could not be asked — then nothing new goes up.
+async fn team_scope(base: &str, token: &str) -> Option<TeamScope> {
+    static CACHE: Mutex<Option<(std::time::Instant, String, TeamScope)>> = Mutex::new(None);
+    if let Ok(g) = CACHE.lock() {
+        if let Some((at, key, scope)) = g.as_ref() {
+            if key.as_str() == format!("{base}|{token}") && at.elapsed() < Duration::from_secs(60) {
+                return Some(scope.clone());
+            }
+        }
+    }
+    let c = client();
+    let me = c.get(format!("{base}/me")).bearer_auth(token).timeout(Duration::from_secs(20)).send().await.ok()?;
+    if !me.status().is_success() {
+        return None;
+    }
+    let me: serde_json::Value = me.json().await.ok()?;
+    let scope = if me.get("isServerAdmin").and_then(|x| x.as_bool()).unwrap_or(false) {
+        TeamScope::Everything
+    } else {
+        TeamScope::Folders(folders_of(&c, base, token, &me).await?)
+    };
+    if let Ok(mut g) = CACHE.lock() {
+        *g = Some((std::time::Instant::now(), format!("{base}|{token}"), scope.clone()));
+    }
+    Some(scope)
+}
+
+/// The team folders a person sees: an admin's or manager's from the folder list, a member's from `/me`.
+async fn folders_of(c: &reqwest::Client, base: &str, token: &str, me: &serde_json::Value) -> Option<std::collections::HashSet<String>> {
+    let mut set = std::collections::HashSet::new();
+    let staff = c.get(format!("{base}/admin/folders")).bearer_auth(token).timeout(Duration::from_secs(20)).send().await.ok()?;
+    if staff.status().is_success() {
+        let v: serde_json::Value = staff.json().await.ok()?;
+        for f in v.get("folders").and_then(|x| x.as_array()).into_iter().flatten() {
+            if let Some(n) = f.get("name").and_then(|x| x.as_str()) {
+                set.insert(n.to_string());
+            }
+        }
+    } else {
+        // A member: the folders shared with them (they cannot add a profile anyway).
+        for k in me.get("folders").and_then(|x| x.as_object()).into_iter().flat_map(|m| m.keys()) {
+            set.insert(k.clone());
+        }
+    }
+    Some(set)
+}
+
+/// Whether a profile stays on this machine: the team has never had it, this is not the team's own
+/// machine, and it is not in one of the team's folders (a profile in no folder, or in a folder that
+/// exists only here, is personal).
+async fn stays_personal(base: &str, token: &str, id: &str) -> bool {
+    let st = load_state();
+    if st.items.contains_key(id) || st.pulled.contains(id) {
+        return false;
+    }
+    match team_scope(base, token).await {
+        Some(TeamScope::Everything) => false,
+        Some(TeamScope::Folders(set)) => {
+            let folder = crate::profile::load_raw(id).map(|p| p.meta.folder).unwrap_or_default();
+            folder.is_empty() || !set.contains(&folder)
+        }
+        None => true,
+    }
+}
+
+/// The server answered "no such profile" for one this machine had from the team: it is someone
+/// else's now (its folder was not shared with this person, or no longer is). The copy here goes to
+/// the trash — kept there a week, the team's copy untouched — and the machine forgets it.
+fn lost_access(id: &str) {
+    if let Ok(mut set) = sync_trashing().lock() {
+        set.insert(id.to_string());
+    }
+    let res = crate::trash::move_to_trash(id);
+    if let Ok(mut set) = sync_trashing().lock() {
+        set.remove(id);
+    }
+    match res {
+        Ok(_) => slog!("{id}: no longer shared with this machine — moved to the trash here (the team still has it)"),
+        Err(e) => slog!("{id}: no longer shared with this machine, but it could not be moved to the trash: {e:#}"),
+    }
+    update_state(|st| {
+        st.items.remove(id);
+        st.pending.remove(id);
+        st.pulled.remove(id);
+    });
+    GENERATION.fetch_add(1, Ordering::Relaxed);
+}
+
 /// Uploads a profile the server does not have yet, or one edited here since the
 /// last sync. Skips it (Ok(false)) when another device holds the lock.
 async fn push_profile(base: &str, token: &str, holder: &str, id: &str) -> Result<bool> {
+    if stays_personal(base, token, id).await {
+        return Ok(false);
+    }
     let c = client();
     let resp = c
         .post(format!("{base}/profiles/{id}/lock"))
@@ -1925,6 +2041,10 @@ async fn push_profile(base: &str, token: &str, holder: &str, id: &str) -> Result
         .await
         .context("contact sync server")?;
     if resp.status().as_u16() == 409 {
+        return Ok(false);
+    }
+    if resp.status().as_u16() == 404 && load_state().items.contains_key(id) && !crate::process::Tracker::shared().is_running(id) {
+        lost_access(id);
         return Ok(false);
     }
     if !resp.status().is_success() {
@@ -2685,6 +2805,12 @@ mod tests {
             let made: serde_json::Value = c.put(format!("{base}/admin/members")).bearer_auth(&admin_token)
                 .json(&serde_json::json!({"name": "staff", "role": "admin"})).send().await.unwrap().json().await.unwrap();
             let (staff_token, staff_id) = (made["token"].as_str().unwrap().to_string(), made["id"].as_str().unwrap().to_string());
+            // The profile is the team's: it is in a folder the server's owner made (a profile in no
+            // folder would be the staff member's own, and would never have gone to the team).
+            let made_folder = c.put(format!("{base}/admin/folders")).bearer_auth(&admin_token)
+                .json(&serde_json::json!({"name": "Team"})).send().await.unwrap();
+            assert!(made_folder.status().is_success(), "{}", made_folder.status());
+            crate::profile::set_folder("sess-1", "Team").unwrap();
             let mut s = settings::load().unwrap();
             s.sync.token = Some(staff_token);
             settings::save(&s).unwrap();
@@ -2724,6 +2850,78 @@ mod tests {
             let s = settings::load().unwrap();
             assert!(!s.sync.enabled && s.sync.token.is_none(), "sync is off and the token gone");
             assert!(log_tail(10).contains("removed from the team"), "{}", log_tail(10));
+        }).await;
+    }
+
+    /// What happened to Huy: a manager joined with profiles of his own and every one of them went
+    /// to the team, and every admin's machine took them down. Now only the profile in a folder the
+    /// team has goes up; his others stay on his machine. An admin added under their own name does
+    /// not see the folder he made for himself — a copy they took down earlier goes to their trash —
+    /// while the server's owner still sees everything.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_members_own_profiles_stay_theirs_and_other_admins_do_not_get_them() {
+        with_synced_profile(|base, admin_token, _cookies| async move {
+            let c = reqwest::Client::new();
+            let member = |name: &'static str, role: &'static str| {
+                let (c, base, admin_token) = (c.clone(), base.clone(), admin_token.clone());
+                async move {
+                    let v: serde_json::Value = c.put(format!("{base}/admin/members")).bearer_auth(&admin_token)
+                        .json(&serde_json::json!({"name": name, "role": role})).send().await.unwrap().json().await.unwrap();
+                    v["token"].as_str().unwrap().to_string()
+                }
+            };
+            let huy = member("Huy", "manager").await;
+            let home = member("CuongHome", "admin").await;
+            let use_token = |t: &str| {
+                let mut s = settings::load().unwrap();
+                s.sync.token = Some(t.to_string());
+                settings::save(&s).unwrap();
+            };
+            let profile = |id: &str, folder: &str| {
+                let mut st = crate::profile::StoredProfile::default();
+                st.meta.id = id.into();
+                st.meta.folder = folder.into();
+                crate::profile::save_raw(&mut st).unwrap();
+            };
+            let names = |v: serde_json::Value, list: &str, key: &str| -> Vec<String> {
+                v[list].as_array().unwrap().iter().map(|x| x[key].as_str().unwrap().to_string()).collect()
+            };
+
+            // Huy's machine joins. He makes a folder of his own on the server and has three profiles.
+            use_token(&huy);
+            let made = c.put(format!("{base}/admin/folders")).bearer_auth(&huy).json(&serde_json::json!({"name": "HuyFb"})).send().await.unwrap();
+            assert!(made.status().is_success(), "{}", made.status());
+            profile("huy-fb", "HuyFb");
+            profile("huy-loose", "");
+            profile("huy-here", "OnlyOnThisMachine");
+            sync_round().await.expect("a round on Huy's machine");
+            let on_server = names(c.get(format!("{base}/profiles")).bearer_auth(&admin_token).send().await.unwrap().json().await.unwrap(), "profiles", "id");
+            assert!(on_server.contains(&"huy-fb".to_string()), "the profile in his team folder goes up: {on_server:?}");
+            assert!(!on_server.contains(&"huy-loose".to_string()), "one in no folder stays on his machine: {on_server:?}");
+            assert!(!on_server.contains(&"huy-here".to_string()), "one in a folder that is only on his machine stays there: {on_server:?}");
+
+            // Another admin, added under their own name, does not see Huy's folder or its profile.
+            let home_folders = names(c.get(format!("{base}/admin/folders")).bearer_auth(&home).send().await.unwrap().json().await.unwrap(), "folders", "name");
+            assert!(!home_folders.contains(&"HuyFb".to_string()), "{home_folders:?}");
+            let home_profiles = names(c.get(format!("{base}/profiles")).bearer_auth(&home).send().await.unwrap().json().await.unwrap(), "profiles", "id");
+            assert!(!home_profiles.contains(&"huy-fb".to_string()), "{home_profiles:?}");
+            let bundle = c.get(format!("{base}/profiles/huy-fb/bundle")).bearer_auth(&home).send().await.unwrap();
+            assert_eq!(bundle.status().as_u16(), 404, "nor can they download it");
+            // The server's owner still sees everything.
+            let all_folders = names(c.get(format!("{base}/admin/folders")).bearer_auth(&admin_token).send().await.unwrap().json().await.unwrap(), "folders", "name");
+            assert!(all_folders.contains(&"HuyFb".to_string()), "{all_folders:?}");
+
+            // That admin's machine had taken the profile down before this change: its copy goes to
+            // the trash there at the next round; the profiles that were only ever on it stay.
+            use_token(&home);
+            sync_round().await.expect("a round on the admin's machine");
+            assert!(crate::profile::load_raw("huy-fb").is_err(), "Huy's profile is no longer in the admin's list");
+            assert!(crate::trash::list().unwrap().iter().any(|t| t.id == "huy-fb"), "it is in the trash, not lost");
+            assert!(!load_state().items.contains_key("huy-fb"), "and forgotten by the sync");
+            assert!(crate::profile::load_raw("huy-loose").is_ok() && crate::profile::load_raw("huy-here").is_ok(), "nothing else is touched");
+            // The team still has it, for Huy.
+            let still = names(c.get(format!("{base}/profiles")).bearer_auth(&huy).send().await.unwrap().json().await.unwrap(), "profiles", "id");
+            assert!(still.contains(&"huy-fb".to_string()), "{still:?}");
         }).await;
     }
 

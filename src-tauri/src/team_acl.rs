@@ -8,6 +8,13 @@
 //! themselves. A *member* may only use the profiles of the folders they were
 //! granted — never add, change or delete. A folder nobody granted you does not
 //! exist for you.
+//!
+//! A folder belongs to whoever made it. Folders the server's owner made are the
+//! team's, and every admin has them; a folder another person made is theirs and
+//! the people they shared it with — an admin added under their own name does not
+//! see it unless it was shared with them. Only the server's own token sees every
+//! folder. (Every admin used to see every folder, so a manager's own profiles were
+//! on every admin's machine the moment the manager joined.)
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -174,10 +181,19 @@ impl AclStore {
         })
     }
 
+    /// Whether `folder` was made by a person other than `who` (not by the server's owner): then it
+    /// is that person's, and `who` has of it only what they were given.
+    pub fn is_someone_elses(&self, folder: &str, who: &Identity) -> bool {
+        self.owners.get(folder).is_some_and(|o| o != "admin" && o != &who.id)
+    }
+
     /// What `who` may do with anything in `folder`. A profile that is in no
-    /// folder belongs to the admin only.
+    /// folder belongs to the admins only.
     pub fn level(&self, who: &Identity, folder: &str) -> Level {
-        if who.is_privileged() {
+        if who.is_server_admin() {
+            return Level::Full;
+        }
+        if who.is_privileged() && (folder.is_empty() || !self.is_someone_elses(folder, who)) {
             return Level::Full;
         }
         if folder.is_empty() {
@@ -217,7 +233,17 @@ impl AclStore {
     /// Whether `who` may delete (or restore, or purge) `folder`: the admin, or the manager who made it.
     /// A folder a superior made or handed over can be used and shared but not deleted.
     pub fn may_delete_folder(&self, who: &Identity, folder: &str) -> bool {
-        who.is_privileged() || self.owners.get(folder).map(|o| o == &who.id).unwrap_or(false)
+        who.is_server_admin()
+            || self.owners.get(folder).map(|o| o == &who.id).unwrap_or(false)
+            || (who.is_privileged() && !self.is_someone_elses(folder, who))
+    }
+
+    /// Whether `who` may see, restore or purge a folder in the trash: the server's owner any; an
+    /// admin the team's and their own; a manager their own, unless an admin deleted it.
+    pub fn may_handle_trashed(&self, who: &Identity, t: &TrashedFolder) -> bool {
+        who.is_server_admin()
+            || (t.owner == who.id && (!t.by_admin || who.is_privileged()))
+            || (who.is_privileged() && t.owner == "admin")
     }
 
     /// Move a folder to the trash, keeping who owned it and who it was shared with.
@@ -440,4 +466,31 @@ mod tests {
         assert_ne!(sig, protected_signature(&base, &json!({"id":"p","host":"OTHER","port":1})));
         assert_ne!(sig, protected_signature(&base, &Value::Null), "unbinding the proxy is an edit");
     }
+
+    /// A folder belongs to whoever made it: the server's owner has every folder, another admin the
+    /// team's (made by the owner), their own and what was shared with them, never someone else's.
+    #[test]
+    fn a_folder_someone_made_is_theirs_and_not_every_admins() {
+        let mut acl = AclStore::default();
+        let owner = Identity::admin();
+        let huy = Identity { id: "huy".into(), name: "Huy".into(), role: Role::Manager };
+        let home = Identity { id: "home".into(), name: "Home".into(), role: Role::Admin };
+        acl.claim_folder("Team", &owner);
+        acl.claim_folder("HuyFb", &huy);
+        acl.claim_folder("HomeOwn", &home);
+        acl.claim_folder("Shared", &huy);
+        acl.set_access("Shared", "home", Level::Use);
+
+        assert_eq!(acl.level(&owner, "HuyFb"), Level::Full, "the server's owner sees everything");
+        assert_eq!(acl.level(&huy, "HuyFb"), Level::Full, "Huy has his own folder");
+        assert_eq!(acl.level(&home, "HuyFb"), Level::None, "another admin does not");
+        assert_eq!(acl.level(&home, "Team"), Level::Full, "the team's folder is every admin's");
+        assert_eq!(acl.level(&home, "HomeOwn"), Level::Full);
+        assert_eq!(acl.level(&home, "Shared"), Level::Use, "shared with them: what they were given");
+        assert_eq!(acl.level(&home, ""), Level::Full, "a profile in no folder is the admins'");
+        assert!(!acl.may_delete_folder(&home, "HuyFb"));
+        assert!(acl.may_delete_folder(&home, "Team") && acl.may_delete_folder(&home, "HomeOwn"));
+        assert!(acl.may_delete_folder(&owner, "HuyFb"));
+    }
+
 }

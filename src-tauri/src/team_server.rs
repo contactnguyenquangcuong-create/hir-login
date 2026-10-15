@@ -180,7 +180,7 @@ async fn wait_events(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
     loop {
         let (seq, raw) = events_after(after);
-        let ids: Vec<String> = if who.is_privileged() {
+        let ids: Vec<String> = if who.is_server_admin() {
             raw
         } else {
             let (acl, meta) = (load_acl(), meta_map());
@@ -556,7 +556,10 @@ async fn put_bundle(
         // Where may this person put a profile? Admin: anywhere. Group manager: a folder
         // they manage, or a brand-new one (which then becomes theirs). Member: nowhere.
         let may_place = |folder: &str| -> bool {
-            who.is_privileged()
+            who.is_server_admin()
+                || (who.is_privileged()
+                    && (acl.level(&who, folder) == Level::Full
+                        || (!acl.owners.contains_key(folder) && !acl.folders.contains_key(folder) && !acl.trashed.contains_key(folder) && !taken(folder))))
                 || (who.role == team_acl::Role::Manager && !folder.is_empty()
                     && (acl.level(&who, folder) == Level::Full
                         || (!acl.owners.contains_key(folder) && !acl.folders.contains_key(folder) && !acl.trashed.contains_key(folder) && !taken(folder))))
@@ -785,8 +788,15 @@ async fn me(
 ) -> Response {
     let Some(who) = authenticate(&headers, &state.token) else { return unauthorized() };
     let acl = load_acl();
-    let folders: Value = if who.is_privileged() {
+    let folders: Value = if who.is_server_admin() {
         Value::Null
+    } else if who.is_privileged() {
+        let mut names: std::collections::BTreeSet<String> = acl.folders.keys().cloned().collect();
+        names.extend(acl.owners.keys().cloned());
+        json!(names.into_iter().filter_map(|f| {
+            let l = acl.level(&who, &f);
+            (l > Level::None).then(|| (f, l.as_str().to_string()))
+        }).collect::<std::collections::BTreeMap<_, _>>())
     } else {
         json!(acl.folders.iter().filter_map(|(f, m)| m.get(&who.id).map(|_| (f.clone(), acl.level(&who, f).as_str().to_string()))).collect::<std::collections::BTreeMap<_, _>>())
     };
@@ -1059,7 +1069,7 @@ async fn admin_folder_trash(
     if acl.trashed.len() != before { let _ = save_acl(&acl); }
     let keep_ms = team_acl::FOLDER_TRASH_DAYS * 24 * 3600 * 1000;
     let items: Vec<Value> = acl.trashed.iter()
-        .filter(|(_, t)| who.is_privileged() || (t.owner == who.id && !t.by_admin))
+        .filter(|(_, t)| acl.may_handle_trashed(&who, t))
         .map(|(name, t)| json!({
             "name": name, "deletedBy": t.deleted_by,
             "daysLeft": (keep_ms.saturating_sub(now_ms().saturating_sub(t.deleted_at_ms)) + 86_399_999) / 86_400_000,
@@ -1075,7 +1085,7 @@ async fn admin_folder_restore(
     let who = match staff_only(&headers, &state) { Ok(w) => w, Err(r) => return r };
     let _g = acl_lock();
     let mut acl = load_acl();
-    let owner_ok = acl.trashed.get(&folder).map(|t| who.is_privileged() || (t.owner == who.id && !t.by_admin)).unwrap_or(false);
+    let owner_ok = acl.trashed.get(&folder).map(|t| acl.may_handle_trashed(&who, t)).unwrap_or(false);
     if !owner_ok { return not_found(); }
     if !acl.restore_folder(&folder) {
         return (StatusCode::CONFLICT, Json(json!({"ok":false,"error":"name taken"}))).into_response();
@@ -1094,7 +1104,7 @@ async fn admin_folder_purge(
     let who = match staff_only(&headers, &state) { Ok(w) => w, Err(r) => return r };
     let _g = acl_lock();
     let mut acl = load_acl();
-    let owner_ok = acl.trashed.get(&folder).map(|t| who.is_privileged() || (t.owner == who.id && !t.by_admin)).unwrap_or(false);
+    let owner_ok = acl.trashed.get(&folder).map(|t| acl.may_handle_trashed(&who, t)).unwrap_or(false);
     if !owner_ok { return not_found(); }
     acl.trashed.remove(&folder);
     if let Err(e) = save_acl(&acl) { return err500(e); }
