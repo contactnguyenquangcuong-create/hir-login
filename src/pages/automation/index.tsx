@@ -64,18 +64,17 @@ export function AutomationPage() {
     <section className="flex flex-col">
       <Topbar crumbs={crumbs} search="" onSearch={() => {}} />
 
-      <div className="mb-3.5 flex items-end justify-between gap-4">
-        <div>
+      <div className="mb-3.5 flex flex-wrap items-end justify-between gap-x-4 gap-y-2">
+        <div className="min-w-0">
           <h1 className="m-0 text-title-h5 text-text-strong-950">{t("automation.title")}</h1>
           <p className="m-0 mt-1 max-w-[70ch] text-paragraph-xs text-text-soft-400">
             {t("automation.intro")}
           </p>
         </div>
-      </div>
 
-      <div className="mb-3.5 flex items-center gap-2">
+      <div className="flex flex-none items-center gap-2">
         <input
-          className="h-9 w-[280px] rounded-10 bg-bg-white-0 px-3 text-paragraph-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 outline-none placeholder:text-text-soft-400 focus:ring-primary-base"
+          className="h-9 w-[240px] rounded-10 bg-bg-white-0 px-3 text-paragraph-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 outline-none placeholder:text-text-soft-400 focus:ring-primary-base"
           placeholder={t("automation.namePlaceholder")}
           value={name}
           onChange={(e) => setName(e.target.value)}
@@ -126,12 +125,13 @@ export function AutomationPage() {
           </span>
         </label>
       </div>
+      </div>
 
       <div className="overflow-hidden rounded-12 bg-bg-white-0 shadow-[var(--shadow-xs)] ring-1 ring-inset ring-stroke-soft-200">
         {projects.length > 0 && (
           <div className="grid grid-cols-[1fr_100px_160px_140px] items-center gap-3 border-b border-stroke-soft-200 bg-bg-weak-50 px-4 py-2 text-subheading-2xs text-text-soft-400">
             <div>{t("automation.colName")}</div>
-            <div>{t("automation.colSteps")}</div>
+            <div className="text-right">{t("automation.colSteps")}</div>
             <div>{t("automation.colUpdated")}</div>
             <div />
           </div>
@@ -157,7 +157,7 @@ export function AutomationPage() {
                   <div className="truncate text-paragraph-xs text-text-soft-400">{p.notes}</div>
                 )}
               </div>
-              <div className="text-paragraph-sm text-text-sub-600">{p.blocks.length}</div>
+              <div className="text-right text-paragraph-sm tabular-nums text-text-sub-600">{p.blocks.length}</div>
               <div className="text-paragraph-xs text-text-soft-400">{fmtTs(`@${p.updated_at}`)}</div>
               <div
                 className="flex items-center justify-end gap-1.5"

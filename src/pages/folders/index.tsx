@@ -9,6 +9,8 @@ import { startTeamRole, teamCall, useTeam, canShare } from "../../shared/model/t
 import { useProfile, useFolders } from "../../entities/profile";
 import { ShareFolderModal } from "../../features/manage-profiles/ui/ShareFolderModal";
 import { Section, Pill } from "../settings/ui";
+import { useContextMenu } from "../../shared/hooks/useContextMenu";
+import { MoreIcon } from "../../shared/icons";
 
 type Member = { id: string; name: string; role: "manager" | "member"; disabled: boolean };
 type ServerFolder = { name: string; profiles: number; access: Record<string, string>; canDelete?: boolean; createdBy?: { role: "admin" | "manager"; name: string } };
@@ -22,6 +24,8 @@ export function FoldersPage() {
   const profiles = useProfile((s) => s.profiles);
   const rememberFolder = useProfile((s) => s.rememberFolder);
   const forgetFolder = useProfile((s) => s.forgetFolder);
+  const setFolder = useProfile((s) => s.setFolder);
+  const ctx = useContextMenu();
   const localFolders = useFolders();
   const [server, setServer] = useState<ServerFolder[] | null>(null);
   const [members, setMembers] = useState<Member[]>([]);
@@ -115,11 +119,24 @@ export function FoldersPage() {
 
   return (
     <section className="flex flex-col">
-      <Topbar crumbs={["Workspace", "Thư mục"]} search="" onSearch={() => {}} />
-      <h1 className="m-0 mb-1 text-title-h5 text-text-strong-950">Thư mục</h1>
-      <p className="m-0 mb-4 text-paragraph-sm text-text-soft-400">Chia thư mục cho từng nhóm. Ai không được chia sẻ sẽ không thấy thư mục đó.</p>
+      <Topbar crumbs={["Workspace", "Thư mục"]} search={filter} onSearch={(v) => { setFilter(v); setLimit(50); }} />
+      <div className="mb-3 flex flex-wrap items-end justify-between gap-x-4 gap-y-2">
+        <div className="flex min-w-0 flex-col gap-1">
+          <div className="flex items-center gap-3">
+            <h1 className="m-0 text-title-h5 text-text-strong-950">Thư mục</h1>
+            {rows.length > 0 && <Pill>{filter.trim() ? `${filtered.length} / ${rows.length}` : rows.length} thư mục</Pill>}
+          </div>
+          <p className="m-0 text-paragraph-xs text-text-soft-400">Chia thư mục cho từng nhóm. Ai không được chia sẻ sẽ không thấy thư mục đó.</p>
+        </div>
+        {canShare(role, configured) && (
+          <form className="flex items-center gap-2" onSubmit={(e) => { e.preventDefault(); create(); }}>
+            <div className="w-64"><Input inputSize="small" value={name} onChange={(e) => setName(e.target.value)} placeholder="Tên thư mục mới, ví dụ: Shop A" /></div>
+            <Button type="submit" variant="primary" size="small" disabled={!name.trim()}>Tạo thư mục</Button>
+          </form>
+        )}
+      </div>
 
-      <div className="flex max-w-[980px] flex-col gap-4">
+      <div className="flex flex-col gap-4">
         {configured === false && (
           <Section title="Chưa kết nối team" desc="Kết nối tới máy chủ của team để chia sẻ thư mục cho nhân sự.">
             <div className="px-5 py-4"><Button variant="primary" size="small" onClick={() => setSection("settings")}>Mở cài đặt đồng bộ nhóm</Button></div>
@@ -148,62 +165,81 @@ export function FoldersPage() {
         )}
 
         {canShare(role, configured) && (
-          <Section
-            title="Tất cả thư mục"
-            desc={role === "admin" ? "Bạn thấy mọi thư mục của team." : "Bạn thấy các thư mục được giao cho bạn hoặc do bạn tạo."}
-          >
-            <form className="flex items-end gap-2 px-5 py-4" onSubmit={(e) => { e.preventDefault(); create(); }}>
-              <div className="flex-1"><Input inputSize="small" label="Tạo thư mục mới" value={name} onChange={(e) => setName(e.target.value)} placeholder="Tên thư mục, ví dụ: Shop A" /></div>
-              <Button type="submit" variant="primary" size="small" disabled={!name.trim()}>Tạo</Button>
-            </form>
-            {rows.length > 8 && (
-              <div className="flex items-center gap-3 px-5 pb-3">
-                <input
-                  value={filter}
-                  onChange={(e) => { setFilter(e.target.value); setLimit(50); }}
-                  placeholder={`Tìm trong ${rows.length} thư mục…`}
-                  className="h-8 w-72 rounded-8 bg-bg-white-0 px-2.5 text-paragraph-sm text-text-strong-950 ring-1 ring-inset ring-stroke-soft-200 outline-none placeholder:text-text-soft-400 focus:ring-primary-base"
-                />
-                <span className="text-paragraph-xs text-text-soft-400">{filter.trim() ? `${filtered.length} khớp` : `${rows.length} thư mục`}</span>
-              </div>
-            )}
-            {rows.length === 0 && <div className="px-5 py-8 text-center text-paragraph-xs text-text-soft-400">Chưa có thư mục nào.</div>}
-            {rows.length > 0 && filtered.length === 0 && <div className="px-5 py-8 text-center text-paragraph-xs text-text-soft-400">Không có thư mục nào khớp “{filter}”.</div>}
+          // One row per folder, in columns: what it is, how many profiles, who has it, who made it.
+          <div className="overflow-hidden rounded-lg bg-bg-white-0 shadow-[var(--shadow-xs)] ring-1 ring-inset ring-stroke-soft-200">
+            <div className="f-cols f-head border-b border-stroke-soft-200 bg-bg-weak-50 text-subheading-2xs text-text-soft-400">
+              <div>TÊN</div>
+              <div className="cell-count">PROFILE</div>
+              <div>CHIA SẺ CHO</div>
+              <div>NGƯỜI TẠO</div>
+              <div></div>
+            </div>
+            {rows.length === 0 && <div className="px-5 py-10 text-center text-paragraph-xs text-text-soft-400">Chưa có thư mục nào. Đặt tên ở ô phía trên rồi bấm Tạo thư mục.</div>}
+            {rows.length > 0 && filtered.length === 0 && <div className="px-5 py-10 text-center text-paragraph-xs text-text-soft-400">Không có thư mục nào khớp “{filter}”.</div>}
             {filtered.slice(0, limit).map((f) => {
               const people = Object.entries(f.access);
+              const deletable = f.profiles === 0 && (f.local || f.canDelete !== false);
+              const open = () => { setFolder(f.name); setSection("browsers"); };
+              const menu = [
+                { label: "Xem profile trong thư mục", onClick: open },
+                { label: "Chia sẻ…", onClick: () => setSharing(f.name) },
+                ...(deletable ? [{ sep: true, label: "", onClick: () => {} }, { label: "Xoá thư mục", onClick: () => remove(f.name, !f.local), danger: true }] : []),
+              ];
               return (
-                <div key={f.name} className="flex flex-wrap items-center gap-3 px-5 py-3.5">
-                  <FolderIcon className="size-5 flex-none text-icon-soft-400" />
-                  <div className="flex min-w-0 flex-1 flex-col gap-1.5">
-                    <div className="flex items-center gap-2">
-                      <span className="truncate text-label-sm text-text-strong-950">{f.name}</span>
-                      <Pill>{f.profiles} profile</Pill>
-                      {f.local && <Pill tone="warning">Chỉ có trên máy này</Pill>}
-                    </div>
-                    <div className="flex flex-wrap gap-1">
-                      {people.length === 0
-                        ? <span className="text-paragraph-xs text-text-soft-400">Chưa chia sẻ cho ai</span>
-                        : people.map(([id, lvl]) => (
-                          <Pill key={id} tone={lvl === "manage" ? "primary" : "neutral"}>{nameOf(id)} · {lvl === "manage" ? "quản lý" : "được dùng"}</Pill>
-                        ))}
-                    </div>
+                <div key={f.name} className="f-cols border-t border-stroke-soft-200 transition-colors first:border-t-0 hover:bg-bg-weak-50" onContextMenu={(e) => ctx.open(e, menu)}>
+                  <div className="flex min-w-0 items-center gap-2.5">
+                    <FolderIcon className="size-[18px] flex-none text-icon-soft-400" />
+                    <button
+                      type="button"
+                      className="min-w-0 cursor-pointer truncate border-0 bg-transparent p-0 text-left text-label-xs text-text-strong-950 hover:text-primary-base"
+                      title="Xem profile trong thư mục này"
+                      onClick={open}
+                    >
+                      {f.name}
+                    </button>
+                    {f.local && <Pill tone="warning">Chỉ trên máy này</Pill>}
                   </div>
-                  <div className="flex flex-none gap-1">
-                    <Button variant="primary" mode="stroke" size="xsmall" onClick={() => setSharing(f.name)}>Chia sẻ</Button>
-                    {f.profiles === 0 && (f.local || f.canDelete !== false) && <Button variant="neutral" mode="ghost" size="xsmall" onClick={() => remove(f.name, !f.local)}>Xoá</Button>}
-                    {!f.local && f.canDelete === false && <span className="self-center text-paragraph-xs text-text-soft-400" title="Chỉ người tạo thư mục hoặc Quản trị mới xoá được. Bạn vẫn dùng và chia sẻ được.">{f.createdBy?.role === "manager" ? `Do Quản lý ${f.createdBy.name} tạo`.replace("  ", " ") : "Do Quản trị tạo"}</span>}
+                  <div className={`cell-count text-paragraph-xs ${f.profiles > 0 ? "text-text-sub-600" : "text-text-soft-400"}`}>{f.profiles}</div>
+                  {/* Who has it, on one line: the first few, then how many more (all of them on hover). */}
+                  <div
+                    className="flex min-w-0 items-center gap-1 overflow-hidden"
+                    title={people.map(([id, lvl]) => `${nameOf(id)} · ${lvl === "manage" ? "quản lý" : "được dùng"}`).join("\n") || undefined}
+                  >
+                    {people.length === 0
+                      ? <span className="text-paragraph-xs text-text-soft-400">Chưa chia sẻ</span>
+                      : <>
+                        {people.slice(0, 3).map(([id, lvl]) => (
+                          <Pill key={id} tone={lvl === "manage" ? "primary" : "neutral"}>{nameOf(id)} · {lvl === "manage" ? "quản lý" : "dùng"}</Pill>
+                        ))}
+                        {people.length > 3 && <span className="flex-none text-paragraph-xs text-text-soft-400">+{people.length - 3}</span>}
+                      </>}
+                  </div>
+                  <div className="min-w-0 truncate text-paragraph-xs text-text-soft-400">
+                    {f.local ? "Máy này" : f.createdBy?.role === "manager" ? f.createdBy.name : f.createdBy ? "Quản trị" : "—"}
+                  </div>
+                  <div className="flex justify-end gap-1">
+                    <Button variant="neutral" mode="stroke" size="xsmall" className="w-[72px] flex-none" onClick={() => setSharing(f.name)}>Chia sẻ</Button>
+                    <Button
+                      variant="neutral"
+                      mode="stroke"
+                      size="xsmall"
+                      onlyIcon
+                      title="Thêm thao tác"
+                      leftIcon={<MoreIcon className="size-4" />}
+                      onClick={(e) => { e.stopPropagation(); ctx.open(e, menu); }}
+                    />
                   </div>
                 </div>
               );
             })}
             {filtered.length > limit && (
-              <div className="flex justify-center px-5 py-3">
+              <div className="flex justify-center border-t border-stroke-soft-200 px-5 py-3">
                 <Button variant="neutral" mode="stroke" size="xsmall" onClick={() => setLimit(limit + 50)}>
                   Hiện thêm 50 (còn {filtered.length - limit})
                 </Button>
               </div>
             )}
-          </Section>
+          </div>
         )}
 
         {canShare(role, configured) && trash.length > 0 && (
@@ -224,6 +260,7 @@ export function FoldersPage() {
       </div>
 
       {sharing && <ShareFolderModal folder={sharing} onClose={() => { setSharing(null); load(); }} />}
+      {ctx.node}
     </section>
   );
 }

@@ -136,6 +136,23 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* Folders table: name · profiles · shared with · made by · actions */
+.f-cols {
+  display: grid;
+  column-gap: 16px;
+  padding: 0 16px;
+  min-height: 52px;
+  align-items: center;
+  grid-template-columns: minmax(200px, 1.4fr) 64px minmax(240px, 2fr) minmax(90px, 0.6fr) 112px;
+}
+.f-cols.f-head {
+  min-height: 36px;
+}
+.f-cols > .cell-count {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
 /* Proxy bulk-importer preview rows: check · type · host · status · action */
 .import-cols {
   display: grid;
