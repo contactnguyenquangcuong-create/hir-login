@@ -103,8 +103,14 @@ impl Tracker {
             });
         }
         tokio::spawn(async move {
-            tokio::select! {
-                _ = child.wait() => {}
+            // How it ended, for the close line in the sync log: "a profile closes by itself" could
+            // not be told apart from a person closing it, or from the app stopping it.
+            let how: String = tokio::select! {
+                st = child.wait() => match st.ok().and_then(|s| s.code()) {
+                    Some(0) => "the browser closed (its window was closed, or it quit)".to_string(),
+                    Some(c) => format!("the browser exited by itself with code {c} (0x{:08X}) — a crash, not a close", c as u32),
+                    None => "the browser ended without an exit code".to_string(),
+                },
                 _ = rx.recv() => {
                     #[cfg(unix)]
                     {
@@ -135,8 +141,9 @@ impl Tracker {
                         let _ = child.kill().await;
                         let _ = child.wait().await;
                     }
+                    "stopped from the app (the Stop button, an automation run or the API)".to_string()
                 }
-            }
+            };
             // From here until the close has been saved, the profile counts as "being saved".
             closing_begin(&profile_id);
             if let Ok(mut g) = Self::shared().inner.lock() {
@@ -154,7 +161,7 @@ impl Tracker {
                     crate::cloud_sync::force_repull();
                 }
                 let _ = crate::cookies::snapshot(&profile_id);
-                crate::cloud_sync::log_line(&format!("close {profile_id}: ran {} s — {}", started_at.elapsed().as_secs(), crate::cookies::census(&profile_id)));
+                crate::cloud_sync::log_line(&format!("close {profile_id}: ran {} s, {how} — {}", started_at.elapsed().as_secs(), crate::cookies::census(&profile_id)));
             }
             // Bump the persisted total runtime; non-temporary only (temp
             // profiles get deleted next line so their counter is moot).
@@ -231,6 +238,30 @@ impl Tracker {
         }
     }
 
+    /// Whether some browser has this profile's data open right now — this app's, or one started
+    /// by another copy of the app on the same machine, which this tracker knows nothing about.
+    /// Chromium holds `lockfile` in the user-data folder for as long as it runs (Windows), or
+    /// leaves a `SingletonLock` link (macOS / Linux).
+    pub fn user_data_in_use(udd: &std::path::Path) -> bool {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            let lock = udd.join("lockfile");
+            if !lock.exists() {
+                return false;
+            }
+            // Opened with no sharing: refused (32 / 33) while the browser holds it.
+            match std::fs::OpenOptions::new().read(true).write(true).share_mode(0).open(&lock) {
+                Ok(_) => false,
+                Err(e) => matches!(e.raw_os_error(), Some(32) | Some(33)),
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            std::fs::symlink_metadata(udd.join("SingletonLock")).is_ok()
+        }
+    }
+
     pub fn shared() -> &'static Tracker {
         static INSTANCE: std::sync::OnceLock<Tracker> = std::sync::OnceLock::new();
         INSTANCE.get_or_init(Tracker::new)
@@ -246,4 +277,28 @@ pub struct RunningProfile {
     /// Milliseconds since the engine was spawned; frontend formats as
     /// "1h 23m" / "12m 30s" / "45s".
     pub uptime_ms: u64,
+}
+
+#[cfg(test)]
+mod in_use_tests {
+    use super::*;
+
+    /// A profile folder whose `lockfile` a browser holds is in use; with no lockfile, or one
+    /// nobody holds (left behind by a browser that crashed), it is not.
+    #[cfg(windows)]
+    #[test]
+    fn a_held_lockfile_means_a_browser_has_the_profile_open() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = std::env::temp_dir().join(format!("hir-inuse-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!Tracker::user_data_in_use(&dir), "no lockfile: not in use");
+        let lock = dir.join("lockfile");
+        std::fs::write(&lock, b"").unwrap();
+        assert!(!Tracker::user_data_in_use(&dir), "a lockfile nobody holds: not in use");
+        let held = std::fs::OpenOptions::new().read(true).write(true).share_mode(0).open(&lock).unwrap();
+        assert!(Tracker::user_data_in_use(&dir), "held the way the browser holds it: in use");
+        drop(held);
+        assert!(!Tracker::user_data_in_use(&dir), "released: not in use");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

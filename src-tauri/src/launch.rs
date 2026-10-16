@@ -84,6 +84,14 @@ pub async fn launch_profile_synced(
     let t_start = std::time::Instant::now();
     // A team profile is not opened by a machine that is no longer in the team.
     crate::cloud_sync::ensure_access(profile_id)?;
+    // Already open in a browser this app did not start (another copy of the app on this machine):
+    // a second one on the same data would hand over to it and close at once, and the sync below
+    // would write over the files of the one that is open.
+    if !Tracker::shared().is_running(profile_id)
+        && Tracker::user_data_in_use(&profile::user_data_dir(profile_id)?)
+    {
+        anyhow::bail!("profile này đang mở trong một cửa sổ Hir-Login khác trên máy này — đóng nó ở đó trước");
+    }
     crate::cloud_sync::checkout(profile_id).await?;
     let t_sync = t_start.elapsed();
     let bin = resolve_binary()?;

@@ -2103,6 +2103,10 @@ async fn stays_personal(base: &str, token: &str, id: &str) -> bool {
 /// else's now (its folder was not shared with this person, or no longer is). The copy here goes to
 /// the trash — kept there a week, the team's copy untouched — and the machine forgets it.
 fn lost_access(id: &str) {
+    // Never from under a browser that has it open (another copy of the app may have started it).
+    if store::user_data_root().map(|r| crate::process::Tracker::user_data_in_use(&r.join(id))).unwrap_or(false) {
+        return;
+    }
     if let Ok(mut set) = sync_trashing().lock() {
         set.insert(id.to_string());
     }
@@ -2184,6 +2188,13 @@ async fn pull_profile(base: &str, token: &str, id: &str) -> Result<bool> {
         anyhow::bail!("download rejected: {}", resp.status());
     }
     let bytes = resp.bytes().await.context("read bundle")?;
+    // A browser has this profile open — started by another copy of the app on this machine, which
+    // the running-check before this call cannot see. Writing the team's copy over its files under
+    // it tore the session out of a browser in use (it closed, or came back logged out).
+    if store::user_data_root().map(|r| crate::process::Tracker::user_data_in_use(&r.join(id))).unwrap_or(false) {
+        slog!("{id}: open in a browser on this machine — the team's newer copy is taken after it closes");
+        return Ok(false);
+    }
     apply_bundle(id, &bytes)?;
     Ok(true)
 }
