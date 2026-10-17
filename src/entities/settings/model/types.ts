@@ -6,6 +6,8 @@ export type Settings = {
   api_enabled?: boolean;
   api_port?: number;
   api_secret?: string;
+  /** Let the HirS tool use the API (it sends `X-Hir-Client: HirS`). Off by default. */
+  hirs_allowed?: boolean;
   /** Shard Helper: offer to fill forms a generated identity fits. */
   helper_enabled?: boolean;
   /** Which field kinds it reacts to. Empty means all of them. */

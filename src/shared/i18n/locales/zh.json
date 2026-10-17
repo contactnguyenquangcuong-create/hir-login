@@ -1296,6 +1296,8 @@
   "settings.apiEnableLabel": "启用 API 服务器",
   "settings.apiHelp1": "用于脚本调用的本地 HTTP API（axum）——创建、启动、关闭配置，并获取 CDP WebSocket 地址。仅绑定 ",
   "settings.apiHelp2": " ，使用 JWT Bearer 认证。启用开关和端口的改动在重启应用后生效。",
+  "settings.hirsAllowLabel": "允许 HirS 连接",
+  "settings.hirsAllowHint": "仅在开启时，HirS 才能在此创建、打开和编辑配置文件。还需要开启 API 服务器并激活密钥。",
   "settings.apiPortLabel": "端口",
   "settings.apiRefLink": "完整 API 参考 →",
   "settings.apiRegenerateBtn": "重新生成令牌",

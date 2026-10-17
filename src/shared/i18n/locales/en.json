@@ -1296,6 +1296,8 @@
   "settings.apiEnableLabel": "Enable API server",
   "settings.apiHelp1": "Local HTTP API (axum) for scripting — create/launch/close profiles and get a CDP WebSocket URL. Binds ",
   "settings.apiHelp2": " only, JWT Bearer auth. Changes to enable/port apply after restarting the app.",
+  "settings.hirsAllowLabel": "Allow HirS to connect",
+  "settings.hirsAllowHint": "HirS can create, open and edit profiles here only while this is on. It also needs the API server on and an activated key.",
   "settings.apiPortLabel": "Port",
   "settings.apiRefLink": "Full API reference →",
   "settings.apiRegenerateBtn": "Regenerate token",

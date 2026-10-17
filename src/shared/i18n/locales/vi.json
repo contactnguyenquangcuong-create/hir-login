@@ -1296,6 +1296,8 @@
   "settings.apiEnableLabel": "Bật API server",
   "settings.apiHelp1": "API HTTP nội bộ (axum) để viết script — tạo/khởi chạy/đóng profile và lấy URL WebSocket CDP. Chỉ bind vào ",
   "settings.apiHelp2": ", xác thực bằng JWT Bearer. Thay đổi bật/tắt hoặc đổi port sẽ áp dụng sau khi khởi động lại app.",
+  "settings.hirsAllowLabel": "Cho phép HirS kết nối",
+  "settings.hirsAllowHint": "Chỉ khi bật, HirS mới tạo, mở và sửa được profile trên máy này. Cần thêm API server đang bật và key đã kích hoạt.",
   "settings.apiPortLabel": "Port",
   "settings.apiRefLink": "Xem đầy đủ tài liệu API →",
   "settings.apiRegenerateBtn": "Tạo token mới",

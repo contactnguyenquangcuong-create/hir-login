@@ -124,8 +124,43 @@ async fn license_gate(req: Request, next: Next) -> Response {
     if crate::license::allowed().await {
         next.run(req).await
     } else {
-        (StatusCode::FORBIDDEN, Json(json!({ "error": "license_required" }))).into_response()
+        (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "license_required",
+                "message": "Hir-Login chưa kích hoạt key. Mở Hir-Login và nhập key HLG- để tiếp tục.",
+            })),
+        )
+            .into_response()
     }
+}
+
+/// The HirS tool marks its requests `X-Hir-Client: HirS`, and gets nothing
+/// until the operator switches "Cho phép HirS kết nối" on in Settings. Read
+/// from the file on every request, so the switch takes effect at once.
+async fn hirs_gate(req: Request, next: Next) -> Response {
+    if is_hirs(&req) && !hirs_allowed() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "error": "hirs_not_allowed",
+                "message": "Hir-Login chưa cho phép HirS kết nối. Mở Hir-Login → Cài đặt → Nâng cao → bật \"Cho phép HirS kết nối\".",
+            })),
+        )
+            .into_response();
+    }
+    next.run(req).await
+}
+
+fn is_hirs(req: &Request) -> bool {
+    req.headers()
+        .get("x-hir-client")
+        .and_then(|h| h.to_str().ok())
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("hirs"))
+}
+
+fn hirs_allowed() -> bool {
+    crate::settings::load().map(|s| s.hirs_allowed).unwrap_or(false)
 }
 
 // ---- handlers ----
@@ -135,6 +170,7 @@ async fn health() -> Json<Value> {
         "ok": true,
         "name": "hir-login",
         "version": env!("CARGO_PKG_VERSION"),
+        "hirs_allowed": hirs_allowed(),
     }))
 }
 
@@ -1121,7 +1157,9 @@ fn router() -> Router {
         .route("/automation/runs", get(list_runs))
         .route("/automation/modules", get(list_modules).post(install_module))
         .route("/automation/modules/:id", delete(remove_module))
-        // Added first, so it runs second: no token is a 401 before any key check.
+        // Layers run last-added first: token (401), then key (license_required),
+        // then whether HirS is let in (hirs_not_allowed).
+        .route_layer(middleware::from_fn(hirs_gate))
         .route_layer(middleware::from_fn(license_gate))
         .route_layer(middleware::from_fn(auth));
 
@@ -1185,6 +1223,7 @@ mod tests {
         let body = axum::body::to_bytes(res.into_body(), 1 << 16).await.unwrap();
         let v: Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["error"], "license_required");
+        assert!(v["message"].as_str().is_some_and(|m| m.contains("HLG-")), "a sentence the user can read");
 
         // No token still says 401, not 403: the key check comes after auth.
         let anon = Request::builder().uri("/running").body(Body::empty()).unwrap();
@@ -1196,6 +1235,18 @@ mod tests {
         crate::license::set_verdict_for_test(true);
         let res = router().oneshot(get("/running")).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    /// Only a request that says it is HirS is turned away by the switch; any
+    /// other client with the same token goes through.
+    #[tokio::test]
+    async fn hirs_is_refused_while_the_switch_is_off() {
+        let ok = |req: &Request<Body>| is_hirs(req);
+        let with = |v: &str| Request::builder().uri("/running").header("X-Hir-Client", v).body(Body::empty()).unwrap();
+        assert!(ok(&with("HirS")));
+        assert!(ok(&with(" hirs ")));
+        assert!(!ok(&with("mcp")));
+        assert!(!ok(&Request::builder().uri("/running").body(Body::empty()).unwrap()));
     }
 
     /// `/health` is the one route that stays open, for probing before a token.

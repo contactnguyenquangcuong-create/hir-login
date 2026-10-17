@@ -52,6 +52,11 @@ pub struct Settings {
     /// (see `ensure_secret`); rotating it invalidates issued tokens.
     #[serde(default)]
     pub api_secret: String,
+    /// Whether the HirS tool (the Shopee video tool) may use this API. HirS
+    /// says who it is with `X-Hir-Client: HirS`; off by default, so a machine
+    /// only lends its profiles to HirS once its owner has switched this on.
+    #[serde(default)]
+    pub hirs_allowed: bool,
 
     // ---- Team profile sync (self-hosted server, see cloud_sync.rs) ----
     #[serde(default)]
@@ -159,6 +164,7 @@ fn defaults() -> Settings {
         api_enabled: default_api_enabled(),
         api_port: default_api_port(),
         api_secret: String::new(),
+        hirs_allowed: false,
         sync: SyncConfig::default(),
         server_host: ServerHostConfig::default(),
     }

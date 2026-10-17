@@ -290,6 +290,9 @@ export function SettingsPage() {
               <Row label={t("settings.apiEnableLabel")}>
                 <div className="sm:flex sm:justify-end"><Switch checked={s.api_enabled ?? true} onChange={(c) => setS({ ...s, api_enabled: c })} /></div>
               </Row>
+              <Row label={t("settings.hirsAllowLabel")} hint={t("settings.hirsAllowHint")}>
+                <div className="sm:flex sm:justify-end"><Switch checked={s.hirs_allowed ?? false} onChange={(c) => setS({ ...s, hirs_allowed: c })} /></div>
+              </Row>
               <Row label={t("settings.apiPortLabel")}>
                 <Input inputSize="small" type="number" value={s.api_port ?? 40325} onChange={(e) => setS({ ...s, api_port: Number(e.target.value) || 40325 })} />
               </Row>
