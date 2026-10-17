@@ -100,7 +100,18 @@ fn activation_path() -> Result<std::path::PathBuf> {
 
 /// A stable per-machine id derived from hardware, not the raw serial —
 /// hashed so nothing identifying leaves the device other than an opaque tag.
+/// Read once per run: on Windows it costs a `reg` process, and the API gate
+/// asks for it far more often than the machine changes.
 pub fn device_id() -> Result<String> {
+    static ID: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    if let Some(id) = ID.get() {
+        return Ok(id.clone());
+    }
+    let id = compute_device_id()?;
+    Ok(ID.get_or_init(|| id).clone())
+}
+
+fn compute_device_id() -> Result<String> {
     let raw = raw_hardware_id()?;
     let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
     sha2::Digest::update(&mut hasher, b"hir-login-device-v1:");
@@ -226,6 +237,12 @@ fn locally_valid(rec: &ActivationRecord) -> bool {
 /// when the last good check is older than `RECHECK_SECS`; a network failure
 /// keeps the local verdict (offline grace), a refusal invalidates it.
 pub async fn check() -> bool {
+    let ok = check_uncached().await;
+    remember(ok);
+    ok
+}
+
+async fn check_uncached() -> bool {
     let Some(rec) = local_record() else { return false };
     if is_legacy(&rec) {
         return true;
@@ -243,6 +260,39 @@ pub async fn check() -> bool {
         }
         Err(_) => locally_valid(&rec),
     }
+}
+
+/// How long the API gate trusts the last verdict before asking `check` again.
+/// `check` itself only reaches the server every `RECHECK_SECS`; this keeps a
+/// burst of API calls from re-reading the record for each one.
+const GATE_CACHE_SECS: u64 = 300;
+
+fn verdict_cell() -> &'static std::sync::Mutex<Option<(u64, bool)>> {
+    static CELL: std::sync::OnceLock<std::sync::Mutex<Option<(u64, bool)>>> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn remember(ok: bool) {
+    if let Ok(mut g) = verdict_cell().lock() {
+        *g = Some((now_secs(), ok));
+    }
+}
+
+/// Whether the automation API may answer: the same verdict as the app's own
+/// gate, at most `GATE_CACHE_SECS` old. A refusal is re-checked as soon as it
+/// is stale, so a key activated in the UI opens the API within that time —
+/// and at once, since `activate` records its success here.
+pub async fn allowed() -> bool {
+    let cached = verdict_cell().lock().ok().and_then(|g| *g);
+    match cached {
+        Some((at, ok)) if now_secs().saturating_sub(at) < GATE_CACHE_SECS => ok,
+        _ => check().await,
+    }
+}
+
+#[cfg(test)]
+pub fn set_verdict_for_test(ok: bool) {
+    remember(ok);
 }
 
 /// For the Settings page and the gate. None before activation, or if the
@@ -376,6 +426,7 @@ pub async fn activate(key: &str) -> Result<()> {
         anyhow::bail!(friendly_error(r.loi.as_deref().unwrap_or("")));
     }
     apply_result(rec, &r)?;
+    remember(true);
     Ok(())
 }
 

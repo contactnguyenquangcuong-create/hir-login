@@ -116,6 +116,18 @@ async fn auth(req: Request, next: Next) -> Result<Response, StatusCode> {
     }
 }
 
+/// Hir-Login without a valid HLG- key is locked in the UI; the API is the
+/// same app, so it answers nothing either. A JSON code rather than a bare
+/// status, so a client (HirS, MCP) can say "activate Hir-Login" instead of
+/// "something failed".
+async fn license_gate(req: Request, next: Next) -> Response {
+    if crate::license::allowed().await {
+        next.run(req).await
+    } else {
+        (StatusCode::FORBIDDEN, Json(json!({ "error": "license_required" }))).into_response()
+    }
+}
+
 // ---- handlers ----
 
 async fn health() -> Json<Value> {
@@ -1109,6 +1121,8 @@ fn router() -> Router {
         .route("/automation/runs", get(list_runs))
         .route("/automation/modules", get(list_modules).post(install_module))
         .route("/automation/modules/:id", delete(remove_module))
+        // Added first, so it runs second: no token is a 401 before any key check.
+        .route_layer(middleware::from_fn(license_gate))
         .route_layer(middleware::from_fn(auth));
 
     Router::new().route("/health", get(health)).merge(protected)
@@ -1148,6 +1162,40 @@ mod tests {
                 "{method} {path} answered without a token"
             );
         }
+    }
+
+    /// With a token but no activated key, every route answers the one code a
+    /// client can act on; with the key, the same request goes through. One
+    /// test for both, since the verdict is process-wide.
+    #[tokio::test]
+    async fn a_token_alone_is_not_enough_without_a_key() {
+        set_secret("gate-test-secret");
+        let token = mint("gate-test-secret", 60).unwrap();
+        let get = |path: &str| {
+            Request::builder()
+                .uri(path)
+                .header(AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap()
+        };
+
+        crate::license::set_verdict_for_test(false);
+        let res = router().oneshot(get("/running")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let body = axum::body::to_bytes(res.into_body(), 1 << 16).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["error"], "license_required");
+
+        // No token still says 401, not 403: the key check comes after auth.
+        let anon = Request::builder().uri("/running").body(Body::empty()).unwrap();
+        assert_eq!(router().oneshot(anon).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        // And /health stays open either way.
+        let health = Request::builder().uri("/health").body(Body::empty()).unwrap();
+        assert_eq!(router().oneshot(health).await.unwrap().status(), StatusCode::OK);
+
+        crate::license::set_verdict_for_test(true);
+        let res = router().oneshot(get("/running")).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
     }
 
     /// `/health` is the one route that stays open, for probing before a token.
