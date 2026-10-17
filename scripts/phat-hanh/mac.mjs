@@ -32,16 +32,24 @@ if (!process.argv.includes('--yes')) {
 }
 
 const pushedAt = Date.now();
-execFileSync('git', ['push', 'origin', 'main', tag], { cwd: ROOT, stdio: 'inherit' });
-console.log(`Đã đẩy ${tag}. Chờ GitHub build bản Mac (thường 10–20 phút)…`);
+const onGitHub = out('git', ['ls-remote', '--tags', 'origin', 'refs/tags/' + tag]) !== '';
+execFileSync('git', ['push', 'origin', 'main'], { cwd: ROOT, stdio: 'inherit' });
+if (onGitHub) {
+  // A tag pushed before starts nothing a second time: ask GitHub to run the Mac build for it.
+  const GH = process.platform === 'win32' ? 'C:\\Program Files\\GitHub CLI\\gh.exe' : 'gh';
+  execFileSync(GH, ['workflow', 'run', 'release-mac.yml', '-R', REPO, '--ref', 'main', '-f', 'tag=' + tag], { cwd: ROOT, stdio: 'inherit' });
+} else {
+  execFileSync('git', ['push', 'origin', tag], { cwd: ROOT, stdio: 'inherit' });
+}
+console.log(`Đã gửi ${tag} cho GitHub. Chờ build bản Mac (thường 10–20 phút)…`);
 
-// Find the run the push started, then wait for it.
+// Find the run that started, then wait for it.
 const gh = (p) => fetch(`https://api.github.com/repos/${REPO}${p}`, { headers: { 'user-agent': 'hir-login-release' } }).then((r) => r.json());
 let run = null;
 for (let i = 0; i < 40 && !run; i++) {
   await sleep(15000);
   const runs = (await gh('/actions/runs?per_page=10')).workflow_runs || [];
-  run = runs.find((r) => r.name === 'Release Mac' && r.head_branch === tag && Date.parse(r.created_at) >= pushedAt - 60000);
+  run = runs.find((r) => r.name === 'Release Mac' && Date.parse(r.created_at) >= pushedAt - 60000);
 }
 if (!run) throw new Error('Không thấy lượt build Mac trên GitHub — xem tab Actions của repo');
 console.log('Lượt build: ' + run.html_url);
