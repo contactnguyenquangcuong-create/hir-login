@@ -187,6 +187,43 @@ pub fn activity() -> SyncActivity {
     SyncActivity { busy, generation: GENERATION.load(Ordering::Relaxed), elsewhere }
 }
 
+/// How this machine's last close of a profile went with the team, for the local API:
+/// "none" (no team sync here), "pending" (its close is still being saved), "failed" (the last
+/// close never reached the server — the next close sends it again) or "ok".
+pub fn close_sync_state(profile_id: &str) -> &'static str {
+    CloseSync::now().of(profile_id)
+}
+
+/// The facts `close_sync_state` needs, read once — a profile list asks for every profile.
+pub struct CloseSync {
+    team: bool,
+    busy: std::collections::HashSet<String>,
+    failed: std::collections::HashSet<String>,
+}
+
+impl CloseSync {
+    pub fn now() -> Self {
+        let team = matches!(active_config(), Ok(Some(_)));
+        let mut busy: std::collections::HashSet<String> =
+            busy_map().lock().map(|m| m.keys().cloned().collect()).unwrap_or_default();
+        busy.extend(crate::process::closing_ids());
+        let failed = if team { load_state().pending } else { Default::default() };
+        CloseSync { team, busy, failed }
+    }
+
+    pub fn of(&self, profile_id: &str) -> &'static str {
+        if !self.team {
+            "none"
+        } else if self.busy.contains(profile_id) {
+            "pending"
+        } else if self.failed.contains(profile_id) {
+            "failed"
+        } else {
+            "ok"
+        }
+    }
+}
+
 /// Asks the team who has which profile open, every few seconds, so a profile another machine has
 /// open (or is still saving) shows as such here and its start button is not offered. A light
 /// request: only the held profiles come back.

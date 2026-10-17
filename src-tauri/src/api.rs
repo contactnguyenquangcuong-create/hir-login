@@ -183,6 +183,7 @@ async fn list_profiles() -> ApiResult {
     // client can grey those out instead of finding out from a refused /start.
     let elsewhere: std::collections::HashMap<String, crate::cloud_sync::ElsewhereLock> =
         crate::cloud_sync::activity().elsewhere.into_iter().map(|l| (l.id.clone(), l)).collect();
+    let close_sync = crate::cloud_sync::CloseSync::now();
     let out: Vec<Value> = metas
         .into_iter()
         .map(|m| {
@@ -202,6 +203,8 @@ async fn list_profiles() -> ApiResult {
                 "pid": r.map(|x| x.pid),
                 "cdp": r.and_then(|x| x.cdp.clone()),
                 "in_use_elsewhere": elsewhere.get(&m.id).map(|l| json!({ "by": l.by, "saving": l.saving })),
+                // This machine's last close of it, with the team: ok | pending | failed | none.
+                "sync": close_sync.of(&m.id),
             })
         })
         .collect();
@@ -645,12 +648,15 @@ async fn start_profile(Path(id): Path<String>, body: Option<Json<StartReq>>) -> 
     .into_response()
 }
 
+/// Answers once the browser has gone and its close has been saved to the team (or after 15 s);
+/// `sync` says how that went: "ok" | "pending" (still uploading — poll /profiles `sync`) |
+/// "failed" (the close did not reach the team; the next close sends it again) | "none" (no team).
 async fn stop_profile(Path(id): Path<String>) -> ApiResult {
     let stopped = crate::process::Tracker::shared()
         .kill(&id)
         .await
         .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(json!({ "profile_id": id, "stopped": stopped })))
+    Ok(Json(json!({ "profile_id": id, "stopped": stopped, "sync": crate::cloud_sync::close_sync_state(&id) })))
 }
 
 async fn export_cookies(Path(id): Path<String>) -> ApiResult {
