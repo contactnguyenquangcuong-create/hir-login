@@ -2297,7 +2297,9 @@ pub async fn sync_round() -> Result<usize> {
     for (n, r) in remote.iter().enumerate() {
         emit_progress(n, total);
         let id = r.id.as_str();
-        if crate::process::Tracker::shared().is_running(id) {
+        // Open, or closed a moment ago and still being saved by its own close: that close
+        // sends it; this round would only send it a second time.
+        if crate::process::Tracker::shared().is_running(id) || crate::process::is_closing(id) {
             continue;
         }
         if r.locked && r.holder.as_deref() != Some(holder.as_str()) {
@@ -2364,7 +2366,10 @@ pub async fn sync_round() -> Result<usize> {
 
         // A profile whose last close never reached the server holds the newer
         // copy (a fresh login): send it up rather than pulling the older one over it.
-        let unsaved = state.pending.contains(id);
+        // The state this round started from can be older than a close that has finished saving
+        // since (a close marks the profile before uploading and clears the mark after), which
+        // sent the profile up a second time and logged "its last close was not saved": look again.
+        let unsaved = state.pending.contains(id) && load_state().pending.contains(id);
         if !unsaved && r.updated_at.as_deref().is_some_and(|u| u != known.remote) {
             slog!("round: {id} changed on the server (by {}, {} → {}) — taking it", r.updated_by.as_deref().unwrap_or("?"), known.remote, r.updated_at.as_deref().unwrap_or("?"));
             match pull_profile(&base, &token, id).await {
