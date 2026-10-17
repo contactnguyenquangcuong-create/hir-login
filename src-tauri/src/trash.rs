@@ -61,6 +61,17 @@ fn paths_for(id: &str) -> Result<(PathBuf, PathBuf)> {
 /// Archive the profile, then delete the original. The archive holds the
 /// profile JSON verbatim plus the kept user-data files under `user-data/`.
 pub fn move_to_trash(id: &str) -> Result<TrashEntry> {
+    // An open browser still writes its cookie and session files: archiving them
+    // then gives a broken copy, and deleting the folder under it leaves a browser
+    // running a profile that no longer exists (and a restore that cannot write).
+    let open = crate::process::Tracker::shared().is_running(id)
+        || crate::process::is_closing(id)
+        || store::user_data_root()
+            .map(|r| crate::process::Tracker::user_data_in_use(&r.join(id)))
+            .unwrap_or(false);
+    if open {
+        anyhow::bail!("Profile đang mở — đóng trình duyệt của nó rồi hãy xoá.");
+    }
     let stored = profile::load_raw(id)?;
     let (zip_path, meta_path) = paths_for(id)?;
 

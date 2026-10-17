@@ -41,6 +41,31 @@ pub fn closing_ids() -> Vec<String> {
     closing_set().lock().map(|s| s.iter().cloned().collect()).unwrap_or_default()
 }
 
+/// Whether this profile's close is still being saved.
+pub fn is_closing(id: &str) -> bool {
+    closing_set().lock().map(|s| s.contains(id)).unwrap_or(false)
+}
+
+/// Ask a browser to quit through its DevTools endpoint (`Browser.close`). True
+/// once the browser has taken the request; false if it could not be reached in
+/// 2 s, and the caller falls back to WM_CLOSE / SIGTERM.
+async fn cdp_browser_close(ws_url: &str) -> bool {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let attempt = async {
+        let (mut ws, _) = tokio_tungstenite::connect_async(ws_url).await.ok()?;
+        ws.send(Message::Text(r#"{"id":1,"method":"Browser.close"}"#.into())).await.ok()?;
+        // The reply, or the socket dropping as the browser goes, means it is on its way out.
+        let _ = ws.next().await;
+        Some(())
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(2), attempt)
+        .await
+        .ok()
+        .flatten()
+        .is_some()
+}
+
 pub(crate) fn closing_begin(id: &str) {
     if let Ok(mut s) = closing_set().lock() {
         s.insert(id.to_string());
@@ -112,15 +137,23 @@ impl Tracker {
                     None => "the browser ended without an exit code".to_string(),
                 },
                 _ = rx.recv() => {
+                    // A browser with a DevTools endpoint is asked to quit through it: the
+                    // same orderly shutdown as closing its last window, and the only one a
+                    // headless browser hears — it has no window for WM_CLOSE, so every stop
+                    // used to sit out the full 5 s below before the hard kill.
+                    let closed_by_cdp = match Self::shared().cdp(&profile_id) {
+                        Some(c) => cdp_browser_close(&c.web_socket_debugger_url).await,
+                        None => false,
+                    };
                     #[cfg(unix)]
-                    {
+                    if !closed_by_cdp {
                         if let Some(p) = child.id() {
                             // SAFETY: libc::kill on a child pid we own.
                             unsafe { libc::kill(p as libc::pid_t, libc::SIGTERM); }
                         }
                     }
                     #[cfg(windows)]
-                    {
+                    if !closed_by_cdp {
                         use std::os::windows::process::CommandExt;
                         if let Some(p) = child.id() {
                             // taskkill /PID without /F posts WM_CLOSE for clean shutdown.
@@ -225,17 +258,21 @@ impl Tracker {
             .collect()
     }
 
+    /// Stops the profile's browser and answers once it has really gone and its
+    /// close is saved (at most 15 s), so "stop, then delete / restart / copy" never
+    /// races a browser that still holds its files.
     pub async fn kill(&self, profile_id: &str) -> Result<bool> {
         let killer = {
             let g = self.inner.lock().unwrap();
             g.get(profile_id).map(|e| e.killer.clone())
         };
-        if let Some(k) = killer {
-            let _ = k.send(()).await;
-            Ok(true)
-        } else {
-            Ok(false)
+        let Some(k) = killer else { return Ok(false) };
+        let _ = k.send(()).await;
+        let until = Instant::now() + std::time::Duration::from_secs(15);
+        while Instant::now() < until && (self.is_running(profile_id) || is_closing(profile_id)) {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
+        Ok(true)
     }
 
     /// Whether some browser has this profile's data open right now — this app's, or one started

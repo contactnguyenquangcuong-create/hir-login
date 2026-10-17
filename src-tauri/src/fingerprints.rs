@@ -88,6 +88,35 @@ fn read_entry(path: &PathBuf) -> Result<Option<LibraryEntry>> {
     Ok(None)
 }
 
+/// `list_all`'s last answer and the folder state it was read from.
+struct ListCache {
+    dir: PathBuf,
+    stamp: u64,
+    entries: Vec<LibraryEntry>,
+}
+
+fn list_cache() -> &'static std::sync::Mutex<Option<ListCache>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<Option<ListCache>>> = std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Name, size and modification time of every file in the folder, hashed —
+/// directory metadata only, no file is opened. Any import, delete, hand
+/// edit or file dropped in changes it.
+fn folder_stamp(dir: &Path) -> Result<u64> {
+    use std::hash::{Hash, Hasher};
+    let mut rows = Vec::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let md = entry.metadata()?;
+        rows.push((entry.file_name(), md.len(), md.modified().ok()));
+    }
+    rows.sort();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    rows.hash(&mut h);
+    Ok(h.finish())
+}
+
 pub fn list_all() -> Result<Vec<LibraryEntry>> {
     // Pure filesystem read.  Everything in
     //   $CONFIG/hir-login/fingerprints/*.json
@@ -100,7 +129,17 @@ pub fn list_all() -> Result<Vec<LibraryEntry>> {
     // full FingerprintConfig over IPC on every list call makes the UI
     // visibly lag. Callers that need the payload for one entry (GPU
     // pick, profile save) fetch it with `get(id)` instead.
+    //
+    // Parsing every file (1200+, ~17 MB) took most of a second, and this runs
+    // for each new profile and each /fingerprint/new — so the result is kept
+    // and reused while the folder's stamp is unchanged.
     let dir = store::fingerprints_dir()?;
+    let stamp = folder_stamp(&dir)?;
+    if let Ok(g) = list_cache().lock() {
+        if let Some(c) = g.as_ref().filter(|c| c.stamp == stamp && c.dir == dir) {
+            return Ok(c.entries.clone());
+        }
+    }
     let mut out = Vec::new();
     for entry in fs::read_dir(&dir)? {
         let entry = entry?;
@@ -110,6 +149,9 @@ pub fn list_all() -> Result<Vec<LibraryEntry>> {
         }
     }
     out.sort_by(|a, b| a.label.cmp(&b.label));
+    if let Ok(mut g) = list_cache().lock() {
+        *g = Some(ListCache { dir, stamp, entries: out.clone() });
+    }
     Ok(out)
 }
 

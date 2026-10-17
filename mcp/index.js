@@ -197,6 +197,28 @@ async function glide(m, page, target) {
   return r?.durationMs ?? 0;
 }
 
+// Motion.enterText answers once the last key is released, which can be a beat
+// before the page has handled that key — a read straight after then misses the
+// last character. Wait (up to 1.5 s) until the focused field ends with what was
+// typed; a page with no editable field focused has nothing to wait for.
+async function settleTyped(page, typed) {
+  if (!typed) return;
+  await page
+    .waitForFunction(
+      (t) => {
+        const el = document.activeElement;
+        if (!el) return true;
+        const editable = "value" in el || el.isContentEditable;
+        if (!editable) return true;
+        const v = "value" in el ? el.value : el.textContent;
+        return typeof v === "string" && v.endsWith(t);
+      },
+      typed,
+      { timeout: 1500, polling: 25 },
+    )
+    .catch(() => {});
+}
+
 // ---------- helpers ----------
 
 const text = (v) => ({
@@ -1338,6 +1360,7 @@ server.tool(
 );
 
 const mocks = new Map(); // profile_id → Map(pattern → handler)
+const netSessions = new WeakMap(); // Page → CDPSession holding its network emulation
 
 server.tool(
   "browser_mock",
@@ -1447,15 +1470,21 @@ server.tool(
   },
   async ({ profile_id, offline, latency_ms, download_kbps, upload_kbps }) => {
     const page = await pageFor(profile_id);
-    const client = await page.context().newCDPSession(page);
-    await client.send("Network.enable");
+    // Emulation lasts only as long as the CDP session that set it, so the
+    // session is kept open per page — detaching it undid the throttling the
+    // moment this call returned.
+    let client = netSessions.get(page);
+    if (!client) {
+      client = await page.context().newCDPSession(page);
+      await client.send("Network.enable");
+      netSessions.set(page, client);
+    }
     await client.send("Network.emulateNetworkConditions", {
       offline: !!offline,
       latency: latency_ms ?? 0,
       downloadThroughput: download_kbps ? Math.round((download_kbps * 1024) / 8) : -1,
       uploadThroughput: upload_kbps ? Math.round((upload_kbps * 1024) / 8) : -1,
     });
-    await client.detach().catch(() => {});
     return text({ offline: !!offline, latency_ms: latency_ms ?? 0, download_kbps: download_kbps ?? 0, upload_kbps: upload_kbps ?? 0 });
   },
 );
@@ -1555,6 +1584,7 @@ server.tool(
       text: value,
       allowTypos: !!allow_typos,
     });
+    await settleTyped(page, value);
     return text({ typed: value.length, duration_ms: r?.durationMs ?? 0 });
   },
 );
@@ -1595,6 +1625,7 @@ server.tool(
       text: value,
       allowTypos: !!allow_typos,
     });
+    await settleTyped(page, value);
     return text({
       filled: selector,
       at: `${t.x},${t.y}`,

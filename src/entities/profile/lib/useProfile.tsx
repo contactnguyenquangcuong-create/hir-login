@@ -303,7 +303,11 @@ export const useProfile = create<ProfileStore>((set, get) => ({
           next[r.profile_id] = prev[r.profile_id] ?? (now - r.uptime_ms);
         }
         const justExited = Object.keys(prev).some((id) => !(id in next));
-        set({ running: next });
+        // A new object every 2 s redrew everything that reads `running` (the
+        // whole profile table) even with nothing running: only set it on change.
+        const nextIds = Object.keys(next);
+        const unchanged = nextIds.length === Object.keys(prev).length && nextIds.every((id) => prev[id] === next[id]);
+        if (!unchanged) set({ running: next });
         if (justExited) get().reload();
       } catch {}
     };
