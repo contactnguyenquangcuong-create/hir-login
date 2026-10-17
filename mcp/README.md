@@ -1,7 +1,7 @@
-# ShardX MCP server
+# Hir-Login MCP server
 
 An [MCP](https://modelcontextprotocol.io) server that lets an AI client
-(Claude Desktop, Cursor, …) drive the **ShardX Launcher**:
+(Claude Desktop, Cursor, …) drive **Hir-Login**:
 
 - the local automation **HTTP API** — create/edit/launch/close profiles,
   manage proxies, fingerprints, folders and cookies;
@@ -9,14 +9,20 @@ An [MCP](https://modelcontextprotocol.io) server that lets an AI client
   [`patchright`](https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-nodejs)
   (a stealth-patched Playwright) so the automation stays undetected.
 
-Requires **Node ≥ 18**. The app itself does **not** run this server — it
-only downloads the source for you (**Settings → MCP server → Download MCP
-server**, pick a folder). You then install deps and register it with your
-MCP client.
+Requires **Node ≥ 18**. Hir-Login itself does **not** run this server — it
+only writes the source for you (**Settings → MCP server → Download MCP
+server**, pick a folder; the files land in `<folder>/mcp`). You then install
+deps and register it with your MCP client. Downloading again into the same
+folder updates the three files and leaves `node_modules` alone.
 
-### 1. Install deps
+### 1. Turn on the API and copy the token
 
-`connectOverCDP` only *connects* to the already-running ShardX browser, so
+In Hir-Login open **Settings → Automation API**, enable the API server and
+copy the **Base URL** and the **Bearer token**.
+
+### 2. Install deps
+
+`connectOverCDP` only *connects* to the already-running Hir-Login browser, so
 patchright's own Chromium is never needed — install with the browser
 download skipped to keep `node_modules` small:
 
@@ -25,12 +31,19 @@ cd <downloaded>/mcp
 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 PATCHRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install
 ```
 
-### 2. Register with your MCP client (stdio)
+On Windows (PowerShell):
+
+```powershell
+cd <downloaded>\mcp
+$env:PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1; $env:PATCHRIGHT_SKIP_BROWSER_DOWNLOAD=1; npm install
+```
+
+### 3. Register with your MCP client (stdio)
 
 ```json
 {
   "mcpServers": {
-    "shardx": {
+    "hir-login": {
       "command": "node",
       "args": ["/ABSOLUTE/PATH/mcp/index.js"],
       "env": {
@@ -41,6 +54,9 @@ PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 PATCHRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm instal
   }
 }
 ```
+
+On Windows write the path with forward slashes or doubled backslashes, e.g.
+`"C:/Tools/mcp/index.js"`.
 
 ### HTTP mode (optional, self-hosted)
 
@@ -53,10 +69,13 @@ MCP_HTTP_PORT=40326 SHARDX_API=http://127.0.0.1:40325 SHARDX_TOKEN=… node inde
 
 ## Environment
 
+The variable names keep the `SHARDX_` prefix of the upstream project Hir-Login
+is built on, so configs written for it keep working.
+
 | Var             | Default                  | Notes                                               |
 | --------------- | ------------------------ | --------------------------------------------------- |
-| `SHARDX_API`    | `http://127.0.0.1:40325` | Launcher API base URL.                              |
-| `SHARDX_TOKEN`  | —                        | Bearer token (Settings). Required.                  |
+| `SHARDX_API`    | `http://127.0.0.1:40325` | Hir-Login API base URL (Settings → Automation API). |
+| `SHARDX_TOKEN`  | —                        | Bearer token (Settings → Automation API). Required. |
 | `MCP_HTTP_PORT` | — (stdio)                | When set, serve HTTP at `127.0.0.1:<port>/mcp`.     |
 
 ## Tools
@@ -76,7 +95,7 @@ MCP_HTTP_PORT=40326 SHARDX_API=http://127.0.0.1:40325 SHARDX_TOKEN=… node inde
   `stop_profile(id)`, `list_running`
 - `list_proxies`, `add_proxy`, `delete_proxy`
 - `list_extensions`, `add_extension(url | path)`, `delete_extension` — a Web
-  Store link or a bare extension id is enough; the launcher downloads the
+  Store link or a bare extension id is enough; Hir-Login downloads the
   `.crx`. Pass the ids to `create_profile` / `edit_profile` as `extensions`.
 - `list_bookmarks`, `save_bookmark(url, title?, folder?)`, `delete_bookmark` —
   bound to a folder they reach every profile in it on its next launch
@@ -85,7 +104,7 @@ MCP_HTTP_PORT=40326 SHARDX_API=http://127.0.0.1:40325 SHARDX_TOKEN=… node inde
 - `list_fingerprints`, `list_folders`, `rename_folder`, `delete_folder`
 - `export_cookies`, `import_cookies`
 
-**Automation projects** — the projects the launcher's Automation section
+**Automation projects** — the projects Hir-Login's Automation section
 builds. A project drives its own browsers through the Motion domain, so these
 work whether or not a profile is running:
 
