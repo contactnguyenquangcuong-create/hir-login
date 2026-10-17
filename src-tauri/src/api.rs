@@ -179,6 +179,10 @@ async fn list_profiles() -> ApiResult {
     let running = crate::process::Tracker::shared().running();
     let by_id: std::collections::HashMap<String, crate::process::RunningProfile> =
         running.into_iter().map(|r| (r.profile_id.clone(), r)).collect();
+    // Team sync: which profiles another machine has open (or is still saving) right now — a
+    // client can grey those out instead of finding out from a refused /start.
+    let elsewhere: std::collections::HashMap<String, crate::cloud_sync::ElsewhereLock> =
+        crate::cloud_sync::activity().elsewhere.into_iter().map(|l| (l.id.clone(), l)).collect();
     let out: Vec<Value> = metas
         .into_iter()
         .map(|m| {
@@ -197,6 +201,7 @@ async fn list_profiles() -> ApiResult {
                 "running": r.is_some(),
                 "pid": r.map(|x| x.pid),
                 "cdp": r.and_then(|x| x.cdp.clone()),
+                "in_use_elsewhere": elsewhere.get(&m.id).map(|l| json!({ "by": l.by, "saving": l.saving })),
             })
         })
         .collect();
@@ -576,19 +581,68 @@ struct StartReq {
     headless: bool,
 }
 
+/// The team refused to hand this profile over because another machine has it open (or is
+/// still saving it): a 409 a client can act on, worded for the person. `error` carries the
+/// sentence too, so a client that only shows `error` already says the right thing.
+fn in_use_response(id: &str, launch_error: &str) -> Option<Response> {
+    let saving = launch_error.contains("being saved by");
+    if !saving && !launch_error.contains("is in use by") {
+        return None;
+    }
+    let mine = launch_error.contains("by you on another machine");
+    // The member, from the team's last report — or, before that has come in, from the refusal
+    // itself ("… in use by Admin — try again …").
+    let from_text = || {
+        ["in use by ", "being saved by "].iter().find_map(|k| {
+            let rest = &launch_error[launch_error.find(k)? + k.len()..];
+            let name = rest.split(" —").next().unwrap_or("").trim();
+            (!name.is_empty() && name != "you on another machine").then(|| name.to_string())
+        })
+    };
+    let by = crate::cloud_sync::activity()
+        .elsewhere
+        .into_iter()
+        .find(|l| l.id == id)
+        .map(|l| l.by)
+        .or_else(from_text)
+        .unwrap_or_default();
+    let who = if by.is_empty() { "Thành viên khác".to_string() } else { by.clone() };
+    // The same sentences the app's own table shows (locales/vi.json err.profileInUse…), so a
+    // client and the app never word one refusal two ways.
+    let message = match (mine, saving) {
+        (true, true) => "Bạn vừa đóng profile này ở máy khác và nó đang được đồng bộ. Đợi vài giây cho xong rồi mở lại.".to_string(),
+        (true, false) => "Chính bạn đang mở profile này ở một máy khác. Hãy đóng nó ở máy đó rồi thử lại.".to_string(),
+        (false, true) => format!("{who} vừa đóng profile này và nó đang được đồng bộ lên nhóm. Đợi vài giây cho xong rồi mở lại."),
+        (false, false) => format!("Profile này đang được {who} mở. Hãy đợi người đó đóng profile rồi thử lại."),
+    };
+    Some(
+        (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": message, "message": message, "code": "profile_in_use", "by": by, "saving": saving })),
+        )
+            .into_response(),
+    )
+}
+
 /// Launch with CDP; body `{ "headless": true }` opt-in.
-async fn start_profile(Path(id): Path<String>, body: Option<Json<StartReq>>) -> ApiResult {
+async fn start_profile(Path(id): Path<String>, body: Option<Json<StartReq>>) -> Response {
     let headless = body.map(|Json(b)| b.headless).unwrap_or(false);
-    let outcome = crate::launch::launch_profile(&id, true, headless)
-        .await
-        .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    Ok(Json(json!({
+    let outcome = match crate::launch::launch_profile(&id, true, headless).await {
+        Ok(o) => o,
+        Err(e) => {
+            let text = e.to_string();
+            return in_use_response(&id, &format!("{e:#}"))
+                .unwrap_or_else(|| err(StatusCode::INTERNAL_SERVER_ERROR, text).into_response());
+        }
+    };
+    Json(json!({
         "profile_id": id,
         "pid": outcome.pid,
         "headless": headless,
         "cdp": outcome.cdp,
         "cdp_error": outcome.cdp_error,
-    })))
+    }))
+    .into_response()
 }
 
 async fn stop_profile(Path(id): Path<String>) -> ApiResult {
@@ -1247,6 +1301,33 @@ mod tests {
         assert!(ok(&with(" hirs ")));
         assert!(!ok(&with("mcp")));
         assert!(!ok(&Request::builder().uri("/running").body(Body::empty()).unwrap()));
+    }
+
+    /// A start the team refuses because another machine has the profile open is a 409 with a
+    /// code and a Vietnamese sentence (in `error` too, for clients that only show `error`);
+    /// any other launch failure is left alone.
+    #[tokio::test]
+    async fn a_profile_open_on_another_machine_is_a_409_in_words() {
+        let res = in_use_response("p1", "this profile is in use by Admin — try again once they close it").unwrap();
+        assert_eq!(res.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(res.into_body(), 1 << 16).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["code"], "profile_in_use");
+        assert_eq!(v["saving"], false);
+        assert_eq!(v["error"], "Profile này đang được Admin mở. Hãy đợi người đó đóng profile rồi thử lại.");
+        assert_eq!(v["error"], v["message"]);
+
+        let saving = in_use_response("p1", "this profile is being saved by Admin — try again in a moment").unwrap();
+        let body = axum::body::to_bytes(saving.into_body(), 1 << 16).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["saving"], true);
+
+        let mine = in_use_response("p1", "this profile is in use by you on another machine — try again once you close it").unwrap();
+        let body = axum::body::to_bytes(mine.into_body(), 1 << 16).await.unwrap();
+        let v: Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["error"].as_str().unwrap().starts_with("Chính bạn đang mở profile này"));
+
+        assert!(in_use_response("p1", "read profiles/p1.json: not found").is_none());
     }
 
     /// `/health` is the one route that stays open, for probing before a token.
