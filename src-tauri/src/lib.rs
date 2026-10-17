@@ -4036,11 +4036,19 @@ fn quit_gracefully(app: &tauri::AppHandle) {
 }
 
 pub fn run() {
-    tauri::Builder::default()
+    // A dev build pointed at a scratch data dir (HIR_LOGIN_CONFIG_DIR, see
+    // store::config_root) runs beside the real app instead of handing off to it.
+    let isolated = cfg!(debug_assertions) && std::env::var_os("HIR_LOGIN_CONFIG_DIR").is_some();
+    let builder = tauri::Builder::default();
+    let builder = if isolated {
+        builder
+    } else {
         // Must be the first plugin: a second launch focuses the running window.
-        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+        builder.plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             show_main_window(app);
         }))
+    };
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())

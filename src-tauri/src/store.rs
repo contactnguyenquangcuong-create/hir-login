@@ -32,6 +32,15 @@ pub fn migrate_legacy_dir(base: &Path, old_leaf: &str, new_leaf: &str) -> PathBu
 }
 
 pub fn config_root() -> Result<PathBuf> {
+    // Debug builds only: HIR_LOGIN_CONFIG_DIR moves settings, profiles and
+    // every other store to a scratch folder, so tests of a dev build never
+    // touch the real profiles or team sync. Release builds ignore it.
+    #[cfg(debug_assertions)]
+    if let Some(dir) = std::env::var_os("HIR_LOGIN_CONFIG_DIR") {
+        let root = PathBuf::from(dir);
+        std::fs::create_dir_all(&root)?;
+        return Ok(root);
+    }
     let base = dirs::config_dir().context("OS config dir unavailable")?;
     let root = migrate_legacy_dir(&base, "shardx-launcher", "hir-login");
     std::fs::create_dir_all(&root)?;

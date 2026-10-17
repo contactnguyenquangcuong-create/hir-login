@@ -79,14 +79,38 @@ async function contextFor(profileId, opts) {
   return b.contexts()[0] ?? (await b.newContext());
 }
 
+// A new tab, opened by the browser itself. Playwright's newPage() applies its
+// emulation (Emulation.setEmulatedMedia) to the tab, and the core refuses every
+// metrics override on a phone profile — so a tab is created over CDP and picked
+// up as it appears, which works the same on every profile.
+async function openTab(ctx) {
+  const browser = ctx.browser();
+  const session = await browser.newBrowserCDPSession();
+  try {
+    const appeared = ctx.waitForEvent("page", { timeout: 10000 });
+    await session.send("Target.createTarget", { url: "about:blank" });
+    return await appeared;
+  } finally {
+    await session.detach().catch(() => {});
+  }
+}
+
+const realPages = (ctx) => ctx.pages().filter((p) => !p.url().startsWith("devtools://"));
+
 // The "active" page for a profile — the one tab tools/actions operate on.
 // Persists across calls; falls back to the first real page (or a new one).
 async function pageFor(profileId, opts) {
   const ctx = await contextFor(profileId, opts);
   const cur = activePage.get(profileId);
-  if (cur && !cur.isClosed() && cur.context() === ctx) return cur;
-  const pages = ctx.pages().filter((p) => !p.url().startsWith("devtools://"));
-  const p = pages[0] ?? (await ctx.newPage());
+  if (cur && !cur.isClosed() && !cur.mainFrame().isDetached() && cur.context() === ctx) return cur;
+  let pages = realPages(ctx).filter((p) => !p.mainFrame().isDetached());
+  // A browser that has only just started may not have attached its first tab
+  // yet: wait for it briefly instead of opening a second one.
+  if (!pages.length) {
+    await ctx.waitForEvent("page", { timeout: 3000 }).catch(() => {});
+    pages = realPages(ctx);
+  }
+  const p = pages[0] ?? (await openTab(ctx));
   activePage.set(profileId, p);
   return p;
 }
@@ -163,9 +187,21 @@ async function pointOf(page, { selector, x, y, offset_x, offset_y }) {
 
 const touchClaim = new Map(); // profile_id → boolean
 
+// The core is the judge of what a profile claims. navigator.maxTouchPoints alone
+// also says yes for a Windows laptop with a touchscreen, which the core still
+// drives with a cursor (and then refuses every finger command). So it is asked:
+// a phone refuses a pointer, anything else gets its resting cursor here.
 async function isTouch(profileId, page) {
   if (touchClaim.has(profileId)) return touchClaim.get(profileId);
-  const v = await page.evaluate(() => navigator.maxTouchPoints > 0).catch(() => false);
+  let v;
+  try {
+    await ensurePointer(await motionFor(profileId), page);
+    v = false;
+  } catch (e) {
+    v = /touch|cursor|finger|phone/i.test(String(e?.message ?? e))
+      ? true
+      : await page.evaluate(() => navigator.maxTouchPoints > 0 && /Android|iPhone|iPad|Mobile/i.test(navigator.userAgent)).catch(() => false);
+  }
   touchClaim.set(profileId, !!v);
   return !!v;
 }
@@ -632,8 +668,20 @@ server.tool(
   "Open a URL in the profile's browser (starts it with CDP if needed). Set headless to launch without a window.",
   { profile_id: z.string(), url: z.string(), headless: z.boolean().optional() },
   async ({ profile_id, url, headless }) => {
-    const page = await pageFor(profile_id, { headless: !!headless });
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+    let page = await pageFor(profile_id, { headless: !!headless });
+    try {
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+    } catch (e) {
+      // A browser that has just started can swap its first tab for a new one
+      // (a phone profile does, as its device settings apply) while the goto is
+      // under way: pick up the tab that replaced it and go once more.
+      if (!/detached|Target closed|has been closed/i.test(String(e?.message ?? e))) throw e;
+      activePage.delete(profile_id);
+      motion.delete(profile_id);
+      await new Promise((r) => setTimeout(r, 500));
+      page = await pageFor(profile_id, { headless: !!headless });
+      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
+    }
     return text({ url: page.url(), title: await page.title() });
   },
 );
@@ -993,7 +1041,7 @@ server.tool(
   { profile_id: z.string(), url: z.string().optional() },
   async ({ profile_id, url }) => {
     const ctx = await contextFor(profile_id);
-    const page = await ctx.newPage();
+    const page = await openTab(ctx);
     if (url) await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
     activePage.set(profile_id, page);
     return text({ url: page.url(), title: await page.title() });
