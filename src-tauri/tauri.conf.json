@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Hir-Login",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "identifier": "com.hirlogin.app",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -51,9 +51,9 @@
     "updater": {
       "active": true,
       "endpoints": [
-        "https://myyqyillsgizshrvoncs.supabase.co/storage/v1/object/public/releases/latest.json"
+        "https://hirlogin-cap-nhat.hir-contact-vn.workers.dev/{{target}}/{{arch}}/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEI2RkZFQjRDOUY5QkQyMgpSV1FpdmZuSnRQNXZDN3ZtS2ZkR2dJclY5RUkvVXd4M0JwU1UxdFgySUNkK1RyOE81bnVNRENTMQo="
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI0OTQ1QUVCOTcxMTQzRDkKUldUWlF4R1g2MXFVSkh5WXhCdVVVdlNKbnVUbWZGd2c2dTVLMzR1ekhVN1h5bkFvTzJRN1NLRTQK"
     }
   }
 }

@@ -1,0 +1,86 @@
+name: Release Mac
+
+# The Mac build only, started by hand once the Windows build of the same version (released from
+# the owner's PC with scripts/phat-hanh/windows.mjs) has been checked. Publishes to the Mac channel
+# of the Cloudflare Worker `hirlogin-cap-nhat`; Windows has its own channel there.
+#
+# Secrets (repository → Settings → Secrets and variables → Actions):
+#   TAURI_SIGNING_PRIVATE_KEY           content of D:\AI\HirLogin-goi\hir-login.key
+#   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  "password" from D:\AI\HirLogin-goi\ky.json
+#   HIRLOGIN_UPLOAD_KEY                 "uploadKey" from D:\AI\HirLogin-goi\cap-nhat.json
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build, e.g. v0.2.7 (must already be pushed)"
+        required: true
+      notes:
+        description: "What changed (shown to Mac users)"
+        required: false
+        default: ""
+
+env:
+  CHANNEL: https://hirlogin-cap-nhat.hir-contact-vn.workers.dev
+
+jobs:
+  mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend deps
+        run: npm ci
+
+      - name: Build and sign (app + dmg)
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri build -- --bundles app,dmg
+
+      - name: Publish to the Mac channel
+        env:
+          UPLOAD_KEY: ${{ secrets.HIRLOGIN_UPLOAD_KEY }}
+          NOTES: ${{ inputs.notes }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          [ "v$VERSION" = "${{ inputs.tag }}" ] || { echo "tag ${{ inputs.tag }} is version $VERSION"; exit 1; }
+          TGZ="src-tauri/target/release/bundle/macos/Hir-Login.app.tar.gz"
+          DMG=$(ls src-tauri/target/release/bundle/dmg/*.dmg | head -1)
+          TGZ_NAME="Hir-Login_${VERSION}_aarch64.app.tar.gz"
+          DMG_NAME="Hir-Login_${VERSION}_aarch64.dmg"
+          export VERSION TGZ TGZ_NAME DMG_NAME
+          for f in "$TGZ" "$DMG"; do
+            SIZE=$(stat -f%z "$f"); [ "$SIZE" -lt 26214400 ] || { echo "$f is over 25 MB (KV limit)"; exit 1; }
+          done
+          put() { curl -sf -X PUT "$CHANNEL/upload/$1" -H "x-upload-key: $UPLOAD_KEY" -H "content-type: $2" --data-binary "@$3"; echo; }
+          # Files first, then the manifest that points at them.
+          put "file:$TGZ_NAME" application/gzip "$TGZ"
+          put "file:$DMG_NAME" application/x-apple-diskimage "$DMG"
+          node -e '
+            const fs = require("fs");
+            fs.writeFileSync("latest.json", JSON.stringify({
+              version: process.env.VERSION,
+              notes: process.env.NOTES || "",
+              pub_date: new Date().toISOString(),
+              url: process.env.CHANNEL + "/file/" + process.env.TGZ_NAME,
+              signature: fs.readFileSync(process.env.TGZ + ".sig", "utf8").trim(),
+            }));
+            fs.writeFileSync("tai.txt", process.env.CHANNEL + "/file/" + process.env.DMG_NAME);
+          '
+          put "latest:darwin-aarch64" application/json latest.json
+          put "tai:mac" text/plain tai.txt
+          curl -sf "$CHANNEL/darwin/aarch64/latest.json?t=$(date +%s)"

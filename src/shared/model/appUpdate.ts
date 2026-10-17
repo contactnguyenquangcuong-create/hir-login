@@ -12,7 +12,8 @@ type AppUpdateState = {
   install: () => Promise<void>;
 };
 
-/// Hir-Login's own update channel (Supabase Storage manifest) — unrelated to
+/// Hir-Login's own update channel (Cloudflare Worker `hirlogin-cap-nhat`, one
+/// manifest per platform — see scripts/phat-hanh/) — unrelated to
 /// `launcher_update_check`, which is the ShardX *engine's* remote version gate.
 export const useAppUpdate = create<AppUpdateState>((set, get) => ({
   status: "idle",
