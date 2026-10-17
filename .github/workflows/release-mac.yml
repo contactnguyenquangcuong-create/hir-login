@@ -1,26 +1,32 @@
 name: Release Mac
 
-# The Mac build only, started by hand once the Windows build of the same version (released from
-# the owner's PC with scripts/phat-hanh/windows.mjs) has been checked. Publishes to the Mac channel
-# of the Cloudflare Worker `hirlogin-cap-nhat`; Windows has its own channel there.
+# The Mac build only. scripts/phat-hanh/windows.mjs releases Windows from the owner's PC and tags
+# the version locally; once the owner has checked it, scripts/phat-hanh/mac.mjs pushes the tag —
+# and that push starts this. Publishes to the Mac channel of the Cloudflare Worker
+# `hirlogin-cap-nhat` (Windows has its own channel there), with the Windows release's notes.
+# Can also be started by hand (Actions → Release Mac → Run workflow) for a tag already pushed.
 #
 # Secrets (repository → Settings → Secrets and variables → Actions):
 #   TAURI_SIGNING_PRIVATE_KEY           content of D:\AI\HirLogin-goi\hir-login.key
 #   TAURI_SIGNING_PRIVATE_KEY_PASSWORD  "password" from D:\AI\HirLogin-goi\ky.json
 #   HIRLOGIN_UPLOAD_KEY                 "uploadKey" from D:\AI\HirLogin-goi\cap-nhat.json
 on:
+  push:
+    tags:
+      - "v*.*.*"
   workflow_dispatch:
     inputs:
       tag:
         description: "Tag to build, e.g. v0.2.7 (must already be pushed)"
         required: true
       notes:
-        description: "What changed (shown to Mac users)"
+        description: "What changed (empty = the Windows release's notes)"
         required: false
         default: ""
 
 env:
   CHANNEL: https://hirlogin-cap-nhat.hir-contact-vn.workers.dev
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   mac:
@@ -28,7 +34,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ env.TAG }}
 
       - uses: actions/setup-node@v4
         with:
@@ -57,7 +63,12 @@ jobs:
         run: |
           set -euo pipefail
           VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
-          [ "v$VERSION" = "${{ inputs.tag }}" ] || { echo "tag ${{ inputs.tag }} is version $VERSION"; exit 1; }
+          [ "v$VERSION" = "$TAG" ] || { echo "tag $TAG is version $VERSION"; exit 1; }
+          # No notes given: reuse the Windows release's, when it is this same version.
+          if [ -z "${NOTES:-}" ]; then
+            NOTES=$(curl -sf "$CHANNEL/windows/x86_64/latest.json" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const j=JSON.parse(s);process.stdout.write(j.version===process.argv[1]?(j.notes||""):"")}catch{}})' "$VERSION" || true)
+          fi
+          export NOTES
           TGZ="src-tauri/target/release/bundle/macos/Hir-Login.app.tar.gz"
           DMG=$(ls src-tauri/target/release/bundle/dmg/*.dmg | head -1)
           TGZ_NAME="Hir-Login_${VERSION}_aarch64.app.tar.gz"

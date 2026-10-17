@@ -6,8 +6,8 @@
 //
 // Builds the NSIS installer, signs it with D:\AI\HirLogin-goi\hir-login.key (password in ky.json),
 // uploads it, and only then switches windows/x86_64/latest.json to the new version — so a client
-// that sees the new version can always download it. Tags vX.Y.Z (pushing is left to you: no CI
-// runs on tags any more; the Mac build is started by hand on GitHub, see release-mac.yml).
+// that sees the new version can always download it. Tags vX.Y.Z on this PC only: once the Windows
+// build has been checked, scripts/phat-hanh/mac.mjs pushes the tag, which builds the Mac version.
 // Never packages or prints a secret.
 import fs from 'fs';
 import path from 'path';
@@ -79,4 +79,4 @@ console.log(`\nĐÃ PHÁT HÀNH Windows ${version}`);
 console.log(`  Máy đang dùng tự thấy bản mới (kênh ${base}/windows/x86_64/latest.json)`);
 console.log(`  Link cài cho người mới: ${base}/tai/windows`);
 console.log(`  Bản sao: ${path.join(GOI, name)}`);
-console.log(`  Tag ${tag} mới ở máy này — đẩy lên bằng: git push origin main ${tag}`);
+console.log(`  Tag ${tag} mới ở máy này. Thử bản Windows xong, build bản Mac bằng: node scripts/phat-hanh/mac.mjs`);
