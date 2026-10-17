@@ -17,26 +17,29 @@ export default {
   async fetch(req, env) {
     const url = new URL(req.url);
     const p = url.pathname.split('/').filter(Boolean).map(decodeURIComponent);
+    // HEAD is answered like GET (download managers ask for the size first); the runtime drops the body.
+    const read = req.method === 'GET' || req.method === 'HEAD';
 
-    if (req.method === 'GET' && p.length === 3 && p[2] === 'latest.json') {
+    if (read && p.length === 3 && p[2] === 'latest.json') {
       const v = await env.KHO.get('latest:' + p[0] + '-' + p[1]);
       if (!v) return new Response(null, { status: 204 });
       return new Response(v, { headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
     }
 
-    if (req.method === 'GET' && p.length === 2 && p[0] === 'file') {
+    if (read && p.length === 2 && p[0] === 'file') {
       const { value, metadata } = await env.KHO.getWithMetadata('file:' + p[1], 'stream');
       if (!value) return new Response('Không có file này', { status: 404 });
       return new Response(value, {
         headers: {
           'content-type': (metadata && metadata.type) || 'application/octet-stream',
+          ...(metadata && metadata.size ? { 'content-length': String(metadata.size) } : {}),
           'content-disposition': 'attachment; filename="' + p[1] + '"',
           'cache-control': 'public, max-age=31536000, immutable',
         },
       });
     }
 
-    if (req.method === 'GET' && p.length === 2 && p[0] === 'tai') {
+    if (read && p.length === 2 && p[0] === 'tai') {
       const to = await env.KHO.get('tai:' + p[1]);
       if (!to) return new Response('Chưa có bản cài cho ' + p[1], { status: 404 });
       return Response.redirect(to, 302);
@@ -52,7 +55,7 @@ export default {
       return Response.json({ ok: true, key: p[1], size: body.byteLength });
     }
 
-    if (req.method === 'GET' && p.length === 0) return new Response('Hir-Login update channel');
+    if (read && p.length === 0) return new Response('Hir-Login update channel');
     return new Response('not found', { status: 404 });
   },
 };
