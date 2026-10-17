@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Button, Input } from "@proxyshard/shardx-ui-kit";
 import { useT } from "../../shared/i18n";
 import { toast } from "../../shared/model/toast";
@@ -6,9 +6,19 @@ import { licenseStatus, licenseActivate, licenseInfo, licenseSubmitInfo } from "
 
 type Step = "checking" | "key" | "info" | "done";
 
-/// Blocks the whole app until this machine has a valid local activation
-/// AND has submitted customer info at least once. Checked once at startup —
-/// no network call unless activation/info is actually missing.
+/// How often a running app asks the backend again; the backend itself only
+/// contacts the key server when its last good check is older than 6 hours.
+const RECHECK_MS = 30 * 60 * 1000;
+
+/// "hlgabcd" → "HLG-ABCD": uppercase and dashes after 3, 7 and 11 chars.
+function formatKey(raw: string) {
+  const s = raw.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 15);
+  return [s.slice(0, 3), s.slice(3, 7), s.slice(7, 11), s.slice(11, 15)].filter(Boolean).join("-");
+}
+
+/// Blocks the whole app until this machine has a valid HLG- key (created in
+/// @Hirkeys_bot) AND has submitted customer info at least once. A key that
+/// gets locked, expires or is deleted in the bot brings this screen back.
 export function ActivationGate({ children }: { children: ReactNode }) {
   const t = useT();
   const [step, setStep] = useState<Step>("checking");
@@ -19,17 +29,29 @@ export function ActivationGate({ children }: { children: ReactNode }) {
   const [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const stepRef = useRef(step);
+  stepRef.current = step;
 
   useEffect(() => {
-    (async () => {
+    const check = async () => {
       const activated = await licenseStatus().catch(() => false);
+      const info = await licenseInfo().catch(() => null);
       if (!activated) {
+        // Key refused on a re-check (locked / expired / deleted): show the
+        // key screen again with the old key and the reason filled in — but
+        // never overwrite what the user is typing on that screen.
+        if (stepRef.current !== "key") {
+          if (info?.key) setKey(info.key);
+          if (info?.error) setError(info.error);
+        }
         setStep("key");
         return;
       }
-      const info = await licenseInfo().catch(() => null);
-      setStep(info?.customer_name ? "done" : "info");
-    })();
+      setStep((s) => (s === "info" ? s : info?.customer_name ? "done" : "info"));
+    };
+    check();
+    const timer = setInterval(check, RECHECK_MS);
+    return () => clearInterval(timer);
   }, []);
 
   const submitKey = async () => {
@@ -83,9 +105,9 @@ export function ActivationGate({ children }: { children: ReactNode }) {
               <Input
                 inputSize="small"
                 className="mono text-center"
-                placeholder="HIR-XXXX-XXXX-XXXX"
+                placeholder="HLG-XXXX-XXXX-XXXX"
                 value={key}
-                onChange={(e) => setKey(e.target.value.toUpperCase())}
+                onChange={(e) => setKey(formatKey(e.target.value))}
                 onKeyDown={(e) => { if (e.key === "Enter") submitKey(); }}
                 autoFocus
               />

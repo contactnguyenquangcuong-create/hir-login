@@ -3065,14 +3065,15 @@ fn cookies_import_text(profile_id: String, text: String) -> Result<usize, String
 
 // ---- License activation ----
 
-/// Whether this machine already has a valid local activation. Offline check.
+/// Whether this machine may use the app. Re-checks the key with the server
+/// every few hours so a key locked / expired in @Hirkeys_bot stops working.
 #[tauri::command]
-fn license_status() -> bool {
-    license::is_activated()
+async fn license_status() -> bool {
+    license::check().await
 }
 
-/// Redeems a key against Supabase; writes the local activation record on
-/// success so this machine never needs the network for this again.
+/// Redeems an HLG- key against the HIR key server; writes the local
+/// activation record on success.
 #[tauri::command]
 async fn license_activate(key: String) -> Result<(), String> {
     license::activate(&key).await.map_err(|e| e.to_string())
@@ -3085,8 +3086,8 @@ fn license_info() -> Option<license::LicenseInfo> {
     license::local_info()
 }
 
-/// Sends/updates the customer's name, phone/Zalo and email for this
-/// machine's license. Callable again later to fix a typo.
+/// Saves the customer's name, phone/Zalo and email for this machine's
+/// license (name + phone show up in the bot). Callable again to fix a typo.
 #[tauri::command]
 async fn license_submit_info(name: String, phone: String, email: String) -> Result<(), String> {
     license::submit_customer_info(&name, &phone, &email)

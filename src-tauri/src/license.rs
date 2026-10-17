@@ -1,13 +1,25 @@
-//! First-run license activation against a self-hosted Supabase project (see
-//! `license-system/` at the repo root). A key binds to exactly one device id
-//! on first successful activation; after that, this machine never needs the
-//! network again — only a *different* device id trying the same key gets
-//! refused, and that check happens server-side in the `activate_license` RPC.
+//! License keys from the shared HIR key system: keys `HLG-XXXX-XXXX-XXXX`
+//! are created and managed by the admin in the Telegram bot @Hirkeys_bot
+//! (/menu → Hir-Login, source `D:\AI\HIR-IMG\bot-key.js`). They live in the
+//! HIR-IMG Supabase project, in the same `ban_quyen` table as HIR-IMG (HIR-)
+//! and HirS (HRS-) keys — products are told apart only by prefix, so this app
+//! accepts `HLG-` and nothing else.
 //!
-//! The app embeds only the Supabase **anon** key, which can call that one
-//! RPC and nothing else (see `license-system/supabase.sql` — RLS blocks
-//! direct table access). The admin-only service_role key lives solely in the
-//! Telegram bot (`license-system/bot.js`), never in this binary.
+//! The app embeds only the Supabase **anon** key, which can call the single
+//! RPC `kich_hoat(p_key, p_may, p_ten_may)` and nothing else (RLS blocks all
+//! direct table access). That RPC checks lock / expiry / machine count, binds
+//! this machine on first use and returns `{ok, loi, het_han, ghi_chu}`.
+//!
+//! The key is re-checked at startup when the last good check is older than
+//! `RECHECK_SECS`, so a key locked, expired or deleted in the bot stops
+//! working here. Without network the app keeps running for `OFFLINE_GRACE_SECS`
+//! after the last good check.
+//!
+//! Machines activated before 0.2.2 hold an old `HIR-` key from the previous
+//! key system (Supabase myyqyillsgizshrvoncs, RPC `activate_license`). They
+//! keep working exactly as before — a local, device-bound record, never sent
+//! to the new server (where `HIR-` means a HIR-IMG key and would be refused).
+//! Only new machines need an `HLG-` key.
 
 use crate::store;
 use anyhow::{Context, Result};
@@ -15,18 +27,35 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::time::Duration;
 
-// ---- Fill these in once, before building for real distribution ----
-// Project Settings → API in the Supabase dashboard. The anon key is meant to
-// be public/embedded in clients — it is safe here precisely because RLS
-// denies it any direct table access (see supabase.sql).
-const SUPABASE_URL: &str = "https://myyqyillsgizshrvoncs.supabase.co";
-const SUPABASE_ANON_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im15eXF5aWxsc2dpenNocnZvbmNzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTAwMTg3MDIsImV4cCI6MjEwNTU5NDcwMn0.yUlWBPSIJMlf7hoc3eBfRhCCUXryUiqyN3zue7jeaPU";
+// HIR-IMG Supabase (Project Settings → API). The anon key is meant to be
+// public/embedded in clients — RLS denies it any direct table access.
+const SUPABASE_URL: &str = "https://bgmytknwztagahfpemgc.supabase.co";
+const SUPABASE_ANON_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJnbXl0a253enRhZ2FoZnBlbWdjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTIwOTA2NDYsImV4cCI6MjEwNzY2NjY0Nn0.Z0dXBYn1PVFxkuezzs7sbU86fSQfaaeN_vxq3GQ4_sg";
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+const PREFIX: &str = "HLG-";
+/// Keys of the previous Hir-Login key system (before 0.2.2).
+const LEGACY_PREFIX: &str = "HIR-";
+const RECHECK_SECS: u64 = 6 * 3600;
+const OFFLINE_GRACE_SECS: u64 = 3 * 86400;
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct ActivationRecord {
     key: String,
     device_id: String,
     activated_at: String,
+    /// Unix secs of the last check the server answered `ok`.
+    #[serde(default)]
+    last_ok: u64,
+    /// Expiry from the server (ISO 8601), None = permanent.
+    #[serde(default)]
+    expires_at: Option<String>,
+    /// The admin's note on the key (`ghi_chu` in the bot).
+    #[serde(default)]
+    note: String,
+    /// Set when the server refused the key on a re-check; the record is then
+    /// no longer valid but keeps the key so the gate can show it again.
+    #[serde(default)]
+    error: Option<String>,
     #[serde(default)]
     customer_name: Option<String>,
     #[serde(default)]
@@ -35,13 +64,15 @@ struct ActivationRecord {
     customer_email: Option<String>,
 }
 
-/// What the Settings page shows — same shape, just public and named for the
-/// frontend rather than the on-disk record.
+/// What the Settings page and the gate show.
 #[derive(Debug, Clone, Serialize)]
 pub struct LicenseInfo {
     pub key: String,
     pub device_id: String,
     pub activated_at: String,
+    pub expires_at: Option<String>,
+    pub note: String,
+    pub error: Option<String>,
     pub customer_name: Option<String>,
     pub customer_phone: Option<String>,
     pub customer_email: Option<String>,
@@ -53,6 +84,9 @@ impl From<ActivationRecord> for LicenseInfo {
             key: r.key,
             device_id: r.device_id,
             activated_at: r.activated_at,
+            expires_at: r.expires_at,
+            note: r.note,
+            error: r.error,
             customer_name: r.customer_name,
             customer_phone: r.customer_phone,
             customer_email: r.customer_email,
@@ -121,24 +155,98 @@ fn raw_hardware_id() -> Result<String> {
     anyhow::bail!("no machine-id file found")
 }
 
+/// `HLG-ABCD-EFGH-JKLM`: the prefix, then three groups of four A–Z / 0–9.
+fn valid_shape(key: &str) -> bool {
+    has_shape(key, PREFIX)
+}
+
+/// A record made by the old key system on this machine.
+fn is_legacy(rec: &ActivationRecord) -> bool {
+    has_shape(&rec.key, LEGACY_PREFIX)
+}
+
+fn has_shape(key: &str, prefix: &str) -> bool {
+    let Some(rest) = key.strip_prefix(prefix) else { return false };
+    let groups: Vec<&str> = rest.split('-').collect();
+    groups.len() == 3
+        && groups
+            .iter()
+            .all(|g| g.len() == 4 && g.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit()))
+}
+
+/// Accepts the key typed with or without dashes ("hlgabcd…" → "HLG-ABCD-…").
+fn normalize_key(key: &str) -> String {
+    let compact: String = key
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
+    if compact.len() == 15 {
+        format!("{}-{}-{}-{}", &compact[..3], &compact[3..7], &compact[7..11], &compact[11..])
+    } else {
+        key.trim().to_ascii_uppercase()
+    }
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Local record that belongs to this machine (a copied activation.json from
+/// another machine has a different device id and is ignored).
 fn local_record() -> Option<ActivationRecord> {
     let path = activation_path().ok()?;
     let body = fs::read_to_string(&path).ok()?;
     let rec: ActivationRecord = serde_json::from_str(&body).ok()?;
     let this_device = device_id().ok()?;
-    (rec.device_id == this_device).then_some(rec)
+    (rec.device_id == this_device && (valid_shape(&rec.key) || is_legacy(&rec))).then_some(rec)
 }
 
-/// Whether this machine already has a valid local activation record.
-/// Offline — no network call. Only meaningful together with the device_id
-/// check: a copied activation.json from another machine has a different
-/// device_id than this one computes, so it is rejected here already.
-pub fn is_activated() -> bool {
-    local_record().is_some()
+fn save_record(rec: &ActivationRecord) -> Result<()> {
+    let path = activation_path()?;
+    fs::write(&path, serde_json::to_string_pretty(rec)?).context("write activation record")
 }
 
-/// For the Settings page. None before activation, or if the local record
-/// does not belong to this machine.
+fn expired(rec: &ActivationRecord) -> bool {
+    rec.expires_at
+        .as_deref()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .is_some_and(|t| t.timestamp() < now_secs() as i64)
+}
+
+/// Usable right now without asking the server.
+fn locally_valid(rec: &ActivationRecord) -> bool {
+    rec.error.is_none() && !expired(rec) && now_secs().saturating_sub(rec.last_ok) < OFFLINE_GRACE_SECS
+}
+
+/// Whether this machine may use the app. Re-checks the key with the server
+/// when the last good check is older than `RECHECK_SECS`; a network failure
+/// keeps the local verdict (offline grace), a refusal invalidates it.
+pub async fn check() -> bool {
+    let Some(rec) = local_record() else { return false };
+    if is_legacy(&rec) {
+        return true;
+    }
+    if rec.error.is_some() {
+        return false;
+    }
+    if now_secs().saturating_sub(rec.last_ok) < RECHECK_SECS && !expired(&rec) {
+        return true;
+    }
+    match call_rpc(&rec.key, &rec.device_id, &machine_label(&rec)).await {
+        Ok(r) => {
+            let _ = apply_result(rec, &r);
+            r.ok
+        }
+        Err(_) => locally_valid(&rec),
+    }
+}
+
+/// For the Settings page and the gate. None before activation, or if the
+/// local record does not belong to this machine.
 pub fn local_info() -> Option<LicenseInfo> {
     local_record().map(Into::into)
 }
@@ -146,127 +254,148 @@ pub fn local_info() -> Option<LicenseInfo> {
 #[derive(Debug, Serialize)]
 struct RpcBody<'a> {
     p_key: &'a str,
-    p_device_id: &'a str,
+    p_may: &'a str,
+    p_ten_may: &'a str,
 }
 
 #[derive(Debug, Deserialize)]
 struct RpcResult {
     ok: bool,
     #[serde(default)]
-    error: Option<String>,
+    loi: Option<String>,
+    #[serde(default)]
+    het_han: Option<String>,
+    #[serde(default)]
+    ghi_chu: Option<String>,
 }
 
 fn friendly_error(code: &str) -> &'static str {
     match code {
-        "not_found" => "Key không tồn tại.",
-        "revoked" => "Key này đã bị thu hồi.",
-        "in_use" => "Key này đã được kích hoạt trên máy khác.",
-        "empty_key" => "Vui lòng nhập key.",
-        _ => "Kích hoạt thất bại — thử lại sau.",
+        "KHONG_CO" => "Key không đúng — kiểm tra lại (dạng HLG-XXXX-XXXX-XXXX).",
+        "BI_KHOA" => "Key đã bị khoá — liên hệ quản lý.",
+        "HET_HAN" => "Key đã hết hạn — liên hệ quản lý để gia hạn.",
+        "DU_MAY" => "Key đã dùng đủ số máy cho phép — nhờ quản lý gỡ máy cũ rồi kích hoạt lại.",
+        "MA_MAY" => "Không đọc được mã máy.",
+        _ => "Key không hợp lệ.",
     }
 }
 
-/// Verifies `key` against Supabase and, on success, writes the local
-/// activation record so future launches are offline. Network required only
-/// for this call.
-pub async fn activate(key: &str) -> Result<()> {
-    let key = key.trim();
-    if key.is_empty() {
-        anyhow::bail!(friendly_error("empty_key"));
-    }
-    let dev = device_id().context("compute device id")?;
+/// What the admin sees under "Máy đang dùng" in the bot: the customer's name
+/// and phone once given, then this computer's name. The RPC keeps 80 chars.
+fn machine_label(rec: &ActivationRecord) -> String {
+    let host = std::env::var("COMPUTERNAME")
+        .or_else(|_| std::env::var("HOSTNAME"))
+        .unwrap_or_default();
+    let user = std::env::var("USERNAME").or_else(|_| std::env::var("USER")).unwrap_or_default();
+    let machine = if user.is_empty() { host } else { format!("{host} ({user})") };
+    [rec.customer_name.as_deref(), rec.customer_phone.as_deref(), Some(machine.as_str())]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
+        .chars()
+        .take(80)
+        .collect()
+}
 
+async fn call_rpc(key: &str, device: &str, label: &str) -> Result<RpcResult> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(15))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
     let resp = client
-        .post(format!("{SUPABASE_URL}/rest/v1/rpc/activate_license"))
+        .post(format!("{SUPABASE_URL}/rest/v1/rpc/kich_hoat"))
         .header("apikey", SUPABASE_ANON_KEY)
         .header("Authorization", format!("Bearer {SUPABASE_ANON_KEY}"))
-        .json(&RpcBody { p_key: key, p_device_id: &dev })
+        .json(&RpcBody { p_key: key, p_may: device, p_ten_may: label })
         .send()
         .await
         .context("contact license server")?;
 
     if !resp.status().is_success() {
-        anyhow::bail!("license server error: {}", resp.status());
+        anyhow::bail!("Máy chủ key trả lỗi {}", resp.status());
     }
-    let result: RpcResult = resp.json().await.context("parse license server response")?;
-    if !result.ok {
-        anyhow::bail!(friendly_error(result.error.as_deref().unwrap_or("")));
-    }
+    resp.json().await.context("parse license server response")
+}
 
+/// Stores the server's answer: refreshes expiry / note / last_ok on success,
+/// marks the record invalid (keeping the key) on refusal.
+fn apply_result(mut rec: ActivationRecord, r: &RpcResult) -> Result<ActivationRecord> {
+    if r.ok {
+        rec.last_ok = now_secs();
+        rec.expires_at = r.het_han.clone();
+        rec.note = r.ghi_chu.clone().unwrap_or_default();
+        rec.error = None;
+    } else {
+        rec.error = Some(friendly_error(r.loi.as_deref().unwrap_or("")).to_string());
+    }
+    save_record(&rec)?;
+    Ok(rec)
+}
+
+/// Verifies `key` against the server and, on success, writes the local
+/// activation record. Keeps customer info from an earlier activation of the
+/// same machine.
+pub async fn activate(key: &str) -> Result<()> {
+    let key = normalize_key(key);
+    if key.is_empty() {
+        anyhow::bail!("Vui lòng nhập key.");
+    }
+    if !valid_shape(&key) {
+        if key.starts_with(LEGACY_PREFIX) {
+            anyhow::bail!("Key HIR- cũ chỉ dùng tiếp trên máy đã kích hoạt trước đây. Máy mới cần key dạng HLG-XXXX-XXXX-XXXX — liên hệ quản lý.");
+        }
+        if key.starts_with("HRS-") || key.starts_with("TPT-") {
+            anyhow::bail!("Đây là key của tool khác — Hir-Login cần key dạng HLG-XXXX-XXXX-XXXX.");
+        }
+        anyhow::bail!("Key phải có dạng HLG-XXXX-XXXX-XXXX.");
+    }
+    let dev = device_id().context("Không đọc được mã máy")?;
+
+    let previous = fs::read_to_string(activation_path()?)
+        .ok()
+        .and_then(|b| serde_json::from_str::<ActivationRecord>(&b).ok())
+        .filter(|r| r.device_id == dev);
     let rec = ActivationRecord {
-        key: key.to_string(),
+        key: key.clone(),
         device_id: dev,
-        activated_at: chrono_now_iso(),
-        customer_name: None,
-        customer_phone: None,
-        customer_email: None,
+        activated_at: chrono::Utc::now().to_rfc3339(),
+        customer_name: previous.as_ref().and_then(|p| p.customer_name.clone()),
+        customer_phone: previous.as_ref().and_then(|p| p.customer_phone.clone()),
+        customer_email: previous.as_ref().and_then(|p| p.customer_email.clone()),
+        ..Default::default()
     };
-    let path = activation_path()?;
-    fs::write(&path, serde_json::to_string_pretty(&rec)?).context("write activation record")?;
+
+    let r = call_rpc(&key, &rec.device_id, &machine_label(&rec))
+        .await
+        .map_err(|e| anyhow::anyhow!("Không kết nối được máy chủ key ({e:#}) — kiểm tra mạng rồi thử lại."))?;
+    if !r.ok {
+        anyhow::bail!(friendly_error(r.loi.as_deref().unwrap_or("")));
+    }
+    apply_result(rec, &r)?;
     Ok(())
 }
 
-#[derive(Debug, Serialize)]
-struct CustomerInfoBody<'a> {
-    p_key: &'a str,
-    p_device_id: &'a str,
-    p_name: &'a str,
-    p_phone: &'a str,
-    p_email: &'a str,
-}
-
-/// Sends the customer's name/phone-Zalo/email to Supabase (tied to this
-/// machine's own key + device id — see `submit_customer_info` in
-/// supabase.sql) and updates the local cache the Settings page reads. Can be
-/// called again later to correct a typo; each call overwrites the last.
+/// Saves the customer's name / phone-Zalo / email locally and re-sends the
+/// activation so the bot shows name and phone next to this machine. Can be
+/// called again later to correct a typo.
 pub async fn submit_customer_info(name: &str, phone: &str, email: &str) -> Result<()> {
-    let mut rec = local_record().context("this machine is not activated")?;
-
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(15))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-
-    let resp = client
-        .post(format!("{SUPABASE_URL}/rest/v1/rpc/submit_customer_info"))
-        .header("apikey", SUPABASE_ANON_KEY)
-        .header("Authorization", format!("Bearer {SUPABASE_ANON_KEY}"))
-        .json(&CustomerInfoBody {
-            p_key: &rec.key,
-            p_device_id: &rec.device_id,
-            p_name: name,
-            p_phone: phone,
-            p_email: email,
-        })
-        .send()
-        .await
-        .context("contact license server")?;
-
-    if !resp.status().is_success() {
-        anyhow::bail!("license server error: {}", resp.status());
-    }
-    let result: RpcResult = resp.json().await.context("parse license server response")?;
-    if !result.ok {
-        anyhow::bail!(friendly_error(result.error.as_deref().unwrap_or("")));
-    }
-
+    let mut rec = local_record().context("Máy này chưa kích hoạt")?;
     rec.customer_name = (!name.trim().is_empty()).then(|| name.trim().to_string());
     rec.customer_phone = (!phone.trim().is_empty()).then(|| phone.trim().to_string());
     rec.customer_email = (!email.trim().is_empty()).then(|| email.trim().to_string());
-    let path = activation_path()?;
-    fs::write(&path, serde_json::to_string_pretty(&rec)?).context("write activation record")?;
-    Ok(())
-}
+    save_record(&rec)?;
+    if is_legacy(&rec) {
+        return Ok(());
+    }
 
-fn chrono_now_iso() -> String {
-    let s = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!("@{s}")
+    // Best effort: the info is already saved; the label reaches the bot on
+    // the next successful check if this one cannot get through.
+    if let Ok(r) = call_rpc(&rec.key, &rec.device_id, &machine_label(&rec)).await {
+        apply_result(rec, &r)?;
+    }
+    Ok(())
 }

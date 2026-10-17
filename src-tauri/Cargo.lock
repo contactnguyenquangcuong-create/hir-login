@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "Hir-Login"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "ab_glyph",
  "aes",
@@ -13,6 +13,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "cbc",
+ "chrono",
  "dirs 5.0.1",
  "flate2",
  "futures-util",

@@ -323,6 +323,8 @@ export function SettingsPage() {
         {tab === "license" && license && (
           <Section title={t("settings.licenseTitle")}>
             <Row label={t("settings.licenseKeyLabel")}><span className="mono text-paragraph-sm text-text-strong-950 sm:block sm:text-right">{license.key}</span></Row>
+            <Row label={t("settings.licenseExpiresLabel")}><span className="text-paragraph-sm text-text-sub-600 sm:block sm:text-right">{license.expires_at ? new Date(license.expires_at).toLocaleString() : t("settings.licensePermanent")}</span></Row>
+            {license.note && <Row label={t("settings.licenseNoteLabel")}><span className="text-paragraph-sm text-text-sub-600 sm:block sm:text-right">{license.note}</span></Row>}
             <Row label={t("settings.licenseNameLabel")}><span className="text-paragraph-sm text-text-sub-600 sm:block sm:text-right">{license.customer_name ?? "—"}</span></Row>
             <Row label={t("settings.licensePhoneLabel")}><span className="text-paragraph-sm text-text-sub-600 sm:block sm:text-right">{license.customer_phone ?? "—"}</span></Row>
             <Row label={t("settings.licenseEmailLabel")}><span className="text-paragraph-sm text-text-sub-600 sm:block sm:text-right">{license.customer_email ?? "—"}</span></Row>
