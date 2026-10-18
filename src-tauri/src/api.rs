@@ -171,6 +171,8 @@ async fn health() -> Json<Value> {
         "name": "hir-login",
         "version": env!("CARGO_PKG_VERSION"),
         "hirs_allowed": hirs_allowed(),
+        // POST /profiles/{id}/start understands {"proxy": "..."} for that launch only.
+        "start_proxy": true,
     }))
 }
 
@@ -582,6 +584,11 @@ async fn delete_folder_ep(Path(folder): Path<String>, Query(q): Query<DeleteFold
 struct StartReq {
     #[serde(default)]
     headless: bool,
+    /// A proxy for this launch only ("http://127.0.0.1:42101", "socks5://user:pass@host:port"),
+    /// used in place of the profile's own. Never saved to the profile, the proxy store or the
+    /// team; the time zone / language / location it leads to are not pinned either.
+    #[serde(default)]
+    proxy: Option<String>,
 }
 
 /// The team refused to hand this profile over because another machine has it open (or is
@@ -627,10 +634,27 @@ fn in_use_response(id: &str, launch_error: &str) -> Option<Response> {
     )
 }
 
-/// Launch with CDP; body `{ "headless": true }` opt-in.
+/// Launch with CDP; body `{ "headless": true }` opt-in, `{ "proxy": "..." }` for this launch
+/// only (the answer then says `"proxy_override": true`).
 async fn start_profile(Path(id): Path<String>, body: Option<Json<StartReq>>) -> Response {
-    let headless = body.map(|Json(b)| b.headless).unwrap_or(false);
-    let outcome = match crate::launch::launch_profile(&id, true, headless).await {
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    let headless = req.headless;
+    let override_proxy = match req.proxy.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        None => None,
+        Some(s) => match crate::proxy::parse_single(s) {
+            Some(p) => Some(p),
+            None => {
+                let message = format!("Proxy cho lần mở này không đúng dạng: {s}");
+                return (StatusCode::BAD_REQUEST, Json(json!({ "error": message, "message": message, "code": "bad_proxy" }))).into_response();
+            }
+        },
+    };
+    let proxy_override = override_proxy.is_some();
+    let launched = match override_proxy {
+        Some(p) => crate::launch::launch_profile_via(&id, true, headless, p).await,
+        None => crate::launch::launch_profile(&id, true, headless).await,
+    };
+    let outcome = match launched {
         Ok(o) => o,
         Err(e) => {
             let text = e.to_string();
@@ -644,6 +668,7 @@ async fn start_profile(Path(id): Path<String>, body: Option<Json<StartReq>>) -> 
         "headless": headless,
         "cdp": outcome.cdp,
         "cdp_error": outcome.cdp_error,
+        "proxy_override": proxy_override,
     }))
     .into_response()
 }

@@ -74,6 +74,33 @@ pub async fn launch_profile_synced(
     bus_port: u16,
     bus_token: &str,
 ) -> Result<LaunchOutcome> {
+    launch_inner(profile_id, enable_cdp, headless, sync_group, bus_port, bus_token, None).await
+}
+
+/// As `launch_profile`, through `proxy` for this launch only, in place of the profile's own.
+/// Nothing about it is kept: not in the profile, not in the proxy store or its saved checks, not
+/// sent to the team — and the time zone / language / location it leads to are not pinned either.
+pub async fn launch_profile_via(
+    profile_id: &str,
+    enable_cdp: bool,
+    headless: bool,
+    proxy: proxy::ProxyEntry,
+) -> Result<LaunchOutcome> {
+    // No id: the proxy store's "checked once, trusted after" records are keyed by it.
+    let proxy = proxy::ProxyEntry { id: String::new(), ..proxy };
+    launch_inner(profile_id, enable_cdp, headless, None, 0, "", Some(proxy)).await
+}
+
+async fn launch_inner(
+    profile_id: &str,
+    enable_cdp: bool,
+    headless: bool,
+    sync_group: Option<&str>,
+    bus_port: u16,
+    bus_token: &str,
+    proxy_override: Option<proxy::ProxyEntry>,
+) -> Result<LaunchOutcome> {
+    let ephemeral_proxy = proxy_override.is_some();
     // One browser per profile: two children sharing a user-data dir corrupt each other's
     // state, and the second displaces the first in the tracker, leaving it unstoppable.
     if Tracker::shared().is_running(profile_id) {
@@ -98,13 +125,17 @@ pub async fn launch_profile_synced(
     let stored = profile::load_raw(profile_id)?;
     let udd = profile::user_data_dir(profile_id)?;
 
-    // Stored proxy by id, else ephemeral inline (quick profiles, not in store).
-    let bound_proxy: Option<proxy::ProxyEntry> = stored
-        .meta
-        .proxy_id
-        .as_deref()
-        .and_then(|pid| proxy::get(pid).ok().flatten())
-        .or_else(|| stored.meta.inline_proxy.clone());
+    // This launch's own proxy when one was given, else the stored proxy by id, else ephemeral
+    // inline (quick profiles, not in store).
+    let bound_proxy: Option<proxy::ProxyEntry> = match proxy_override {
+        Some(p) => Some(p),
+        None => stored
+            .meta
+            .proxy_id
+            .as_deref()
+            .and_then(|pid| proxy::get(pid).ok().flatten())
+            .or_else(|| stored.meta.inline_proxy.clone()),
+    };
     // Whether this proxy was already checked before this open (for the launch log).
     let was_verified = bound_proxy.as_ref().map(proxy::proxy_is_verified);
     // A proxy labelled HTTPS that really speaks plain HTTP is used as an HTTP proxy.
@@ -179,7 +210,7 @@ pub async fn launch_profile_synced(
     // Strip `_meta` wrapper and resolve "auto" sentinels before serialising.
     let mut raw = stored.config.clone();
     raw.remove("_meta");
-    resolve_auto_fields(profile_id, &mut raw, bound_proxy.as_ref()).await;
+    resolve_auto_fields(profile_id, &mut raw, bound_proxy.as_ref(), !ephemeral_proxy).await;
     // A profile made on another machine carries that machine's screen; on Win/Linux
     // the window has to fit this monitor. "real" mode skips — the core drops it anyway.
     if settings::load()?.screen_resolution_mode.as_deref() != Some("real") {
@@ -502,7 +533,7 @@ pub async fn launch_profile_synced(
     let ms = |d: std::time::Duration| d.as_millis();
     let proxy_note = bound_proxy
         .as_ref()
-        .map(|p| format!("{} {}:{} ({})", p.kind.as_str(), p.host, p.port, if p.id.is_empty() { "not a saved proxy" } else if was_verified == Some(true) { "from the saved check" } else { "checked now" }))
+        .map(|p| format!("{} {}:{} ({})", p.kind.as_str(), p.host, p.port, if ephemeral_proxy { "for this launch only" } else if p.id.is_empty() { "not a saved proxy" } else if was_verified == Some(true) { "from the saved check" } else { "checked now" }))
         .unwrap_or_else(|| "none".into());
     crate::cloud_sync::log_line(&format!(
         "launch {profile_id}: proxy {proxy_note}; ready to start the browser after {} ms — sync {} ms, proxy {} ms, UDP check {} ms, location lookup {} ms, the rest {} ms",
@@ -696,10 +727,13 @@ mod debug_port_tests {
 }
 
 /// Resolve "auto" sentinels in profile JSON; with proxy: live → cached → country tag → host warn.
+/// `pin` false (a proxy for this launch only): the values are looked up live and not kept on the
+/// profile, so a launch through some other exit never changes what the profile normally claims.
 async fn resolve_auto_fields(
     profile_id: &str,
     cfg: &mut serde_json::Map<String, serde_json::Value>,
     proxy_opt: Option<&proxy::ProxyEntry>,
+    pin_values: bool,
 ) {
     let want_tz_auto = cfg.get("timezone").and_then(|v| v.as_str()) == Some("auto");
     let want_lang_auto = cfg
@@ -733,7 +767,7 @@ async fn resolve_auto_fields(
     let pin = profile::load_raw(profile_id)
         .ok()
         .and_then(|p| p.meta.pin)
-        .filter(|p| p.proxy == proxy_key && !p.timezone.is_empty());
+        .filter(|p| pin_values && p.proxy == proxy_key && !p.timezone.is_empty());
 
     // ---- geo source ----
     let mut source = "";
@@ -849,7 +883,7 @@ async fn resolve_auto_fields(
     );
     // Read off a live look-up (not a fallback), the values are kept for the next open, here or on
     // any other machine of the team.
-    if pin.is_none() && matches!(source, "proxy-live" | "direct-live") && !resolved_tz.is_empty() {
+    if pin_values && pin.is_none() && matches!(source, "proxy-live" | "direct-live") && !resolved_tz.is_empty() {
         let at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
         let kept = profile::set_fp_pin(profile_id, profile::FpPin {
             proxy: proxy_key.clone(),
