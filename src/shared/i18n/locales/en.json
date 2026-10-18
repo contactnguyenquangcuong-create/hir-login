@@ -1302,7 +1302,7 @@
   "settings.apiHelp1": "Local HTTP API (axum) for scripting — create/launch/close profiles and get a CDP WebSocket URL. Binds ",
   "settings.apiHelp2": " only, JWT Bearer auth. Changes to enable/port apply after restarting the app.",
   "settings.hirsAllowLabel": "Allow HirS to connect",
-  "settings.hirsAllowHint": "HirS can connect only while this is on, and it only sees and edits profiles in folders shared with it: click Share on a folder → HirS → Can use. It also needs the API server on and an activated key.",
+  "settings.hirsAllowHint": "HirS can connect only while this is on, and it only sees folders shared with it: click Share on a folder → HirS → Can use (open, close profiles) or Manage folder (add, edit, delete). It also needs the API server on and an activated key.",
   "settings.apiPortLabel": "Port",
   "settings.apiRefLink": "Full API reference →",
   "settings.apiRegenerateBtn": "Regenerate token",

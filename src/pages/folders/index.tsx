@@ -37,9 +37,13 @@ export function FoldersPage() {
   // HirS counts as one more person a folder is shared with (in the Chia sẻ dialog); it only
   // sees the folders shared with it, so it never writes its proxies into any other.
   const hirsAllowed = useHirsShare((s) => s.allowed);
-  const hirs = useHirsShare((s) => s.folders);
+  const hirsAccess = useHirsShare((s) => s.access);
   const loadHirs = useHirsShare((s) => s.load);
-  const hasHirs = (f: string) => hirsAllowed && hirs.includes(f);
+  const hirsOf = (f: string) => (hirsAllowed ? hirsAccess[f] : undefined);
+  const hirsPill = (f: string) => {
+    const l = hirsOf(f);
+    return l && <Pill tone={l === "manage" ? "primary" : "neutral"}>HirS · {l === "manage" ? "quản lý" : "dùng"}</Pill>;
+  };
 
   useEffect(() => { startTeamRole(); loadHirs(); }, [loadHirs]);
 
@@ -164,7 +168,7 @@ export function FoldersPage() {
                   <FolderIcon className="size-5 text-icon-soft-400" />
                   <span className="flex-1 text-label-sm text-text-strong-950">{f}</span>
                   <Pill>{localCount[f] ?? 0} profile</Pill>
-                  {hasHirs(f) && <Pill tone="primary">HirS · dùng</Pill>}
+                  {hirsPill(f)}
                   <Pill tone="neutral">Chỉ dùng</Pill>
                 </div>
               ))}
@@ -185,7 +189,7 @@ export function FoldersPage() {
             {rows.length > 0 && filtered.length === 0 && <div className="px-5 py-10 text-center text-paragraph-xs text-text-soft-400">Không có thư mục nào khớp “{filter}”.</div>}
             {filtered.slice(0, limit).map((f) => {
               const people = Object.entries(f.access);
-              const withHirs = hasHirs(f.name);
+              const withHirs = !!hirsOf(f.name);
               const max = withHirs ? 2 : 3;
               const deletable = f.profiles === 0 && (f.local || f.canDelete !== false);
               const open = () => { setFolder(f.name); setSection("browsers"); };
@@ -212,12 +216,12 @@ export function FoldersPage() {
                   {/* Who has it, on one line: the first few, then how many more (all of them on hover). */}
                   <div
                     className="flex min-w-0 items-center gap-1 overflow-hidden"
-                    title={[...(withHirs ? ["HirS · được dùng"] : []), ...people.map(([id, lvl]) => `${nameOf(id)} · ${lvl === "manage" ? "quản lý" : "được dùng"}`)].join("\n") || undefined}
+                    title={[...(withHirs ? [`HirS · ${hirsOf(f.name) === "manage" ? "quản lý" : "được dùng"}`] : []), ...people.map(([id, lvl]) => `${nameOf(id)} · ${lvl === "manage" ? "quản lý" : "được dùng"}`)].join("\n") || undefined}
                   >
                     {people.length === 0 && !withHirs
                       ? <span className="text-paragraph-xs text-text-soft-400">Chưa chia sẻ</span>
                       : <>
-                        {withHirs && <Pill tone="primary">HirS · dùng</Pill>}
+                        {hirsPill(f.name)}
                         {people.slice(0, max).map(([id, lvl]) => (
                           <Pill key={id} tone={lvl === "manage" ? "primary" : "neutral"}>{nameOf(id)} · {lvl === "manage" ? "quản lý" : "dùng"}</Pill>
                         ))}

@@ -1,22 +1,23 @@
 import { create } from "zustand";
-import { hirsAllowed, hirsFolders, hirsFolderSet } from "../model/api";
+import { hirsAllowed, hirsFolders, hirsFolderSet, type HirsLevel } from "../model/api";
 
-/** HirS as one more person to share a folder with: it only sees and edits profiles in the
- *  folders shared here, and only while "Cho phép HirS kết nối" (`allowed`) is on. */
+/** HirS as one more person to share a folder with: "use" (open, close) or "manage" (also add,
+ *  edit, delete). It only sees the folders shared here, and only while "Cho phép HirS kết nối"
+ *  (`allowed`) is on. */
 type HirsShareState = {
   allowed: boolean;
-  folders: string[];
+  access: Record<string, HirsLevel>;
   load: () => Promise<void>;
-  set: (folder: string, shared: boolean) => Promise<void>;
+  set: (folder: string, level: HirsLevel | "none") => Promise<void>;
 };
 
 export const useHirsShare = create<HirsShareState>((set) => ({
   allowed: false,
-  folders: [],
+  access: {},
   load: async () => {
-    try { set({ folders: await hirsFolders(), allowed: await hirsAllowed() }); } catch { /* keeps the last known */ }
+    try { set({ access: await hirsFolders(), allowed: await hirsAllowed() }); } catch { /* keeps the last known */ }
   },
-  set: async (folder, shared) => {
-    set({ folders: await hirsFolderSet(folder, shared) });
+  set: async (folder, level) => {
+    set({ access: await hirsFolderSet(folder, level) });
   },
 }));

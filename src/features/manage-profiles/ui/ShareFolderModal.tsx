@@ -12,8 +12,9 @@ type Folder = { name: string; access: Record<string, string> };
 const initial = (n: string) => (n.trim()[0] ?? "?").toUpperCase();
 
 /** Share one folder: who may use it, and (admin only) who manages it. HirS, the video tool on
- *  this machine, is listed like a person once "Cho phép HirS kết nối" is on: shared, it sees and
- *  edits the profiles in this folder (and puts its proxies into them); unshared, it never does. */
+ *  this machine, is listed like a person once "Cho phép HirS kết nối" is on: "use" lets it open
+ *  and close the profiles here, "manage" also add, edit (its proxies) and delete them; unshared,
+ *  it never sees this folder. */
 export function ShareFolderModal({ folder, onClose }: { folder: string; onClose: () => void }) {
   const role = useTeam((s) => s.role);
   const configured = useTeam((s) => s.configured);
@@ -21,7 +22,7 @@ export function ShareFolderModal({ folder, onClose }: { folder: string; onClose:
   const [access, setAccess] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
   const hirsAllowed = useHirsShare((s) => s.allowed);
-  const hirsShared = useHirsShare((s) => s.folders.includes(folder));
+  const hirsLevel: Level = useHirsShare((s) => s.access[folder]) ?? "none";
   const loadHirs = useHirsShare((s) => s.load);
   const setHirs = useHirsShare((s) => s.set);
 
@@ -63,7 +64,7 @@ export function ShareFolderModal({ folder, onClose }: { folder: string; onClose:
 
   const shareHirs = async (level: Level) => {
     setBusy("hirs");
-    try { await setHirs(folder, level !== "none"); }
+    try { await setHirs(folder, level); }
     catch (e) { toast.err(String(e)); }
     finally { setBusy(null); }
   };
@@ -99,13 +100,19 @@ export function ShareFolderModal({ folder, onClose }: { folder: string; onClose:
             <span className="grid size-8 flex-none place-items-center rounded-full bg-primary-alpha-10 text-label-xs text-primary-base">H</span>
             <div className="flex min-w-0 flex-1 flex-col">
               <span className="truncate text-label-sm text-text-strong-950">HirS</span>
-              <span className="text-paragraph-xs text-text-soft-400">Công cụ video trên máy này — được chia sẻ thì thấy, mở và gắn proxy cho profile trong thư mục</span>
+              <span className="text-paragraph-xs text-text-soft-400">
+                {hirsLevel === "manage"
+                  ? "Công cụ video trên máy này — được thêm, sửa (gắn proxy), xoá profile trong thư mục"
+                  : hirsLevel === "use"
+                    ? "Công cụ video trên máy này — chỉ được mở, đóng profile trong thư mục"
+                    : "Công cụ video trên máy này — chưa thấy thư mục này"}
+              </span>
             </div>
             <div className="w-44 flex-none">
               <Select
-                value={hirsShared ? "use" : "none"}
+                value={hirsLevel}
                 onChange={(v) => shareHirs(v as Level)}
-                options={[{ value: "none", label: "Không có quyền" }, { value: "use", label: "Được dùng" }]}
+                options={[{ value: "none", label: "Không có quyền" }, { value: "use", label: "Được dùng" }, { value: "manage", label: "Quản lý thư mục" }]}
                 disabled={busy === "hirs"}
               />
             </div>

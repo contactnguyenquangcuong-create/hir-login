@@ -2397,16 +2397,22 @@ fn folder_delete(folder: String, delete_profiles: bool) -> Result<usize, String>
     profile::delete_folder(&folder, delete_profiles).map_err(|e| e.to_string())
 }
 
-/// The folders shared with HirS ("Chia sẻ cho HirS").
-#[tauri::command]
-fn hirs_folders() -> Vec<String> {
-    hirs_share::list()
+fn hirs_access_map(m: std::collections::BTreeMap<String, hirs_share::Level>) -> std::collections::BTreeMap<String, &'static str> {
+    m.into_iter().map(|(k, l)| (k, l.as_str())).collect()
 }
 
-/// Shares one folder with HirS, or stops sharing it; answers the new list.
+/// The folders shared with HirS and how far: { folder: "use" | "manage" }.
 #[tauri::command]
-fn hirs_folder_set(folder: String, shared: bool) -> Result<Vec<String>, String> {
-    hirs_share::set(&folder, shared).map_err(|e| e.to_string())
+fn hirs_folders() -> std::collections::BTreeMap<String, &'static str> {
+    hirs_access_map(hirs_share::access())
+}
+
+/// Shares one folder with HirS ("use" | "manage"), or stops sharing it ("none"); answers the
+/// new map.
+#[tauri::command]
+fn hirs_folder_set(folder: String, level: String) -> Result<std::collections::BTreeMap<String, &'static str>, String> {
+    let level = hirs_share::parse_level(&level).map_err(|e| e.to_string())?;
+    hirs_share::set(&folder, level).map(hirs_access_map).map_err(|e| e.to_string())
 }
 
 /// Host OS in fingerprint-library vocabulary (macOS/Windows/Linux).

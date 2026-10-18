@@ -50,14 +50,14 @@ export function FolderTabs() {
   }, [folderNames, registry, profiles, forgetFolder]);
   // HirS is shared with like a person, in the Chia sẻ dialog; only shown while it may connect.
   const hirsAllowed = useHirsShare((s) => s.allowed);
-  const hirsFolders = useHirsShare((s) => s.folders);
-  const hirs = hirsAllowed ? hirsFolders : [];
+  const hirsAccess = useHirsShare((s) => s.access);
+  const hirs = hirsAllowed ? Object.keys(hirsAccess) : [];
   const loadHirs = useHirsShare((s) => s.load);
   const setHirs = useHirsShare((s) => s.set);
   useEffect(() => { startTeamRole(); loadHirs(); }, [loadHirs]);
   const flipHirs = async (f: string) => {
     const on = !hirs.includes(f);
-    try { await setHirs(f, on); toast.ok(t(on ? "folderTabs.hirsOn" : "folderTabs.hirsOff", { folder: f })); }
+    try { await setHirs(f, on ? "use" : "none"); toast.ok(t(on ? "folderTabs.hirsOn" : "folderTabs.hirsOff", { folder: f })); }
     catch (e) { toast.err(String(e)); }
   };
 
