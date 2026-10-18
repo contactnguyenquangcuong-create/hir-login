@@ -18,6 +18,7 @@ import { licenseInfo } from "../../entities/license";
 import { Section, Row, Block, Pill } from "./ui";
 import { TeamTab } from "./TeamTab";
 import { useTeam } from "../../shared/model/teamRole";
+import { useHirsShare } from "../../entities/profile";
 import { FingerprintPanel } from "./FingerprintPanel";
 import { useAppUpdate } from "../../shared/model/appUpdate";
 import { getVersion } from "@tauri-apps/api/app";
@@ -78,7 +79,7 @@ export function SettingsPage() {
     finally { setMcpBusy(false); }
   };
   const save = async () => {
-    try { await settingsSave(s); setSaved(JSON.stringify(s)); toast.ok(t("settings.saved")); refreshApi(); }
+    try { await settingsSave(s); setSaved(JSON.stringify(s)); toast.ok(t("settings.saved")); refreshApi(); useHirsShare.getState().load(); }
     catch (e) { toast.err(String(e)); }
   };
 

@@ -6,7 +6,7 @@ import { toast } from "../../shared/model/toast";
 import { confirmModal } from "../../shared/model/confirm";
 import { useNav } from "../../shared/model/navigation";
 import { startTeamRole, teamCall, useTeam, canShare } from "../../shared/model/teamRole";
-import { useProfile, useFolders } from "../../entities/profile";
+import { useProfile, useFolders, useHirsShare } from "../../entities/profile";
 import { ShareFolderModal } from "../../features/manage-profiles/ui/ShareFolderModal";
 import { Section, Pill } from "../settings/ui";
 import { useContextMenu } from "../../shared/hooks/useContextMenu";
@@ -34,8 +34,14 @@ export function FoldersPage() {
   const [name, setName] = useState("");
   const [filter, setFilter] = useState("");
   const [limit, setLimit] = useState(50);
+  // HirS counts as one more person a folder is shared with (in the Chia sẻ dialog); it only
+  // sees the folders shared with it, so it never writes its proxies into any other.
+  const hirsAllowed = useHirsShare((s) => s.allowed);
+  const hirs = useHirsShare((s) => s.folders);
+  const loadHirs = useHirsShare((s) => s.load);
+  const hasHirs = (f: string) => hirsAllowed && hirs.includes(f);
 
-  useEffect(() => { startTeamRole(); }, []);
+  useEffect(() => { startTeamRole(); loadHirs(); }, [loadHirs]);
 
   const load = useCallback(async () => {
     // No team on this machine: nothing to ask the server (canShare is "open" for a
@@ -158,6 +164,7 @@ export function FoldersPage() {
                   <FolderIcon className="size-5 text-icon-soft-400" />
                   <span className="flex-1 text-label-sm text-text-strong-950">{f}</span>
                   <Pill>{localCount[f] ?? 0} profile</Pill>
+                  {hasHirs(f) && <Pill tone="primary">HirS · dùng</Pill>}
                   <Pill tone="neutral">Chỉ dùng</Pill>
                 </div>
               ))}
@@ -178,6 +185,8 @@ export function FoldersPage() {
             {rows.length > 0 && filtered.length === 0 && <div className="px-5 py-10 text-center text-paragraph-xs text-text-soft-400">Không có thư mục nào khớp “{filter}”.</div>}
             {filtered.slice(0, limit).map((f) => {
               const people = Object.entries(f.access);
+              const withHirs = hasHirs(f.name);
+              const max = withHirs ? 2 : 3;
               const deletable = f.profiles === 0 && (f.local || f.canDelete !== false);
               const open = () => { setFolder(f.name); setSection("browsers"); };
               const menu = [
@@ -203,15 +212,16 @@ export function FoldersPage() {
                   {/* Who has it, on one line: the first few, then how many more (all of them on hover). */}
                   <div
                     className="flex min-w-0 items-center gap-1 overflow-hidden"
-                    title={people.map(([id, lvl]) => `${nameOf(id)} · ${lvl === "manage" ? "quản lý" : "được dùng"}`).join("\n") || undefined}
+                    title={[...(withHirs ? ["HirS · được dùng"] : []), ...people.map(([id, lvl]) => `${nameOf(id)} · ${lvl === "manage" ? "quản lý" : "được dùng"}`)].join("\n") || undefined}
                   >
-                    {people.length === 0
+                    {people.length === 0 && !withHirs
                       ? <span className="text-paragraph-xs text-text-soft-400">Chưa chia sẻ</span>
                       : <>
-                        {people.slice(0, 3).map(([id, lvl]) => (
+                        {withHirs && <Pill tone="primary">HirS · dùng</Pill>}
+                        {people.slice(0, max).map(([id, lvl]) => (
                           <Pill key={id} tone={lvl === "manage" ? "primary" : "neutral"}>{nameOf(id)} · {lvl === "manage" ? "quản lý" : "dùng"}</Pill>
                         ))}
-                        {people.length > 3 && <span className="flex-none text-paragraph-xs text-text-soft-400">+{people.length - 3}</span>}
+                        {people.length > max && <span className="flex-none text-paragraph-xs text-text-soft-400">+{people.length - max}</span>}
                       </>}
                   </div>
                   <div className="min-w-0 truncate text-paragraph-xs text-text-soft-400">

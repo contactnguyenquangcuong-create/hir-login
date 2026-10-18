@@ -53,6 +53,11 @@ export const helperClose = () => invoke<void>("helper_close");
 /** The operator closed the panel — a refusal about this page only. */
 export const helperDismiss = (profile: string) => invoke<void>("helper_dismiss", { profile });
 export const folderDelete = (folder: string, deleteProfiles: boolean) => invoke<number>("folder_delete", { folder, deleteProfiles });
+/** Folders shared with HirS — HirS only sees and edits profiles in these. */
+export const hirsFolders = () => invoke<string[]>("hirs_folders");
+export const hirsFolderSet = (folder: string, shared: boolean) => invoke<string[]>("hirs_folder_set", { folder, shared });
+/** "Cho phép HirS kết nối" (Settings → Nâng cao). */
+export const hirsAllowed = () => invoke<{ hirs_allowed?: boolean }>("settings_get").then((s) => s.hirs_allowed === true);
 export const cookiesExportToFile = (profileId: string, path: string) => invoke<number>("cookies_export_to_file", { profileId, path });
 export const cookiesImport = (profileId: string, cookies: any[]) => invoke<number>("cookies_import", { profileId, cookies });
 /** The text of a cookie file: JSON (array or {cookies}), Netscape cookies.txt, or a Facebook cookie string. */

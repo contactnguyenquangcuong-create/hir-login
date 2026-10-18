@@ -41,6 +41,7 @@ mod team_server;
 mod team_invite;
 mod tailscale;
 mod firewall;
+mod hirs_share;
 
 use serde_json::Value;
 
@@ -2396,6 +2397,18 @@ fn folder_delete(folder: String, delete_profiles: bool) -> Result<usize, String>
     profile::delete_folder(&folder, delete_profiles).map_err(|e| e.to_string())
 }
 
+/// The folders shared with HirS ("Chia sẻ cho HirS").
+#[tauri::command]
+fn hirs_folders() -> Vec<String> {
+    hirs_share::list()
+}
+
+/// Shares one folder with HirS, or stops sharing it; answers the new list.
+#[tauri::command]
+fn hirs_folder_set(folder: String, shared: bool) -> Result<Vec<String>, String> {
+    hirs_share::set(&folder, shared).map_err(|e| e.to_string())
+}
+
 /// Host OS in fingerprint-library vocabulary (macOS/Windows/Linux).
 #[tauri::command]
 fn host_platform() -> String {
@@ -4153,6 +4166,8 @@ pub fn run() {
             profile_set_folder,
             folder_rename,
             folder_delete,
+            hirs_folders,
+            hirs_folder_set,
             host_platform,
             profile_create_from_template,
             enrich_picks_for_preset,

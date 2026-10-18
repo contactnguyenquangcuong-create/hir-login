@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { cn } from "@proxyshard/shardx-ui-kit";
 import { useContextMenu } from "../../shared/hooks/useContextMenu";
 import { useT } from "../../shared/i18n";
-import { useProfile, useFolders } from "../../entities/profile";
+import { useProfile, useFolders, useHirsShare } from "../../entities/profile";
+import { toast } from "../../shared/model/toast";
 import { useTeam, canEdit, canShare, startTeamRole } from "../../shared/model/teamRole";
 import { FolderListButton, inlineFolders } from "../../shared/ui/FolderListButton";
 import { ShareFolderModal } from "../../features/manage-profiles/ui/ShareFolderModal";
@@ -47,7 +48,18 @@ export function FolderTabs() {
       if (!folderNames.includes(f) && !profiles.some((p) => p.folder === f)) forgetFolder(f);
     }
   }, [folderNames, registry, profiles, forgetFolder]);
-  useEffect(() => { startTeamRole(); }, []);
+  // HirS is shared with like a person, in the Chia sẻ dialog; only shown while it may connect.
+  const hirsAllowed = useHirsShare((s) => s.allowed);
+  const hirsFolders = useHirsShare((s) => s.folders);
+  const hirs = hirsAllowed ? hirsFolders : [];
+  const loadHirs = useHirsShare((s) => s.load);
+  const setHirs = useHirsShare((s) => s.set);
+  useEffect(() => { startTeamRole(); loadHirs(); }, [loadHirs]);
+  const flipHirs = async (f: string) => {
+    const on = !hirs.includes(f);
+    try { await setHirs(f, on); toast.ok(t(on ? "folderTabs.hirsOn" : "folderTabs.hirsOff", { folder: f })); }
+    catch (e) { toast.err(String(e)); }
+  };
 
   // One pass over the profiles instead of one per folder: with a thousand folders the per-tab
   // `filter` was a thousand passes on every render.
@@ -91,6 +103,11 @@ export function FolderTabs() {
   const folderMenu = (e: React.MouseEvent, f: string) =>
     ctx.open(e, [
       ...(canShare(role, configured) ? [{ label: "Chia sẻ quyền…", onClick: () => setSharing(f) }] : []),
+      // A team member has no Chia sẻ dialog, yet still decides what the HirS on their own machine
+      // may touch.
+      ...(!canShare(role, configured) && hirsAllowed
+        ? [{ label: hirs.includes(f) ? `✓ ${t("folderTabs.unshareWithHirs")}` : t("folderTabs.shareWithHirs"), onClick: () => flipHirs(f) }]
+        : []),
       ...(canEdit(role, configured) ? [{ label: t("folderTabs.deleteFolder"), onClick: () => deleteFolder(f), danger: true }] : []),
     ]);
 
@@ -108,11 +125,12 @@ export function FolderTabs() {
           key={f}
           className={cn(tabBase, "max-w-[160px]", folder === f ? tabActive : tabIdle, dropTarget === f && tabDrop)}
           onClick={() => setFolder(f)}
-          title={`${f} — ${t("folderTabs.folderTabHint")}`}
+          title={`${f} — ${t("folderTabs.folderTabHint")}${hirs.includes(f) ? `\n${t("folderTabs.hirsShared")}` : ""}`}
           onContextMenu={(e) => folderMenu(e, f)}
           {...dropProps(f, f)}
         >
           <span className="truncate">{f}</span>
+          {hirs.includes(f) && <span className="size-1.5 flex-none rounded-full bg-primary-base" />}
           <span className={badge(folder === f)}>{counts.get(f) ?? 0}</span>
         </button>
       ))}

@@ -1047,6 +1047,7 @@ pub fn rename_folder(old: &str, new: &str) -> Result<usize> {
             n += 1;
         }
     }
+    crate::hirs_share::renamed(old, new);
     Ok(n)
 }
 
@@ -1055,6 +1056,7 @@ pub fn delete_folder(name: &str, delete_profiles: bool) -> Result<usize> {
     let _guard = file_lock();
     let dir = store::profiles_dir()?;
     let mut n = 0;
+    let mut kept_open = 0;
     for entry in fs::read_dir(&dir)? {
         let entry = entry?;
         if entry.path().extension().and_then(|s| s.to_str()) != Some("json") {
@@ -1067,6 +1069,14 @@ pub fn delete_folder(name: &str, delete_profiles: bool) -> Result<usize> {
         };
         if stored.meta.folder == name {
             if delete_profiles {
+                // An open profile stays where it is: its browser still holds the files. The
+                // trash refuses it, and the fallback below would then have deleted it outright,
+                // under the running browser.
+                let id = stored.meta.id.as_str();
+                if crate::process::Tracker::shared().is_running(id) || crate::process::is_closing(id) {
+                    kept_open += 1;
+                    continue;
+                }
                 // Through the trash, like every other delete — a folder wiped
                 // by mistake is exactly the case the week is there for.
                 if crate::trash::move_to_trash(&stored.meta.id).is_err() {
@@ -1080,6 +1090,10 @@ pub fn delete_folder(name: &str, delete_profiles: bool) -> Result<usize> {
             }
             n += 1;
         }
+    }
+    // The folder is gone unless an open profile kept it.
+    if kept_open == 0 {
+        crate::hirs_share::removed(name);
     }
     Ok(n)
 }

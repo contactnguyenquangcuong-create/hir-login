@@ -163,6 +163,224 @@ fn hirs_allowed() -> bool {
     crate::settings::load().map(|s| s.hirs_allowed).unwrap_or(false)
 }
 
+// ---- HirS sees only the folders shared with it ----
+//
+// On top of the switch above, the owner shares folders one by one ("Chia sẻ cho HirS",
+// see hirs_share.rs). HirS writes its own proxies into the profiles it uses, so it must never
+// see or touch a folder that has proxies of its own. For requests marked `X-Hir-Client: HirS`:
+// lists are filtered to shared folders; a profile outside them answers 403 folder_not_shared;
+// a profile is created / moved only into a shared folder, or into a brand-new folder name
+// (which is then shared, as it is HirS's own); routes HirS has no use for are refused.
+
+fn hirs_refuse(status: StatusCode, code: &str, message: String) -> Response {
+    (status, Json(json!({ "error": message, "message": message, "code": code }))).into_response()
+}
+
+fn folder_not_shared(folder: &str) -> Response {
+    let message = if folder.is_empty() {
+        "Profile này không nằm trong thư mục nào nên không chia sẻ cho HirS.".to_string()
+    } else {
+        format!("Thư mục \"{folder}\" chưa được chia sẻ cho HirS. Mở Hir-Login → Thư mục → bật \"Chia sẻ cho HirS\" cho thư mục này.")
+    };
+    hirs_refuse(StatusCode::FORBIDDEN, "folder_not_shared", message)
+}
+
+/// Every folder some profile carries — a name not among them is new.
+fn existing_folders() -> std::collections::HashSet<String> {
+    crate::profile::list_all()
+        .map(|all| all.into_iter().map(|m| m.folder).filter(|f| !f.is_empty()).collect())
+        .unwrap_or_default()
+}
+
+/// May HirS put a profile into `folder`? None = yes (and `Some(name)` in the Ok means "share it
+/// once the request succeeds", for a new folder); Err = the refusal to send.
+fn hirs_target_folder(folder: &str) -> Result<Option<String>, Response> {
+    let folder = folder.trim();
+    if folder.is_empty() {
+        return Err(hirs_refuse(
+            StatusCode::BAD_REQUEST,
+            "folder_required",
+            "HirS phải đặt profile vào một thư mục (đã chia sẻ, hoặc thư mục mới).".into(),
+        ));
+    }
+    if crate::hirs_share::is_shared(folder) {
+        return Ok(None);
+    }
+    if existing_folders().contains(folder) {
+        return Err(folder_not_shared(folder));
+    }
+    Ok(Some(folder.to_string()))
+}
+
+fn profile_folder(id: &str) -> Option<String> {
+    crate::profile::load_raw(id).ok().map(|p| p.meta.folder)
+}
+
+async fn hirs_scope(req: Request, next: Next) -> Response {
+    if !is_hirs(&req) {
+        return next.run(req).await;
+    }
+    use axum::http::Method;
+    let method = req.method().clone();
+    let path = req.uri().path().trim_end_matches('/').to_string();
+    let seg: Vec<String> = path.split('/').filter(|s| !s.is_empty()).map(|s| {
+        percent_decode(s)
+    }).collect();
+    let seg: Vec<&str> = seg.iter().map(String::as_str).collect();
+    let shared = crate::hirs_share::list();
+    let shared_set: std::collections::HashSet<&str> = shared.iter().map(String::as_str).collect();
+
+    match (method.clone(), seg.as_slice()) {
+        // Not folder-bound: a new fingerprint, the fingerprint library.
+        (Method::GET, ["fingerprint", "new"]) | (Method::GET, ["fingerprint", "new", _]) | (Method::GET, ["fingerprints"]) => next.run(req).await,
+
+        // Lists: only what is in a shared folder.
+        (Method::GET, ["profiles"]) => {
+            let res = next.run(req).await;
+            filter_json_array(res, |row| row.get("folder").and_then(|f| f.as_str()).is_some_and(|f| shared_set.contains(f))).await
+        }
+        (Method::GET, ["running"]) => {
+            let folders: std::collections::HashMap<String, String> = crate::profile::list_all()
+                .map(|all| all.into_iter().map(|m| (m.id, m.folder)).collect())
+                .unwrap_or_default();
+            let res = next.run(req).await;
+            filter_json_array(res, |row| {
+                row.get("profile_id").and_then(|i| i.as_str()).and_then(|i| folders.get(i)).is_some_and(|f| shared_set.contains(f.as_str()))
+            })
+            .await
+        }
+        // Shared folders, including ones with no profile yet.
+        (Method::GET, ["folders"]) => Json(json!(shared)).into_response(),
+
+        // Creating a profile.
+        (Method::POST, ["profiles"]) => {
+            let (req, body) = match take_json(req).await { Ok(x) => x, Err(r) => return r };
+            let folder = body.get("folder").and_then(|f| f.as_str()).unwrap_or("");
+            run_into_folder(req, next, folder).await
+        }
+        (Method::POST, ["folders", folder, "profiles"]) => {
+            let folder = folder.to_string();
+            run_into_folder(req, next, &folder).await
+        }
+
+        // A folder itself: only a shared one (a rename keeps the share — profile::rename_folder).
+        (Method::DELETE, ["folders", folder]) => {
+            if shared_set.contains(*folder) { next.run(req).await } else { folder_not_shared(folder) }
+        }
+        // A rename onto an existing unshared folder would merge into it and share it: the new
+        // name must be shared already or brand new.
+        (Method::PATCH, ["folders", folder]) => {
+            if !shared_set.contains(*folder) {
+                return folder_not_shared(folder);
+            }
+            let (req, body) = match take_json(req).await { Ok(x) => x, Err(r) => return r };
+            let target = body.get("name").and_then(|f| f.as_str()).unwrap_or("").trim().to_string();
+            if target != *folder {
+                if let Err(r) = hirs_target_folder(&target) {
+                    return r;
+                }
+            }
+            next.run(req).await
+        }
+
+        // One profile: only inside a shared folder; moving it needs a shared or new target.
+        (_, ["profiles", id, rest @ ..]) if *id != "temporary" => {
+            let current = match profile_folder(id) {
+                Some(f) => f,
+                None => return next.run(req).await, // unknown id: the handler's own 404
+            };
+            if !shared_set.contains(current.as_str()) {
+                return folder_not_shared(&current);
+            }
+            let allowed = matches!(
+                (&method, rest),
+                (&Method::GET, []) | (&Method::PATCH, []) | (&Method::DELETE, []) | (&Method::POST, ["start"]) | (&Method::POST, ["stop"])
+            );
+            if !allowed {
+                return hirs_route_refused();
+            }
+            if method == Method::PATCH {
+                let (req, body) = match take_json(req).await { Ok(x) => x, Err(r) => return r };
+                if let Some(target) = body.get("folder").and_then(|f| f.as_str()) {
+                    return run_into_folder(req, next, target).await;
+                }
+                return next.run(req).await;
+            }
+            next.run(req).await
+        }
+
+        _ => hirs_route_refused(),
+    }
+}
+
+fn hirs_route_refused() -> Response {
+    hirs_refuse(StatusCode::FORBIDDEN, "hirs_route_not_allowed", "HirS không được dùng chức năng này của Hir-Login.".into())
+}
+
+/// Runs a create / move into `folder` if HirS may use it, sharing a brand-new folder once the
+/// request has gone through.
+async fn run_into_folder(req: Request, next: Next, folder: &str) -> Response {
+    let share_after = match hirs_target_folder(folder) {
+        Ok(s) => s,
+        Err(r) => return r,
+    };
+    let res = next.run(req).await;
+    if let Some(f) = share_after {
+        if res.status().is_success() {
+            let _ = crate::hirs_share::set(&f, true);
+        }
+    }
+    res
+}
+
+/// Reads the JSON body and puts it back, so the handler still gets it.
+async fn take_json(req: Request) -> Result<(Request, Value), Response> {
+    let (parts, body) = req.into_parts();
+    let bytes = axum::body::to_bytes(body, 32 * 1024 * 1024)
+        .await
+        .map_err(|_| err(StatusCode::BAD_REQUEST, "body too large or unreadable").into_response())?;
+    let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    Ok((Request::from_parts(parts, axum::body::Body::from(bytes)), value))
+}
+
+/// Keeps only the rows of a JSON array answer that `keep` accepts.
+async fn filter_json_array(res: Response, keep: impl Fn(&Value) -> bool) -> Response {
+    if !res.status().is_success() {
+        return res;
+    }
+    let (parts, body) = res.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, 64 * 1024 * 1024).await else {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, "unreadable answer").into_response();
+    };
+    match serde_json::from_slice::<Value>(&bytes) {
+        Ok(Value::Array(rows)) => {
+            let kept: Vec<Value> = rows.into_iter().filter(|r| keep(r)).collect();
+            let mut out = Json(Value::Array(kept)).into_response();
+            *out.status_mut() = parts.status;
+            out
+        }
+        _ => Response::from_parts(parts, axum::body::Body::from(bytes)),
+    }
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 // ---- handlers ----
 
 async fn health() -> Json<Value> {
@@ -171,6 +389,8 @@ async fn health() -> Json<Value> {
         "name": "hir-login",
         "version": env!("CARGO_PKG_VERSION"),
         "hirs_allowed": hirs_allowed(),
+        // The folders shared with HirS ("Chia sẻ cho HirS"); HirS sees nothing outside them.
+        "hirs_folders": crate::hirs_share::list(),
         // POST /profiles/{id}/start understands {"proxy": "..."} for that launch only.
         "start_proxy": true,
     }))
@@ -1244,6 +1464,7 @@ fn router() -> Router {
         .route("/automation/modules/:id", delete(remove_module))
         // Layers run last-added first: token (401), then key (license_required),
         // then whether HirS is let in (hirs_not_allowed).
+        .route_layer(middleware::from_fn(hirs_scope))
         .route_layer(middleware::from_fn(hirs_gate))
         .route_layer(middleware::from_fn(license_gate))
         .route_layer(middleware::from_fn(auth));
