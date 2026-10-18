@@ -23,7 +23,7 @@ export default {
     if (read && p.length === 3 && p[2] === 'latest.json') {
       const v = await env.KHO.get('latest:' + p[0] + '-' + p[1]);
       if (!v) return new Response(null, { status: 204 });
-      return new Response(v, { headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
+      return new Response(v, { headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' } });
     }
 
     if (read && p.length === 2 && p[0] === 'file') {
