@@ -7,6 +7,9 @@ import {
   useProfile,
   useVisibleProfiles,
   useProxyMap,
+  nextSort,
+  parseSort,
+  type SortKey,
 } from "../../entities/profile";
 import {
   ProfileInlineEditor,
@@ -16,6 +19,33 @@ import {
 import { ProfileRow } from "./ProfileRow";
 
 const PAGE_SIZE = 20;
+
+/** A column title that sorts: click for the order, again for the reverse, a third time to clear.
+ *  The arrow shows the order in force (up = small/old/A first, down = big/new/Z first). */
+function SortHead({ k, label, className }: { k: SortKey; label: string; className?: string }) {
+  const t = useT();
+  const sort = useProfile((s) => s.sort);
+  const setSort = useProfile((s) => s.setSort);
+  const cur = parseSort(sort);
+  const dir = cur && cur.key === k ? cur.dir : null;
+  return (
+    <div className={className}>
+      <button
+        type="button"
+        className={`group inline-flex cursor-pointer items-center gap-1 border-0 bg-transparent p-0 text-inherit uppercase hover:text-text-strong-950 ${dir ? "text-primary-base" : ""}`}
+        title={t("profileTable.sortHint", { col: label })}
+        aria-sort={dir === "asc" ? "ascending" : dir === "desc" ? "descending" : "none"}
+        onClick={() => setSort(nextSort(sort, k))}
+      >
+        <span>{label}</span>
+        <svg viewBox="0 0 10 14" className={`h-3 w-2 flex-none ${dir ? "" : "opacity-0 group-hover:opacity-50"}`} fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M5 12V2M2 5l3-3 3 3" className={dir === "desc" ? "opacity-25" : ""} />
+          <path d="M5 2v10M2 9l3 3 3-3" className={dir === "asc" ? "opacity-25" : ""} />
+        </svg>
+      </button>
+    </div>
+  );
+}
 
 export function ProfileTable() {
   const t = useT();
@@ -85,12 +115,13 @@ export function ProfileTable() {
               onChange={(e) => selectProfiles(e.target.checked, paged)}
             />
           </div>
-          <div>{t("profileTable.colName")}</div>
-          <div>{t("profileTable.colStatus")}</div>
-          <div>{t("profileTable.colProxy")}</div>
-          <div>{t("profileTable.colNotes")}</div>
-          <div className="head-time">{t("profileTable.colTime")}</div>
-          <div className="head-lastrun">{t("profileTable.colLastRun")}</div>
+          <SortHead k="name" label={t("profileTable.colName")} />
+          <SortHead k="status" label={t("profileTable.colStatus")} />
+          <SortHead k="proxy" label={t("profileTable.colProxy")} />
+          <SortHead k="notes" label={t("profileTable.colNotes")} />
+          <SortHead k="runtime" label={t("profileTable.colTime")} className="head-time" />
+          <SortHead k="created" label={t("profileTable.colCreated")} className="head-created" />
+          <SortHead k="launched" label={t("profileTable.colLastRun")} className="head-lastrun" />
           <div></div>
         </div>
         )}

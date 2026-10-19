@@ -52,6 +52,15 @@ export function ProfileFilterBar() {
                 { value: "created-asc", label: t("profileFilterBar.orderOldest") },
                 { value: "launched-desc", label: t("profileFilterBar.orderLaunched") },
                 { value: "runtime-desc", label: t("profileFilterBar.orderRuntime") },
+                // The rest are what a click on a column title can ask for.
+                { value: "runtime-asc", label: `${t("profileTable.colTime")} ↑` },
+                { value: "launched-asc", label: `${t("profileTable.colLastRun")} ↑` },
+                { value: "status-desc", label: `${t("profileTable.colStatus")} ↓` },
+                { value: "status-asc", label: `${t("profileTable.colStatus")} ↑` },
+                { value: "proxy-asc", label: `${t("profileTable.colProxy")} ↑` },
+                { value: "proxy-desc", label: `${t("profileTable.colProxy")} ↓` },
+                { value: "notes-asc", label: `${t("profileTable.colNotes")} ↑` },
+                { value: "notes-desc", label: `${t("profileTable.colNotes")} ↓` },
               ]}
             />
             <CSSelect

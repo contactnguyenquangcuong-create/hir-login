@@ -72,11 +72,11 @@
   padding: 0 16px;
   min-height: 52px;
   align-items: center;
-  /* dot · check · name · status · proxy · notes · time · last run · actions */
+  /* dot · check · name · status · proxy · notes · time · created · last run · actions */
   grid-template-columns:
     6px 20px minmax(170px, 1.3fr) 112px
     minmax(220px, 1.6fr) minmax(140px, 1.2fr)
-    76px 132px 156px;
+    76px 100px 132px 156px;
 }
 /* The column titles: a shorter row than the profiles under them. */
 .t-cols.t-head {
@@ -89,10 +89,12 @@
 }
 @media (max-width: 1280px) {
   .t-cols {
+    column-gap: 12px;
+    padding: 0 12px;
     grid-template-columns:
-      6px 20px minmax(140px, 1.3fr) 104px
-      minmax(180px, 1.5fr) minmax(110px, 1fr)
-      70px 156px;
+      6px 20px minmax(130px, 1.3fr) 100px
+      minmax(160px, 1.5fr) minmax(90px, 1fr)
+      68px 90px 156px;
   }
   .t-cols > .cell-lastrun,
   .t-cols > .head-lastrun {

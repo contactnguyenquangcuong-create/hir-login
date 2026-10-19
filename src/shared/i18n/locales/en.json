@@ -931,6 +931,8 @@
   "profileRowActions.stop": "Stop",
   "profileRowActions.unpin": "Unpin",
   "profileTable.colLastRun": "Last run",
+  "profileTable.colCreated": "Created",
+  "profileTable.sortHint": "Sort by \"{col}\" — click again to reverse, a third time to clear",
   "profileTable.colName": "Name",
   "profileTable.colNotes": "Notes",
   "profileTable.colProxy": "Proxy",

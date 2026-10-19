@@ -40,22 +40,36 @@ export type ProfileFilters = {
 
 export const emptyFilters = (): ProfileFilters => ({ status: "all", country: "", proxy: "all" });
 
-/** Row order. "added" is the order the store returns them in — how it always was. */
-export type ProfileSort =
-  | "added"
-  | "name-asc"
-  | "name-desc"
-  | "created-desc"
-  | "created-asc"
-  | "launched-desc"
-  | "runtime-desc";
+/** What a column title sorts by. */
+export type SortKey = "name" | "status" | "proxy" | "notes" | "runtime" | "launched" | "created";
+export type SortDir = "asc" | "desc";
+
+/** Row order: a column and a direction. "added" is the order the store returns them in — how it
+ *  always was. The strings are what the choice is saved as, so 0.2.x's names stay valid. */
+export type ProfileSort = "added" | `${SortKey}-${SortDir}`;
+
+export const parseSort = (s: ProfileSort): { key: SortKey; dir: SortDir } | null => {
+  if (s === "added") return null;
+  const i = s.lastIndexOf("-");
+  return { key: s.slice(0, i) as SortKey, dir: s.slice(i + 1) as SortDir };
+};
+
+/** What the next click on a column title asks for: text goes A→Z first, while the biggest, the
+ *  newest and "running" come first for numbers, dates and status. A third click clears it. */
+export function nextSort(current: ProfileSort, key: SortKey): ProfileSort {
+  const first: SortDir = key === "name" || key === "proxy" || key === "notes" ? "asc" : "desc";
+  const second: SortDir = first === "asc" ? "desc" : "asc";
+  const cur = parseSort(current);
+  if (!cur || cur.key !== key) return `${key}-${first}`;
+  return cur.dir === first ? `${key}-${second}` : "added";
+}
 
 const SORT_KEY = "shardx.profiles.sort";
 
 export const loadSort = (): ProfileSort => {
   try {
     const v = localStorage.getItem(SORT_KEY);
-    return (v as ProfileSort) || "added";
+    return v && parseSort(v as ProfileSort) ? (v as ProfileSort) : "added";
   } catch {
     return "added";
   }
@@ -65,49 +79,75 @@ const saveSort = (v: ProfileSort) => {
   try { localStorage.setItem(SORT_KEY, v); } catch { /* private mode */ }
 };
 
-/** Missing dates sort last, whichever direction is asked for. */
-function byDate(a: string | null | undefined, b: string | null | undefined, desc: boolean) {
-  const av = a ? Date.parse(a) : NaN;
-  const bv = b ? Date.parse(b) : NaN;
-  const aBad = Number.isNaN(av);
-  const bBad = Number.isNaN(bv);
-  if (aBad && bBad) return 0;
-  if (aBad) return 1;
-  if (bBad) return -1;
-  return desc ? bv - av : av - bv;
+/** A stamp as milliseconds: the store's "@1700000000" (seconds), or a date string. NaN = none. */
+export function stampMs(s: string | null | undefined): number {
+  if (!s) return NaN;
+  if (s.startsWith("@")) {
+    const n = parseInt(s.slice(1), 10);
+    return Number.isFinite(n) ? n * 1000 : NaN;
+  }
+  return Date.parse(s);
 }
 
-export function sortProfiles(list: ProfileMeta[], sort: ProfileSort): ProfileMeta[] {
-  if (sort === "added") return list;
+/** What a sort needs besides the profiles themselves. */
+export type SortContext = {
+  running: Record<string, number>;
+  proxies: Map<string, ProxyEntry>;
+};
+
+/** Empty values (no date, no proxy, no note) sort last, whichever direction is asked for. */
+function ordered<T>(a: T | null, b: T | null, cmp: (x: T, y: T) => number, desc: boolean): number {
+  if (a === null && b === null) return 0;
+  if (a === null) return 1;
+  if (b === null) return -1;
+  return desc ? cmp(b, a) : cmp(a, b);
+}
+
+const byText = (x: string, y: string) => x.localeCompare(y, undefined, { numeric: true });
+const byNumber = (x: number, y: number) => x - y;
+const orNull = (n: number) => (Number.isNaN(n) ? null : n);
+
+export function sortProfiles(list: ProfileMeta[], sort: ProfileSort, ctx: SortContext): ProfileMeta[] {
+  const parsed = parseSort(sort);
+  if (!parsed) return list;
   // Pinning is the operator saying "keep this one where I can see it", and an
   // ordering that scatters pinned rows among two hundred others makes the pin
   // button look broken. Every order sorts within the pinned rows and within
   // the rest, and keeps the two groups apart.
   const pinned = list.filter((p) => p.pinned);
   const rest = list.filter((p) => !p.pinned);
-  return [...sortGroup(pinned, sort), ...sortGroup(rest, sort)];
+  return [...sortGroup(pinned, parsed.key, parsed.dir, ctx), ...sortGroup(rest, parsed.key, parsed.dir, ctx)];
 }
 
-function sortGroup(list: ProfileMeta[], sort: ProfileSort): ProfileMeta[] {
+function sortGroup(list: ProfileMeta[], key: SortKey, dir: SortDir, ctx: SortContext): ProfileMeta[] {
+  const desc = dir === "desc";
   const out = [...list];
-  switch (sort) {
-    case "name-asc":
-      out.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  const proxyText = (p: ProfileMeta) => {
+    const x = p.proxy_id ? ctx.proxies.get(p.proxy_id) : undefined;
+    return x ? `${x.host}:${x.port}` : null;
+  };
+  switch (key) {
+    case "name":
+      out.sort((a, b) => ordered(a.name, b.name, byText, desc));
       break;
-    case "name-desc":
-      out.sort((a, b) => b.name.localeCompare(a.name, undefined, { numeric: true }));
+    case "status":
+      // desc = running first; ties keep the order they had.
+      out.sort((a, b) => ordered(ctx.running[a.id] ? 1 : 0, ctx.running[b.id] ? 1 : 0, byNumber, desc));
       break;
-    case "created-desc":
-      out.sort((a, b) => byDate(a.created_at, b.created_at, true));
+    case "proxy":
+      out.sort((a, b) => ordered(proxyText(a), proxyText(b), byText, desc));
       break;
-    case "created-asc":
-      out.sort((a, b) => byDate(a.created_at, b.created_at, false));
+    case "notes":
+      out.sort((a, b) => ordered(a.notes.trim() || null, b.notes.trim() || null, byText, desc));
       break;
-    case "launched-desc":
-      out.sort((a, b) => byDate(a.last_launched_at, b.last_launched_at, true));
+    case "runtime":
+      out.sort((a, b) => ordered(a.total_runtime_ms ?? 0, b.total_runtime_ms ?? 0, byNumber, desc));
       break;
-    case "runtime-desc":
-      out.sort((a, b) => (b.total_runtime_ms ?? 0) - (a.total_runtime_ms ?? 0));
+    case "launched":
+      out.sort((a, b) => ordered(orNull(stampMs(a.last_launched_at)), orNull(stampMs(b.last_launched_at)), byNumber, desc));
+      break;
+    case "created":
+      out.sort((a, b) => ordered(orNull(stampMs(a.created_at)), orNull(stampMs(b.created_at)), byNumber, desc));
       break;
   }
   return out;
@@ -802,5 +842,5 @@ export function applyProfileFilters(
   });
   // Sorted here rather than in the table, so the rows on screen and the rows a
   // shift-click range covers stay the same list.
-  return sortProfiles(kept, sort);
+  return sortProfiles(kept, sort, { running, proxies: byId });
 }

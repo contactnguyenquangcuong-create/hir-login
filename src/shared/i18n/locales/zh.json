@@ -931,6 +931,8 @@
   "profileRowActions.stop": "停止",
   "profileRowActions.unpin": "取消置顶",
   "profileTable.colLastRun": "上次运行",
+  "profileTable.colCreated": "创建日期",
+  "profileTable.sortHint": "按“{col}”排序 — 再点一次反向，第三次取消",
   "profileTable.colName": "名称",
   "profileTable.colNotes": "备注",
   "profileTable.colProxy": "代理",

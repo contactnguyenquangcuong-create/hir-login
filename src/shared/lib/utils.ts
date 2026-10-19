@@ -20,6 +20,14 @@ export function fmtTs(stamp: string): string {
   return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
+/// "@1700000000" → "18 thg 10, 2026" (day, month, year in the user's locale).
+export function fmtDay(stamp: string): string {
+  if (!stamp.startsWith("@")) return stamp;
+  const n = parseInt(stamp.slice(1), 10);
+  if (!Number.isFinite(n)) return stamp;
+  return new Date(n * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+}
+
 /// Format ms uptime as "1h 23m" / "12m 30s" / "45s".
 export function fmtUptime(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));

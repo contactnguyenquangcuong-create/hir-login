@@ -931,6 +931,8 @@
   "profileRowActions.stop": "Dừng",
   "profileRowActions.unpin": "Bỏ ghim",
   "profileTable.colLastRun": "Chạy lần cuối",
+  "profileTable.colCreated": "Ngày tạo",
+  "profileTable.sortHint": "Sắp xếp theo \"{col}\" — bấm lần nữa để đảo chiều, lần thứ ba để bỏ",
   "profileTable.colName": "Tên",
   "profileTable.colNotes": "Ghi chú",
   "profileTable.colProxy": "Proxy",

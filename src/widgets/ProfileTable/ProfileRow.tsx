@@ -4,7 +4,7 @@ import Badge from "../../shared/ui/Badge";
 import { PinIconApp } from "../../shared/icons";
 import type { ContextItem } from "../../shared/types";
 import { CountryFlag } from "../../shared/ui/CountryFlag";
-import { fmtTs, fmtUptime } from "../../shared/lib/utils";
+import { fmtDay, fmtTs, fmtUptime } from "../../shared/lib/utils";
 import { useT } from "../../shared/i18n";
 import { useProfile, type ProfileMeta } from "../../entities/profile";
 import { profileShowWindow } from "../../entities/profile/model/api";
@@ -180,6 +180,7 @@ export function ProfileRow({ profile, proxy, onMenu }: {
             })()}
           </span>
         </div>
+        <div className="cell-created whitespace-nowrap"><span className="text-paragraph-xs text-text-sub-600">{p.created_at ? fmtDay(p.created_at) : "—"}</span></div>
         <div className="cell-lastrun whitespace-nowrap"><span className="text-paragraph-xs text-text-sub-600">{p.last_launched_at ? fmtTs(p.last_launched_at) : t("profileRow.neverLaunched")}</span></div>
         <ProfileRowActions
           profile={p}
