@@ -15,7 +15,7 @@ import {
   profileSetPin, profileSetFolder, profileBindProxy,
   profileExportFolder, profileImportFolder, syncActivity, syncKick,
   profileCreateFromTemplate, processList, processKill, launch, syncLaunch,
-  folderDelete, cookiesExportToFile, cookiesImportText,
+  folderDelete, cookiesExportToFile, cookiesImportText, cookiesExportMany,
 } from "../model/api";
 import { defaultForm, fromStored, toStored } from "../model/form";
 
@@ -246,6 +246,8 @@ export type ProfileStore = {
   androidToDesktopAll: () => Promise<void>;
   convertAndroid: (ids: string[]) => Promise<void>;
   bulkExport: () => Promise<void>;
+  /** Selected profiles' cookies → one file each in a picked folder. */
+  bulkExportCookies: () => Promise<void>;
   /** Export the current selection (or every profile, if none selected) as a
    *  folder-per-profile bundle — carry it to another machine and import it
    *  back with `importProfilesFromFolder`. */
@@ -746,6 +748,30 @@ export const useProfile = create<ProfileStore>((set, get) => ({
       if (ok > 0) toast.ok(`Đã đổi ${ok} profile sang máy tính${fail.length ? `, ${fail.length} lỗi` : ""}`);
       if (fail.length > 0) toast.err(fail.map((f) => f.error).filter(Boolean).slice(0, 3).join("; "));
       if (fail.length === 0) get().clearSelected();
+    } catch (e) { toast.err(String(e)); }
+  },
+
+  bulkExportCookies: async () => {
+    const { selected, profiles } = get();
+    const ids = profiles.filter((p) => selected.has(p.id)).map((p) => p.id);
+    if (ids.length === 0) return;
+    try {
+      const dir = await open({ directory: true, title: t("useProfile.cookiesExportPickFolder") });
+      if (!dir || Array.isArray(dir)) return;
+      const rows = await cookiesExportMany(ids, dir);
+      const written = rows.filter((r) => r.file);
+      const total = written.reduce((n, r) => n + r.count, 0);
+      const failed = rows.filter((r) => r.error);
+      const empty = rows.filter((r) => !r.file && !r.error).length;
+      if (written.length > 0) {
+        toast.ok(t("useProfile.cookiesBulkExported", { n: total, p: written.length }) + (empty > 0 ? t("useProfile.cookiesBulkEmpty", { n: empty }) : ""));
+        try { await openPath(dir); } catch {}
+      } else if (failed.length === 0) {
+        toast.info(t("useProfile.cookiesBulkNone"));
+      }
+      if (failed.length > 0) {
+        toast.err(t("useProfile.cookiesBulkFailed", { n: failed.length, why: failed.slice(0, 2).map((r) => `${r.name}: ${r.error}`).join("; ") }));
+      }
     } catch (e) { toast.err(String(e)); }
   },
 

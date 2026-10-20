@@ -63,6 +63,13 @@ export const cookiesExportToFile = (profileId: string, path: string) => invoke<n
 export const cookiesImport = (profileId: string, cookies: any[]) => invoke<number>("cookies_import", { profileId, cookies });
 /** The text of a cookie file: JSON (array or {cookies}), Netscape cookies.txt, or a Facebook cookie string. */
 export const cookiesImportText = (profileId: string, text: string) => invoke<number>("cookies_import_text", { profileId, text });
+/** Many profiles at once: one cookie file each, in a folder. */
+export type CookieExportRow = { id: string; name: string; file: string | null; count: number; error: string | null };
+export type CookieFile = { path: string; name: string; size: number };
+export type CookieImportRow = { id: string; path: string; count: number; error: string | null };
+export const cookiesExportMany = (ids: string[], dir: string) => invoke<CookieExportRow[]>("cookies_export_many", { ids, dir });
+export const cookiesListFiles = (dir: string) => invoke<CookieFile[]>("cookies_list_files", { dir });
+export const cookiesImportMany = (items: { id: string; path: string }[]) => invoke<CookieImportRow[]>("cookies_import_many", { items });
 export const enrichPicksForPreset = (presetId: string) => invoke<{ hardware_concurrency?: number; device_memory?: number; platform_version?: string }>("enrich_picks_for_preset", { presetId });
 export const hostPlatform = () => invoke<string>("host_platform");
 

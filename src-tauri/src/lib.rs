@@ -3049,6 +3049,28 @@ fn cookies_export_to_file(profile_id: String, path: String) -> Result<usize, Str
     Ok(cookies.len())
 }
 
+/// Cookies of many profiles into one folder, a file each. Answers one row per profile.
+#[tauri::command]
+async fn cookies_export_many(ids: Vec<String>, dir: String) -> Result<Vec<cookies::ExportRow>, String> {
+    tokio::task::spawn_blocking(move || cookies::export_many(&ids, std::path::Path::new(&dir)).map_err(|e| format!("{e:#}")))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// The cookie files (`.json`, `.txt`) directly inside a folder.
+#[tauri::command]
+fn cookies_list_files(dir: String) -> Result<Vec<cookies::CookieFile>, String> {
+    cookies::list_files(std::path::Path::new(&dir)).map_err(|e| format!("{e:#}"))
+}
+
+/// Puts each file's cookies into its profile. Answers one row per item.
+#[tauri::command]
+async fn cookies_import_many(items: Vec<cookies::ImportItem>) -> Result<Vec<cookies::ImportRow>, String> {
+    tokio::task::spawn_blocking(move || cookies::import_many(&items))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// Whether the app is already allowed through the Windows firewall.
 #[tauri::command]
 async fn firewall_status() -> Result<firewall::FirewallStatus, String> {
@@ -4260,6 +4282,9 @@ pub fn run() {
             ps_signature_set,
             cookies_export,
             cookies_export_to_file,
+            cookies_export_many,
+            cookies_list_files,
+            cookies_import_many,
             cookies_import,
             mcp_download,
             runtime::runtime_status,

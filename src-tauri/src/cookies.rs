@@ -622,6 +622,142 @@ pub fn import(profile_id: &str, cookies: &[Cookie]) -> Result<usize> {
     Ok(cookies.len())
 }
 
+// ---- Many profiles at once ----
+
+/// One profile's share of a bulk export.
+#[derive(Debug, Serialize)]
+pub struct ExportRow {
+    pub id: String,
+    pub name: String,
+    /// The file written; none when the profile had no cookies or failed.
+    pub file: Option<String>,
+    pub count: usize,
+    pub error: Option<String>,
+}
+
+/// A file name made of the profile's name: letters (any script), digits and `._-` stay.
+fn safe_file_stem(name: &str) -> String {
+    let mut out = String::new();
+    let mut last_us = false;
+    for ch in name.trim().chars() {
+        let keep = ch.is_alphanumeric() || matches!(ch, '.' | '-' | '_');
+        if keep {
+            out.push(ch);
+            last_us = false;
+        } else if !last_us {
+            out.push('_');
+            last_us = true;
+        }
+    }
+    let t: String = out.trim_matches(|c| c == '_' || c == '.').chars().take(60).collect();
+    if t.is_empty() { "profile".into() } else { t }
+}
+
+/// Writes each profile's cookies to `dir/<name>-<id8>-cookies.json`, the shape one profile's
+/// "Export cookies" writes (so each file imports back, here or anywhere). Profiles with no cookies
+/// write nothing; one that fails does not stop the others. A running browser may be exported: the
+/// database is only read.
+pub fn export_many(ids: &[String], dir: &Path) -> Result<Vec<ExportRow>> {
+    std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    let names: std::collections::HashMap<String, String> = profile::list_all()
+        .map(|all| all.into_iter().map(|m| (m.id, m.name)).collect())
+        .unwrap_or_default();
+    let mut rows = Vec::with_capacity(ids.len());
+    for id in ids {
+        let name = names.get(id).cloned().unwrap_or_else(|| id.clone());
+        let mut row = ExportRow { id: id.clone(), name: name.clone(), file: None, count: 0, error: None };
+        let result = (if names.contains_key(id) { Ok(()) } else { Err(anyhow::anyhow!("profile không tồn tại")) }).and_then(|_| export(id)).and_then(|list| {
+            if list.is_empty() {
+                return Ok((0, None));
+            }
+            let id8: String = id.chars().take(8).collect();
+            let path = dir.join(format!("{}-{}-cookies.json", safe_file_stem(&name), id8));
+            std::fs::write(&path, serde_json::to_string_pretty(&list)?)
+                .with_context(|| format!("write {}", path.display()))?;
+            Ok((list.len(), Some(path.display().to_string())))
+        });
+        match result {
+            Ok((n, file)) => { row.count = n; row.file = file; }
+            Err(e) => row.error = Some(format!("{e:#}")),
+        }
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+/// A cookie file of a folder, for matching to profiles.
+#[derive(Debug, Serialize)]
+pub struct CookieFile {
+    pub path: String,
+    pub name: String,
+    pub size: u64,
+}
+
+/// The `.json` and `.txt` files directly inside `dir`, by name.
+pub fn list_files(dir: &Path) -> Result<Vec<CookieFile>> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+        let e = e?;
+        let p = e.path();
+        let ext = p.extension().and_then(|x| x.to_str()).map(|x| x.to_ascii_lowercase());
+        if !p.is_file() || !matches!(ext.as_deref(), Some("json") | Some("txt")) {
+            continue;
+        }
+        out.push(CookieFile {
+            name: e.file_name().to_string_lossy().into_owned(),
+            size: e.metadata().map(|m| m.len()).unwrap_or(0),
+            path: p.display().to_string(),
+        });
+    }
+    out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    Ok(out)
+}
+
+/// A profile and the cookie file to put into it.
+#[derive(Debug, Deserialize)]
+pub struct ImportItem {
+    pub id: String,
+    pub path: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ImportRow {
+    pub id: String,
+    pub path: String,
+    pub count: usize,
+    pub error: Option<String>,
+}
+
+/// Imports each file into its profile, in any shape `parse_any` reads. A running profile is
+/// refused (the browser would write its own database back over the import), and one that fails
+/// does not stop the others.
+pub fn import_many(items: &[ImportItem]) -> Vec<ImportRow> {
+    items
+        .iter()
+        .map(|it| {
+            let mut row = ImportRow { id: it.id.clone(), path: it.path.clone(), count: 0, error: None };
+            let result = (|| -> Result<usize> {
+                if crate::is_profile_running(&it.id) {
+                    anyhow::bail!("profile đang mở — đóng nó rồi hãy nhập cookie");
+                }
+                // Importing would create the folder of a profile that is not there.
+                if profile::load_raw(&it.id).is_err() {
+                    anyhow::bail!("profile không tồn tại");
+                }
+                crate::cloud_sync::ensure_access(&it.id)?;
+                let bytes = std::fs::read(&it.path).with_context(|| format!("đọc {}", it.path))?;
+                let list = parse_any(&String::from_utf8_lossy(&bytes))?;
+                import(&it.id, &list)
+            })();
+            match result {
+                Ok(n) => row.count = n,
+                Err(e) => row.error = Some(format!("{e:#}")),
+            }
+            row
+        })
+        .collect()
+}
+
 /// Create cookies table + meta to match Chromium v24 schema for a fresh DB.
 fn ensure_schema(conn: &rusqlite::Connection) -> Result<()> {
     conn.execute_batch(

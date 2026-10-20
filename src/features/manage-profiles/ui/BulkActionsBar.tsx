@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Button } from "@proxyshard/shardx-ui-kit";
 import {
   PlayIcon,
@@ -8,6 +9,7 @@ import {
 import { useProfile, useSyncBlockReason } from "../../../entities/profile";
 import { useT } from "../../../shared/i18n";
 import { canEdit, useTeam } from "../../../shared/model/teamRole";
+import { BulkCookieImportModal } from "./BulkCookieImportModal";
 
 export function BulkActionsBar() {
   const t = useT();
@@ -18,6 +20,8 @@ export function BulkActionsBar() {
   const bulkDelete = useProfile((s) => s.bulkDelete);
   const bulkAndroidToDesktop = useProfile((s) => s.bulkAndroidToDesktop);
   const bulkUnbindProxy = useProfile((s) => s.bulkUnbindProxy);
+  const bulkExportCookies = useProfile((s) => s.bulkExportCookies);
+  const [importing, setImporting] = useState(false);
   // Only offered when the selection has a profile that actually has a proxy.
   const proxiedCount = useProfile((s) => s.profiles.filter((p) => s.selected.has(p.id) && !!p.proxy_id).length);
   // Only offered when the selection really contains a phone profile.
@@ -60,6 +64,8 @@ export function BulkActionsBar() {
       <Button variant="neutral" mode="stroke" className="pr-2" size="2xsmall" onClick={bulkUnbindProxy}>
         {proxiedCount > 0 ? t("bulkActionsBar.noProxy", { n: proxiedCount }) : t("bulkActionsBar.noProxyAll")}
       </Button>
+      <Button variant="neutral" mode="stroke" className="pr-2" size="2xsmall" onClick={bulkExportCookies}>{t("bulkActionsBar.exportCookies")}</Button>
+      <Button variant="neutral" mode="stroke" className="pr-2" size="2xsmall" onClick={() => setImporting(true)}>{t("bulkActionsBar.importCookies")}</Button>
       {androidCount > 0 && canEdit(role, configured) && (
         <Button variant="neutral" mode="stroke" className="pr-2" size="2xsmall" onClick={bulkAndroidToDesktop}>
           Đổi {androidCount} Android sang máy tính
@@ -67,6 +73,7 @@ export function BulkActionsBar() {
       )}
       <Button variant="error" mode="stroke" className="pr-2" size="2xsmall" leftIcon={<DeleteIcon className="size-3.5" />} onClick={bulkDelete}>{t("bulkActionsBar.delete")}</Button>
       <Button variant="neutral" mode="ghost" className="pr-2" size="2xsmall" onClick={clearSelected}>{t("bulkActionsBar.clear")}</Button>
+      {importing && <BulkCookieImportModal onClose={() => setImporting(false)} />}
     </div>
   );
 }
