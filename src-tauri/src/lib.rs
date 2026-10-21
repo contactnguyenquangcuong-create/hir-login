@@ -2743,7 +2743,9 @@ async fn launch(profile_id: String) -> Result<u32, String> {
     launch::launch_profile_synced(&profile_id, false, false, None, b.port, &b.token)
         .await
         .map(|o| o.pid)
-        .map_err(|e| e.to_string())
+        // The whole chain, not only its top: "contact sync server" alone does not say whether
+        // the server refused, timed out or could not be reached.
+        .map_err(|e| format!("{e:#}"))
 }
 
 // ---- Window synchronisation ----
@@ -3215,12 +3217,12 @@ fn settings_save(mut value: settings::Settings) -> Result<(), String> {
 /// shows what it currently knows, before the operator relies on it.
 #[tauri::command]
 async fn team_sync_list() -> Result<Vec<cloud_sync::RemoteProfileStatus>, String> {
-    cloud_sync::list_remote().await.map_err(|e| e.to_string())
+    cloud_sync::list_remote().await.map_err(|e| format!("{e:#}"))
 }
 
 #[tauri::command]
 async fn team_sync_pull() -> Result<usize, String> {
-    cloud_sync::pull_everything().await.map_err(|e| e.to_string())
+    cloud_sync::pull_everything().await.map_err(|e| format!("{e:#}"))
 }
 
 // ---- Team Server (embedded sync server) + Invite codes ----
