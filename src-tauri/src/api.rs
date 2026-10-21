@@ -1518,6 +1518,23 @@ async fn remove_module(Path(id): Path<String>) -> ApiResult {
 
 // ---- server ----
 
+/// Keeps the listening socket out of the browsers this app starts. A browser is a child process
+/// (CreateProcess with handle inheritance), so one that inherited the socket kept the port bound
+/// after this app quit or updated: the new instance then got "Only one usage of each socket
+/// address" for as long as that browser stayed open, and HirS / Hir-F saw no API.
+#[cfg(windows)]
+fn no_inherit(listener: &tokio::net::TcpListener) {
+    use std::os::windows::io::AsRawSocket;
+    use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT};
+    // SAFETY: the socket handle is valid for as long as `listener` is borrowed.
+    unsafe {
+        SetHandleInformation(listener.as_raw_socket() as _, HANDLE_FLAG_INHERIT, 0);
+    }
+}
+
+#[cfg(not(windows))]
+fn no_inherit(_listener: &tokio::net::TcpListener) {}
+
 pub async fn serve(secret: String, port: u16) {
     set_secret(&secret);
     let app = router();
@@ -1530,6 +1547,7 @@ pub async fn serve(secret: String, port: u16) {
     loop {
         match tokio::net::TcpListener::bind(addr).await {
             Ok(listener) => {
+                no_inherit(&listener);
                 if failures > 0 {
                     crate::cloud_sync::log_line(&format!("api: listening on {addr} (after {failures} failed attempts)"));
                 }
