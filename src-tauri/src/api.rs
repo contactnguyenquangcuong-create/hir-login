@@ -1,7 +1,7 @@
 // Local automation HTTP API (axum) for ShardX Launcher.
 // 127.0.0.1:<api_port>; every endpoint except /health requires Bearer JWT (HS256).
 
-use std::sync::{OnceLock, RwLock};
+use std::sync::{Mutex, OnceLock, RwLock};
 
 use axum::{
     extract::{Path, Query, Request},
@@ -243,6 +243,22 @@ fn partner_target_folder(p: Partner, folder: &str) -> Result<Option<String>, Res
     }
 }
 
+/// The browsers a partner tool has opened through the API: profile → (the tool, the browser's
+/// process id). The open and its close are the same tool's. A share taken away (or the profile
+/// moved to a folder the tool does not have) stops it opening the profile again, but must not leave
+/// the browser it already opened with no way to close it. The process id says which browser: one
+/// the owner opened later in the same profile is not the tool's.
+fn started_by() -> &'static Mutex<std::collections::HashMap<String, (Partner, u32)>> {
+    static M: OnceLock<Mutex<std::collections::HashMap<String, (Partner, u32)>>> = OnceLock::new();
+    M.get_or_init(Default::default)
+}
+
+/// Whether `p` opened the browser that is open now in `id`.
+fn opened_by_partner(p: Partner, id: &str) -> bool {
+    let Some(&(who, pid)) = started_by().lock().ok().and_then(|m| m.get(id).copied()).as_ref() else { return false };
+    who == p && crate::process::Tracker::shared().running().iter().any(|r| r.profile_id == id && r.pid == pid)
+}
+
 /// A profile's folder, and whether it is a temporary one.
 fn profile_scope(id: &str) -> Option<(String, bool)> {
     crate::profile::load_raw(id).ok().map(|p| (p.meta.folder, p.meta.temporary))
@@ -289,8 +305,11 @@ async fn partner_scope(req: Request, next: Next) -> Response {
                 .unwrap_or_default();
             let res = next.run(req).await;
             filter_json_array(res, |row| {
-                let f = row.get("profile_id").and_then(|i| i.as_str()).and_then(|i| folders.get(i)).cloned();
-                mark(row, f.as_deref())
+                let id = row.get("profile_id").and_then(|i| i.as_str()).map(str::to_string);
+                let f = id.as_deref().and_then(|i| folders.get(i)).cloned();
+                // A browser the partner opened stays in its list after the share is taken away, so
+                // it can see it is still open and close it.
+                mark(row, f.as_deref()) || id.as_deref().is_some_and(|i| opened_by_partner(p, i))
             })
             .await
         }
@@ -367,7 +386,9 @@ async fn partner_scope(req: Request, next: Next) -> Response {
             let temp_ok = temporary
                 && current.is_empty()
                 && matches!((&method, rest), (&Method::GET, []) | (&Method::POST, ["start"]) | (&Method::POST, ["stop"]) | (&Method::DELETE, []));
-            if !temp_ok {
+            // Closing what this partner opened needs no share: it may be gone by now.
+            let closes_own = method == Method::POST && rest == ["stop"] && opened_by_partner(p, id);
+            if !temp_ok && !closes_own {
                 if let Err(r) = partner_need(p, &current, need) {
                     return r;
                 }
@@ -381,7 +402,15 @@ async fn partner_scope(req: Request, next: Next) -> Response {
                 }
                 return next.run(req).await;
             }
-            next.run(req).await
+            let res = next.run(req).await;
+            if res.status().is_success() && rest == ["start"] {
+                if let Some(r) = crate::process::Tracker::shared().running().into_iter().find(|r| r.profile_id == *id) {
+                    if let Ok(mut m) = started_by().lock() {
+                        m.insert(id.to_string(), (p, r.pid));
+                    }
+                }
+            }
+            res
         }
 
         _ => partner_route_refused(p),
