@@ -13,9 +13,12 @@ type ToastState = {
 
 let seq = 0;
 
-export const useToastStore = create<ToastState>((set) => ({
+export const useToastStore = create<ToastState>((set, get) => ({
   items: [],
   push: (kind, text, detail) => {
+    // The same message already on screen is not stacked again: one unreachable server used to
+    // fill the corner with eight copies of the same error.
+    if (get().items.some((t) => t.kind === kind && t.text === text && t.detail === detail)) return;
     const id = ++seq;
     set((s) => ({ items: [...s.items, { id, kind, text, detail }] }));
     // An error carries advice worth reading, so it stays longer than a confirmation.

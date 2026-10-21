@@ -351,23 +351,57 @@ fn unix_now() -> u64 {
 
 /// Records that this machine now matches what the server holds for `id`.
 async fn mark_synced(id: &str) {
+    mark_synced_many(&[id.to_string()]).await;
+}
+
+/// The same for several profiles with ONE look at the server's list — it was one full list per
+/// profile, a request each for a hundred profiles in a round.
+async fn mark_synced_many(ids: &[String]) {
+    if ids.is_empty() {
+        return;
+    }
     let Ok(remote) = list_remote().await else { return };
-    let Some(row) = remote.into_iter().find(|r| r.id == id) else { return };
-    if let Some(updated) = row.updated_at {
-        update_state(|st| {
-            st.items.insert(id.to_string(), StateItem { remote: updated, at: unix_now(), at_ms: unix_now_ms(), proxy: proxy_signature(id), fmt: SYNC_FMT });
-        });
+    for id in ids {
+        let Some(row) = remote.iter().find(|r| &r.id == id) else { continue };
+        if let Some(updated) = row.updated_at.clone() {
+            update_state(|st| {
+                st.items.insert(id.clone(), StateItem { remote: updated, at: unix_now(), at_ms: unix_now_ms(), proxy: proxy_signature(id), fmt: SYNC_FMT });
+            });
+        }
     }
 }
 
-fn client() -> reqwest::Client {
+fn build_client() -> reqwest::Client {
     reqwest::Client::builder()
         // A server that is switched off or unreachable must fail in seconds, not hold a
         // profile launch for the system's own TCP timeout (more than a minute).
         .connect_timeout(Duration::from_secs(8))
         .timeout(Duration::from_secs(180))
+        .pool_idle_timeout(Duration::from_secs(30))
+        .pool_max_idle_per_host(8)
+        .tcp_keepalive(Duration::from_secs(30))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+/// The one HTTP client for talking to the team server. It used to be built afresh for every call,
+/// so every request opened a socket of its own and closed it, and Windows keeps a closed socket
+/// (TIME_WAIT) for minutes: a busy stretch — a round over many profiles, the Folders page, a
+/// profile closing — used up the machine's ~16,000 ports, and from then on every call failed with
+/// "Only one usage of each socket address is normally permitted" (os error 10048), also for every
+/// other program on the PC. One shared client reuses its connections.
+fn client() -> reqwest::Client {
+    // Under test each case runs on a runtime of its own, which a shared pool's connections
+    // would outlive.
+    #[cfg(test)]
+    {
+        build_client()
+    }
+    #[cfg(not(test))]
+    {
+        static C: OnceLock<reqwest::Client> = OnceLock::new();
+        C.get_or_init(build_client).clone()
+    }
 }
 
 /// None when sync isn't configured — every caller treats that as "do nothing".
@@ -1756,9 +1790,7 @@ pub async fn push_all_local() -> Result<(usize, usize)> {
             Err(e) => { slog!("push all: {id}: {e:#}"); skipped += 1; }
         }
     }
-    for id in &touched {
-        mark_synced(id).await;
-    }
+    mark_synced_many(&touched).await;
     if sent > 0 {
         GENERATION.fetch_add(1, Ordering::Relaxed);
     }
@@ -2070,17 +2102,34 @@ enum TeamScope {
     Folders(std::collections::HashSet<String>),
 }
 
+static SCOPE_CACHE: Mutex<Option<(std::time::Instant, String, TeamScope)>> = Mutex::new(None);
+
 /// What of this machine goes to the team, as the server says; kept for a minute (a round asks about
 /// every local profile). `None` when the server could not be asked — then nothing new goes up.
 async fn team_scope(base: &str, token: &str) -> Option<TeamScope> {
-    static CACHE: Mutex<Option<(std::time::Instant, String, TeamScope)>> = Mutex::new(None);
-    if let Ok(g) = CACHE.lock() {
+    if let Ok(g) = SCOPE_CACHE.lock() {
         if let Some((at, key, scope)) = g.as_ref() {
             if key.as_str() == format!("{base}|{token}") && at.elapsed() < Duration::from_secs(60) {
                 return Some(scope.clone());
             }
         }
     }
+    // A server that could not be asked is not asked again for a few seconds: this runs once per
+    // local profile in a round, and a dead server made it open two sockets for each.
+    static FAILED_AT: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+    if FAILED_AT.lock().ok().and_then(|g| *g).is_some_and(|at| at.elapsed() < Duration::from_secs(10)) {
+        return None;
+    }
+    let scope = fetch_team_scope(base, token).await;
+    if scope.is_none() {
+        if let Ok(mut g) = FAILED_AT.lock() {
+            *g = Some(std::time::Instant::now());
+        }
+    }
+    scope
+}
+
+async fn fetch_team_scope(base: &str, token: &str) -> Option<TeamScope> {
     let c = client();
     let me = c.get(format!("{base}/me")).bearer_auth(token).timeout(Duration::from_secs(20)).send().await.ok()?;
     if !me.status().is_success() {
@@ -2092,7 +2141,7 @@ async fn team_scope(base: &str, token: &str) -> Option<TeamScope> {
     } else {
         TeamScope::Folders(folders_of(&c, base, token, &me).await?)
     };
-    if let Ok(mut g) = CACHE.lock() {
+    if let Ok(mut g) = SCOPE_CACHE.lock() {
         *g = Some((std::time::Instant::now(), format!("{base}|{token}"), scope.clone()));
     }
     Some(scope)
@@ -2407,9 +2456,7 @@ pub async fn sync_round() -> Result<usize> {
         }
     }
 
-    for id in &touched {
-        mark_synced(id).await;
-    }
+    mark_synced_many(&touched).await;
     changed += sync_library(&base, &token).await;
     if changed > 0 {
         GENERATION.fetch_add(1, Ordering::Relaxed);
