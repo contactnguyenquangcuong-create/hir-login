@@ -1523,14 +1523,35 @@ pub async fn serve(secret: String, port: u16) {
     let app = router();
 
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    match tokio::net::TcpListener::bind(addr).await {
-        Ok(listener) => {
-            eprintln!("[launcher] automation API listening on http://{addr}");
-            if let Err(e) = axum::serve(listener, app).await {
-                eprintln!("[launcher] API server error: {e}");
+    // Keeps trying for as long as the app runs. It used to bind once and give up: an update relaunch
+    // whose old instance held the port a little longer left this session with no API at all, and
+    // HirS / Hir-F said "Hir-Login không trả lời ở cổng …" until Hir-Login was closed and reopened.
+    let mut failures = 0u32;
+    loop {
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => {
+                if failures > 0 {
+                    crate::cloud_sync::log_line(&format!("api: listening on {addr} (after {failures} failed attempts)"));
+                }
+                failures = 0;
+                eprintln!("[launcher] automation API listening on http://{addr}");
+                if let Err(e) = axum::serve(listener, app.clone()).await {
+                    eprintln!("[launcher] API server error: {e}");
+                }
+            }
+            Err(e) => {
+                failures += 1;
+                eprintln!("[launcher] API bind {addr} failed: {e}");
+                if failures == 1 || failures % 20 == 0 {
+                    crate::cloud_sync::log_line(&format!("api: cannot listen on {addr}: {e} (attempt {failures}) — trying again"));
+                }
             }
         }
-        Err(e) => eprintln!("[launcher] API bind {addr} failed: {e}"),
+        let still_enabled = crate::settings::load().map(|s| s.api_enabled).unwrap_or(true);
+        if !still_enabled {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(if failures < 6 { 2 } else { 10 })).await;
     }
 }
 
