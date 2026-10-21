@@ -255,7 +255,11 @@ async fn check_uncached() -> bool {
     }
     match call_rpc(&rec.key, &rec.device_id, &machine_label(&rec)).await {
         Ok(r) => {
+            let snapshot = rec.clone();
             let _ = apply_result(rec, &r);
+            if r.ok {
+                push_contact(&snapshot).await;
+            }
             r.ok
         }
         Err(_) => locally_valid(&rec),
@@ -371,6 +375,26 @@ async fn call_rpc(key: &str, device: &str, label: &str) -> Result<RpcResult> {
     resp.json().await.context("parse license server response")
 }
 
+/// Best effort: copies the name / Zalo / Gmail the customer typed in this app onto the key itself (RPC `cap_nhat_lien_he`,
+/// see supabase-lien-he.sql), so the Telegram bot lists the same fields for every tool. Silent when the info is incomplete,
+/// when the RPC does not exist yet, or offline — the label sent with `kich_hoat` still carries name + phone.
+async fn push_contact(rec: &ActivationRecord) {
+    let name = rec.customer_name.as_deref().unwrap_or("").trim();
+    let phone: String = rec.customer_phone.as_deref().unwrap_or("").chars().filter(|c| c.is_ascii_digit()).collect();
+    let email = rec.customer_email.as_deref().unwrap_or("").trim().to_lowercase();
+    if name.chars().count() < 2 || !(8..=15).contains(&phone.len()) || !email.contains('@') {
+        return;
+    }
+    let Ok(client) = reqwest::Client::builder().timeout(Duration::from_secs(15)).build() else { return };
+    let _ = client
+        .post(format!("{SUPABASE_URL}/rest/v1/rpc/cap_nhat_lien_he"))
+        .header("apikey", SUPABASE_ANON_KEY)
+        .header("Authorization", format!("Bearer {SUPABASE_ANON_KEY}"))
+        .json(&serde_json::json!({ "p_key": rec.key, "p_may": rec.device_id, "p_ho_ten": name, "p_gmail": email, "p_zalo": phone }))
+        .send()
+        .await;
+}
+
 /// Stores the server's answer: refreshes expiry / note / last_ok on success,
 /// marks the record invalid (keeping the key) on refusal.
 fn apply_result(mut rec: ActivationRecord, r: &RpcResult) -> Result<ActivationRecord> {
@@ -425,7 +449,8 @@ pub async fn activate(key: &str) -> Result<()> {
     if !r.ok {
         anyhow::bail!(friendly_error(r.loi.as_deref().unwrap_or("")));
     }
-    apply_result(rec, &r)?;
+    let rec = apply_result(rec, &r)?;
+    push_contact(&rec).await;
     remember(true);
     Ok(())
 }
@@ -446,7 +471,8 @@ pub async fn submit_customer_info(name: &str, phone: &str, email: &str) -> Resul
     // Best effort: the info is already saved; the label reaches the bot on
     // the next successful check if this one cannot get through.
     if let Ok(r) = call_rpc(&rec.key, &rec.device_id, &machine_label(&rec)).await {
-        apply_result(rec, &r)?;
+        let rec = apply_result(rec, &r)?;
+        push_contact(&rec).await;
     }
     Ok(())
 }
