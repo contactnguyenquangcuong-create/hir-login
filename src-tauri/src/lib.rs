@@ -4394,37 +4394,59 @@ pub fn run() {
                         .or_else(|| s.sync.token.clone().filter(|t| t.len() >= 8));
                     if let Some(token) = token {
                         let port = if s.server_host.port != 0 { s.server_host.port } else { 8787 };
+                        // Keeps the server up for as long as "Làm máy chủ" is on. It used to try six times
+                        // after launch and give up: an update relaunch whose old instance held the port a
+                        // little longer, or a server that ended later, left the machine with no server
+                        // while the other machines (and its own sync) were refused — "No connection could
+                        // be made because the target machine actively refused it (os error 10061)" — until
+                        // someone switched "Làm máy chủ" off and on again.
                         tauri::async_runtime::spawn(async move {
-                            // The port can still be held for a moment by the instance
-                            // that just quit (an update relaunch, a quick restart), so
-                            // try a few times before giving up.
                             tokio::time::sleep(std::time::Duration::from_millis(800)).await;
-                            for attempt in 1..=6 {
+                            let mut failures = 0u32;
+                            loop {
+                                let hosting = settings::load().map(|s| s.server_host.enabled).unwrap_or(false);
+                                if !hosting {
+                                    return; // switched off by the operator
+                                }
+                                if team_server::is_running() {
+                                    failures = 0;
+                                    tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+                                    continue;
+                                }
+                                // Stopping the server from the app clears the switch just after it
+                                // stops it: look twice before starting it again.
+                                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                if !settings::load().map(|s| s.server_host.enabled).unwrap_or(false) || team_server::is_running() {
+                                    continue;
+                                }
                                 match team_server::start(port, token.clone()).await {
                                     Ok(actual) => {
-                                        eprintln!("[launcher] team server auto-resumed :{actual}");
-                                        // This path never goes through the
-                                        // `team_server_start` command (and so never
-                                        // through the frontend's own `onSyncCommit`
-                                        // either), so nothing else refreshes
-                                        // `sync.server_url` here — left stale, it's
-                                        // exactly the "mã mời dẫn tới IP cũ" bug,
-                                        // except happening to *this* machine's own
-                                        // self-check after a reboot that changed its
+                                        eprintln!("[launcher] team server (re)started :{actual}");
+                                        cloud_sync::log_line(&format!("team server: running on :{actual}"));
+                                        // This path never goes through the `team_server_start` command (and
+                                        // so never through the frontend's own `onSyncCommit` either), so
+                                        // nothing else refreshes `sync.server_url` here — left stale, it's
+                                        // exactly the "mã mời dẫn tới IP cũ" bug, except happening to *this*
+                                        // machine's own self-check after a reboot that changed its
                                         // Tailscale IP, not just to an invite code.
                                         if let Ok(mut s) = settings::load() {
                                             set_self_sync(&mut s, actual, &token);
                                             let _ = settings::save(&s);
                                         }
-                                        return;
+                                        failures = 0;
                                     }
                                     Err(e) if team_server::is_running() => {
                                         let _ = e;
-                                        return;
                                     }
                                     Err(e) => {
-                                        eprintln!("[launcher] team server auto-resume attempt {attempt} failed: {e}");
-                                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                        failures += 1;
+                                        eprintln!("[launcher] team server start attempt {failures} failed: {e}");
+                                        // In the sync log, where the people who need to know look.
+                                        if failures == 1 || failures % 20 == 0 {
+                                            cloud_sync::log_line(&format!("team server: cannot start on :{port}: {e:#} (attempt {failures}) — trying again"));
+                                        }
+                                        let wait = if failures < 6 { 3 } else { 15 };
+                                        tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
                                     }
                                 }
                             }
