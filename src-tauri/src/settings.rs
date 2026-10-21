@@ -57,6 +57,9 @@ pub struct Settings {
     /// only lends its profiles to HirS once its owner has switched this on.
     #[serde(default)]
     pub hirs_allowed: bool,
+    /// The same for Hir-F (the Flow tool, `X-Hir-Client: HirF`).
+    #[serde(default)]
+    pub hirf_allowed: bool,
 
     // ---- Team profile sync (self-hosted server, see cloud_sync.rs) ----
     #[serde(default)]
@@ -165,6 +168,7 @@ fn defaults() -> Settings {
         api_port: default_api_port(),
         api_secret: String::new(),
         hirs_allowed: false,
+        hirf_allowed: false,
         sync: SyncConfig::default(),
         server_host: ServerHostConfig::default(),
     }

@@ -41,7 +41,7 @@ mod team_server;
 mod team_invite;
 mod tailscale;
 mod firewall;
-mod hirs_share;
+mod partners;
 
 use serde_json::Value;
 
@@ -2397,22 +2397,27 @@ fn folder_delete(folder: String, delete_profiles: bool) -> Result<usize, String>
     profile::delete_folder(&folder, delete_profiles).map_err(|e| e.to_string())
 }
 
-fn hirs_access_map(m: std::collections::BTreeMap<String, hirs_share::Level>) -> std::collections::BTreeMap<String, &'static str> {
+fn partner_access_map(m: std::collections::BTreeMap<String, partners::Level>) -> std::collections::BTreeMap<String, &'static str> {
     m.into_iter().map(|(k, l)| (k, l.as_str())).collect()
 }
 
-/// The folders shared with HirS and how far: { folder: "use" | "manage" }.
-#[tauri::command]
-fn hirs_folders() -> std::collections::BTreeMap<String, &'static str> {
-    hirs_access_map(hirs_share::access())
+fn partner_of(key: &str) -> Result<partners::Partner, String> {
+    partners::Partner::from_key(key).ok_or_else(|| format!("Công cụ không hợp lệ: {key}"))
 }
 
-/// Shares one folder with HirS ("use" | "manage"), or stops sharing it ("none"); answers the
-/// new map.
+/// The folders shared with a partner tool ("hirs" | "hirf") and how far:
+/// { folder: "use" | "manage" }.
 #[tauri::command]
-fn hirs_folder_set(folder: String, level: String) -> Result<std::collections::BTreeMap<String, &'static str>, String> {
-    let level = hirs_share::parse_level(&level).map_err(|e| e.to_string())?;
-    hirs_share::set(&folder, level).map(hirs_access_map).map_err(|e| e.to_string())
+fn partner_folders(partner: String) -> Result<std::collections::BTreeMap<String, &'static str>, String> {
+    Ok(partner_access_map(partners::access(partner_of(&partner)?)))
+}
+
+/// Shares one folder with a partner tool ("use" | "manage"), or stops sharing it ("none");
+/// answers the partner's new map.
+#[tauri::command]
+fn partner_folder_set(partner: String, folder: String, level: String) -> Result<std::collections::BTreeMap<String, &'static str>, String> {
+    let level = partners::parse_level(&level).map_err(|e| e.to_string())?;
+    partners::set(partner_of(&partner)?, &folder, level).map(partner_access_map).map_err(|e| e.to_string())
 }
 
 /// Host OS in fingerprint-library vocabulary (macOS/Windows/Linux).
@@ -4194,8 +4199,8 @@ pub fn run() {
             profile_set_folder,
             folder_rename,
             folder_delete,
-            hirs_folders,
-            hirs_folder_set,
+            partner_folders,
+            partner_folder_set,
             host_platform,
             profile_create_from_template,
             enrich_picks_for_preset,

@@ -18,7 +18,7 @@ import { licenseInfo } from "../../entities/license";
 import { Section, Row, Block, Pill } from "./ui";
 import { TeamTab } from "./TeamTab";
 import { useTeam } from "../../shared/model/teamRole";
-import { useHirsShare } from "../../entities/profile";
+import { usePartnerShare } from "../../entities/profile";
 import { FingerprintPanel } from "./FingerprintPanel";
 import { useAppUpdate } from "../../shared/model/appUpdate";
 import { getVersion } from "@tauri-apps/api/app";
@@ -79,7 +79,7 @@ export function SettingsPage() {
     finally { setMcpBusy(false); }
   };
   const save = async () => {
-    try { await settingsSave(s); setSaved(JSON.stringify(s)); toast.ok(t("settings.saved")); refreshApi(); useHirsShare.getState().load(); }
+    try { await settingsSave(s); setSaved(JSON.stringify(s)); toast.ok(t("settings.saved")); refreshApi(); usePartnerShare.getState().load(); }
     catch (e) { toast.err(String(e)); }
   };
 
@@ -293,6 +293,9 @@ export function SettingsPage() {
               </Row>
               <Row label={t("settings.hirsAllowLabel")} hint={t("settings.hirsAllowHint")}>
                 <div className="sm:flex sm:justify-end"><Switch checked={s.hirs_allowed ?? false} onChange={(c) => setS({ ...s, hirs_allowed: c })} /></div>
+              </Row>
+              <Row label={t("settings.hirfAllowLabel")} hint={t("settings.hirfAllowHint")}>
+                <div className="sm:flex sm:justify-end"><Switch checked={s.hirf_allowed ?? false} onChange={(c) => setS({ ...s, hirf_allowed: c })} /></div>
               </Row>
               <Row label={t("settings.apiPortLabel")}>
                 <Input inputSize="small" type="number" value={s.api_port ?? 40325} onChange={(e) => setS({ ...s, api_port: Number(e.target.value) || 40325 })} />

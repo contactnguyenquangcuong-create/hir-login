@@ -1047,7 +1047,7 @@ pub fn rename_folder(old: &str, new: &str) -> Result<usize> {
             n += 1;
         }
     }
-    crate::hirs_share::renamed(old, new);
+    crate::partners::renamed(old, new);
     Ok(n)
 }
 
@@ -1093,7 +1093,7 @@ pub fn delete_folder(name: &str, delete_profiles: bool) -> Result<usize> {
     }
     // The folder is gone unless an open profile kept it.
     if kept_open == 0 {
-        crate::hirs_share::removed(name);
+        crate::partners::removed(name);
     }
     Ok(n)
 }

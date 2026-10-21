@@ -135,114 +135,123 @@ async fn license_gate(req: Request, next: Next) -> Response {
     }
 }
 
-/// The HirS tool marks its requests `X-Hir-Client: HirS`, and gets nothing
-/// until the operator switches "Cho phép HirS kết nối" on in Settings. Read
-/// from the file on every request, so the switch takes effect at once.
-async fn hirs_gate(req: Request, next: Next) -> Response {
-    if is_hirs(&req) && !hirs_allowed() {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({
-                "error": "hirs_not_allowed",
-                "message": "Hir-Login chưa cho phép HirS kết nối. Mở Hir-Login → Cài đặt → Nâng cao → bật \"Cho phép HirS kết nối\".",
-            })),
-        )
-            .into_response();
+/// A partner tool (HirS, Hir-F) marks its requests `X-Hir-Client: …`, and gets nothing until the
+/// operator switches its "Cho phép … kết nối" on in Settings. Read from the file on every request,
+/// so the switch takes effect at once.
+async fn partner_gate(req: Request, next: Next) -> Response {
+    if let Some(p) = partner_of(&req) {
+        if !p.allowed() {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({
+                    "error": format!("{}_not_allowed", p.key()),
+                    "message": format!("Hir-Login chưa cho phép {0} kết nối. Mở Hir-Login → Cài đặt → Nâng cao → bật \"Cho phép {0} kết nối\".", p.name()),
+                })),
+            )
+                .into_response();
+        }
     }
     next.run(req).await
 }
 
-fn is_hirs(req: &Request) -> bool {
+/// Which partner tool sent this request, if any.
+fn partner_of(req: &Request) -> Option<Partner> {
     req.headers()
         .get("x-hir-client")
         .and_then(|h| h.to_str().ok())
-        .is_some_and(|v| v.trim().eq_ignore_ascii_case("hirs"))
+        .and_then(Partner::from_header)
 }
 
-fn hirs_allowed() -> bool {
-    crate::settings::load().map(|s| s.hirs_allowed).unwrap_or(false)
-}
-
-// ---- HirS sees only the folders shared with it ----
+// ---- A partner sees only the folders shared with it ----
 //
-// On top of the switch above, the owner shares folders one by one, with HirS listed like a
-// person in each folder's Chia sẻ dialog (hirs_share.rs). HirS writes its own proxies into the
+// On top of the switch above, the owner shares folders one by one, with each partner listed like a
+// person in the folder's Chia sẻ dialog (partners.rs). A partner writes its own proxies into the
 // profiles it manages, so it must never see or touch a folder that has proxies of its own.
-// For requests marked `X-Hir-Client: HirS`:
-// - lists are filtered to shared folders, each row carrying `hirs_access` ("use" | "manage");
+// For requests marked `X-Hir-Client: HirS` or `HirF`:
+// - lists are filtered to shared folders, each row carrying `hirs_access` / `hirf_access`
+//   ("use" | "manage");
 // - "use" folders: see, open (a one-launch proxy too) and close their profiles;
 // - "manage" folders: also create, edit, move and delete profiles, rename or delete the folder;
 // - a profile is created / moved only into a managed folder, or into a brand-new folder name
-//   (which HirS then manages, as it is its own);
-// - outside the shared folders: 403 folder_not_shared; routes HirS has no use for are refused.
+//   (which the partner then manages, as it is its own);
+// - a temporary profile (POST /profiles/temporary, no folder) may be read, opened, closed and
+//   deleted by a partner — it is nobody's data and goes away after one run;
+// - outside the shared folders: 403 folder_not_shared; routes a partner has no use for are refused.
+// The error codes are the same for every partner.
 
-use crate::hirs_share::Level as HirsLevel;
+use crate::partners::{Level, Partner};
 
-fn hirs_refuse(status: StatusCode, code: &str, message: String) -> Response {
+fn partner_refuse(status: StatusCode, code: &str, message: String) -> Response {
     (status, Json(json!({ "error": message, "message": message, "code": code }))).into_response()
 }
 
-fn folder_not_shared(folder: &str) -> Response {
+fn folder_not_shared(p: Partner, folder: &str) -> Response {
     let message = if folder.is_empty() {
-        "Profile này không nằm trong thư mục nào nên không chia sẻ cho HirS.".to_string()
+        format!("Profile này không nằm trong thư mục nào nên không chia sẻ cho {}.", p.name())
     } else {
-        format!("Thư mục \"{folder}\" chưa được chia sẻ cho HirS. Mở Hir-Login → Thư mục → bấm Chia sẻ ở thư mục này → HirS → chọn Được dùng hoặc Quản lý thư mục.")
+        format!("Thư mục \"{folder}\" chưa được chia sẻ cho {0}. Mở Hir-Login → Thư mục → bấm Chia sẻ ở thư mục này → {0} → chọn Được dùng hoặc Quản lý thư mục.", p.name())
     };
-    hirs_refuse(StatusCode::FORBIDDEN, "folder_not_shared", message)
+    partner_refuse(StatusCode::FORBIDDEN, "folder_not_shared", message)
 }
 
-fn manage_required(folder: &str) -> Response {
-    hirs_refuse(
+fn manage_required(p: Partner, folder: &str) -> Response {
+    partner_refuse(
         StatusCode::FORBIDDEN,
         "hirs_manage_required",
-        format!("HirS chỉ được dùng (mở, đóng) profile trong thư mục \"{folder}\". Muốn HirS thêm, sửa, xoá thì mở Hir-Login → Thư mục → bấm Chia sẻ ở thư mục này → HirS → Quản lý thư mục."),
+        format!("{0} chỉ được dùng (mở, đóng) profile trong thư mục \"{folder}\". Muốn {0} thêm, sửa, xoá thì mở Hir-Login → Thư mục → bấm Chia sẻ ở thư mục này → {0} → Quản lý thư mục.", p.name()),
     )
 }
 
-/// HirS's right on `folder`, or the refusal: not shared at all, or only "use" where `need` is
-/// "manage".
-fn hirs_need(folder: &str, need: HirsLevel) -> Result<HirsLevel, Response> {
-    match crate::hirs_share::level(folder) {
-        None => Err(folder_not_shared(folder)),
-        Some(l) if l < need => Err(manage_required(folder)),
+/// The partner's right on `folder`, or the refusal: not shared at all, or only "use" where `need`
+/// is "manage".
+fn partner_need(p: Partner, folder: &str, need: Level) -> Result<Level, Response> {
+    match crate::partners::level(p, folder) {
+        None => Err(folder_not_shared(p, folder)),
+        Some(l) if l < need => Err(manage_required(p, folder)),
         Some(l) => Ok(l),
     }
 }
 
-/// Every folder some profile carries — a name not among them is new.
+/// Every folder some profile carries, or that any partner has been given — a name not among them
+/// is new.
 fn existing_folders() -> std::collections::HashSet<String> {
-    crate::profile::list_all()
+    let mut out: std::collections::HashSet<String> = crate::profile::list_all()
         .map(|all| all.into_iter().map(|m| m.folder).filter(|f| !f.is_empty()).collect())
-        .unwrap_or_default()
+        .unwrap_or_default();
+    for p in Partner::ALL {
+        out.extend(crate::partners::list(p));
+    }
+    out
 }
 
-/// May HirS put a profile into `folder`? Ok(None) = yes; Ok(Some(name)) = yes, and it is new, so
-/// HirS manages it once the request succeeds; Err = the refusal to send.
-fn hirs_target_folder(folder: &str) -> Result<Option<String>, Response> {
+/// May the partner put a profile into `folder`? Ok(None) = yes; Ok(Some(name)) = yes, and it is
+/// new, so the partner manages it once the request succeeds; Err = the refusal to send.
+fn partner_target_folder(p: Partner, folder: &str) -> Result<Option<String>, Response> {
     let folder = folder.trim();
     if folder.is_empty() {
-        return Err(hirs_refuse(
+        return Err(partner_refuse(
             StatusCode::BAD_REQUEST,
             "folder_required",
-            "HirS phải đặt profile vào một thư mục (thư mục HirS được quản lý, hoặc thư mục mới).".into(),
+            format!("{0} phải đặt profile vào một thư mục (thư mục {0} được quản lý, hoặc thư mục mới).", p.name()),
         ));
     }
-    match crate::hirs_share::level(folder) {
-        Some(HirsLevel::Manage) => Ok(None),
-        Some(HirsLevel::Use) => Err(manage_required(folder)),
-        None if existing_folders().contains(folder) => Err(folder_not_shared(folder)),
+    match crate::partners::level(p, folder) {
+        Some(Level::Manage) => Ok(None),
+        Some(Level::Use) => Err(manage_required(p, folder)),
+        None if existing_folders().contains(folder) => Err(folder_not_shared(p, folder)),
         None => Ok(Some(folder.to_string())),
     }
 }
 
-fn profile_folder(id: &str) -> Option<String> {
-    crate::profile::load_raw(id).ok().map(|p| p.meta.folder)
+/// A profile's folder, and whether it is a temporary one.
+fn profile_scope(id: &str) -> Option<(String, bool)> {
+    crate::profile::load_raw(id).ok().map(|p| (p.meta.folder, p.meta.temporary))
 }
 
-async fn hirs_scope(req: Request, next: Next) -> Response {
-    if !is_hirs(&req) {
+async fn partner_scope(req: Request, next: Next) -> Response {
+    let Some(p) = partner_of(&req) else {
         return next.run(req).await;
-    }
+    };
     use axum::http::Method;
     let method = req.method().clone();
     let path = req.uri().path().trim_end_matches('/').to_string();
@@ -250,12 +259,13 @@ async fn hirs_scope(req: Request, next: Next) -> Response {
         percent_decode(s)
     }).collect();
     let seg: Vec<&str> = seg.iter().map(String::as_str).collect();
-    let access = crate::hirs_share::access();
-    // Marks a list row with HirS's right on its folder; false = not shared, drop the row.
+    let access = crate::partners::access(p);
+    let access_key = format!("{}_access", p.key());
+    // Marks a list row with the partner's right on its folder; false = not shared, drop the row.
     let mark = |row: &mut Value, folder: Option<&str>| -> bool {
         let Some(l) = folder.and_then(|f| access.get(f)) else { return false };
         if let Some(o) = row.as_object_mut() {
-            o.insert("hirs_access".into(), l.as_str().into());
+            o.insert(access_key.clone(), l.as_str().into());
         }
         true
     };
@@ -286,10 +296,19 @@ async fn hirs_scope(req: Request, next: Next) -> Response {
         }
         // Shared folders, including ones with no profile yet. `?detail=1` → [{name, access}].
         (Method::GET, ["folders"]) => {
-            if req.uri().query().is_some_and(|q| q.split('&').any(|p| p == "detail=1" || p == "detail=true")) {
+            if req.uri().query().is_some_and(|q| q.split('&').any(|x| x == "detail=1" || x == "detail=true")) {
                 Json(json!(access.iter().map(|(n, l)| json!({ "name": n, "access": l.as_str() })).collect::<Vec<_>>())).into_response()
             } else {
                 Json(json!(access.keys().collect::<Vec<_>>())).into_response()
+            }
+        }
+
+        // A temporary profile: its own folder, if any, is checked like any creation.
+        (Method::POST, ["profiles", "temporary"]) => {
+            let (req, body) = match take_json(req).await { Ok(x) => x, Err(r) => return r };
+            match body.get("folder").and_then(|f| f.as_str()).map(str::trim).filter(|f| !f.is_empty()) {
+                Some(folder) => run_into_folder(p, req, next, folder).await,
+                None => next.run(req).await,
             }
         }
 
@@ -297,28 +316,29 @@ async fn hirs_scope(req: Request, next: Next) -> Response {
         (Method::POST, ["profiles"]) => {
             let (req, body) = match take_json(req).await { Ok(x) => x, Err(r) => return r };
             let folder = body.get("folder").and_then(|f| f.as_str()).unwrap_or("");
-            run_into_folder(req, next, folder).await
+            run_into_folder(p, req, next, folder).await
         }
         (Method::POST, ["folders", folder, "profiles"]) => {
             let folder = folder.to_string();
-            run_into_folder(req, next, &folder).await
+            run_into_folder(p, req, next, &folder).await
         }
 
-        // A folder itself: only one HirS manages (a rename keeps the share — profile::rename_folder).
-        (Method::DELETE, ["folders", folder]) => match hirs_need(folder, HirsLevel::Manage) {
+        // A folder itself: only one the partner manages (a rename keeps the share —
+        // profile::rename_folder).
+        (Method::DELETE, ["folders", folder]) => match partner_need(p, folder, Level::Manage) {
             Ok(_) => next.run(req).await,
             Err(r) => r,
         },
-        // A rename onto an existing folder HirS does not manage would merge into it: the new name
-        // must be managed already or brand new.
+        // A rename onto an existing folder the partner does not manage would merge into it: the new
+        // name must be managed already or brand new.
         (Method::PATCH, ["folders", folder]) => {
-            if let Err(r) = hirs_need(folder, HirsLevel::Manage) {
+            if let Err(r) = partner_need(p, folder, Level::Manage) {
                 return r;
             }
             let (req, body) = match take_json(req).await { Ok(x) => x, Err(r) => return r };
             let target = body.get("name").and_then(|f| f.as_str()).unwrap_or("").trim().to_string();
             if target != *folder {
-                if let Err(r) = hirs_target_folder(&target) {
+                if let Err(r) = partner_target_folder(p, &target) {
                     return r;
                 }
             }
@@ -328,29 +348,35 @@ async fn hirs_scope(req: Request, next: Next) -> Response {
         // One profile: only inside a shared folder; changing it needs "manage"; moving it needs a
         // managed or new target.
         (_, ["profiles", id, rest @ ..]) if *id != "temporary" => {
-            let current = match profile_folder(id) {
-                Some(f) => f,
+            let (current, temporary) = match profile_scope(id) {
+                Some(x) => x,
                 None => return next.run(req).await, // unknown id: the handler's own 404
             };
             let need = match (&method, rest) {
-                (&Method::GET, []) | (&Method::POST, ["start"]) | (&Method::POST, ["stop"]) => HirsLevel::Use,
-                (&Method::PATCH, []) | (&Method::DELETE, []) => HirsLevel::Manage,
+                (&Method::GET, []) | (&Method::POST, ["start"]) | (&Method::POST, ["stop"]) => Level::Use,
+                (&Method::PATCH, []) | (&Method::DELETE, []) => Level::Manage,
                 _ => {
                     // Still say "not shared" first, so nothing is learnt about other folders.
-                    if crate::hirs_share::level(&current).is_none() {
-                        return folder_not_shared(&current);
+                    if !(temporary && current.is_empty()) && crate::partners::level(p, &current).is_none() {
+                        return folder_not_shared(p, &current);
                     }
-                    return hirs_route_refused();
+                    return partner_route_refused(p);
                 }
             };
-            if let Err(r) = hirs_need(&current, need) {
-                return r;
+            // A temporary profile has no folder to check; it may be read, opened, closed, deleted.
+            let temp_ok = temporary
+                && current.is_empty()
+                && matches!((&method, rest), (&Method::GET, []) | (&Method::POST, ["start"]) | (&Method::POST, ["stop"]) | (&Method::DELETE, []));
+            if !temp_ok {
+                if let Err(r) = partner_need(p, &current, need) {
+                    return r;
+                }
             }
             if method == Method::PATCH {
                 let (req, body) = match take_json(req).await { Ok(x) => x, Err(r) => return r };
                 if let Some(target) = body.get("folder").and_then(|f| f.as_str()) {
                     if target.trim() != current {
-                        return run_into_folder(req, next, target).await;
+                        return run_into_folder(p, req, next, target).await;
                     }
                 }
                 return next.run(req).await;
@@ -358,25 +384,25 @@ async fn hirs_scope(req: Request, next: Next) -> Response {
             next.run(req).await
         }
 
-        _ => hirs_route_refused(),
+        _ => partner_route_refused(p),
     }
 }
 
-fn hirs_route_refused() -> Response {
-    hirs_refuse(StatusCode::FORBIDDEN, "hirs_route_not_allowed", "HirS không được dùng chức năng này của Hir-Login.".into())
+fn partner_route_refused(p: Partner) -> Response {
+    partner_refuse(StatusCode::FORBIDDEN, "hirs_route_not_allowed", format!("{} không được dùng chức năng này của Hir-Login.", p.name()))
 }
 
-/// Runs a create / move into `folder` if HirS may, and gives HirS a brand-new folder to manage
-/// once the request has gone through.
-async fn run_into_folder(req: Request, next: Next, folder: &str) -> Response {
-    let share_after = match hirs_target_folder(folder) {
+/// Runs a create / move into `folder` if the partner may, and gives it a brand-new folder to
+/// manage once the request has gone through.
+async fn run_into_folder(p: Partner, req: Request, next: Next, folder: &str) -> Response {
+    let share_after = match partner_target_folder(p, folder) {
         Ok(s) => s,
         Err(r) => return r,
     };
     let res = next.run(req).await;
     if let Some(f) = share_after {
         if res.status().is_success() {
-            let _ = crate::hirs_share::set(&f, Some(HirsLevel::Manage));
+            let _ = crate::partners::set(p, &f, Some(Level::Manage));
         }
     }
     res
@@ -432,15 +458,22 @@ fn percent_decode(s: &str) -> String {
 
 // ---- handlers ----
 
+fn partner_access_json(p: Partner) -> std::collections::BTreeMap<String, &'static str> {
+    crate::partners::access(p).into_iter().map(|(k, l)| (k, l.as_str())).collect()
+}
+
 async fn health() -> Json<Value> {
     Json(json!({
         "ok": true,
         "name": "hir-login",
         "version": env!("CARGO_PKG_VERSION"),
-        "hirs_allowed": hirs_allowed(),
-        // The folders shared with HirS ("Chia sẻ cho HirS"); HirS sees nothing outside them.
-        "hirs_folders": crate::hirs_share::list(),
-        "hirs_access": crate::hirs_share::access().into_iter().map(|(k, l)| (k, l.as_str())).collect::<std::collections::BTreeMap<_, _>>(),
+        // What each partner tool (HirS, Hir-F) may reach: its switch, and the folders shared with it.
+        "hirs_allowed": Partner::HirS.allowed(),
+        "hirs_folders": crate::partners::list(Partner::HirS),
+        "hirs_access": partner_access_json(Partner::HirS),
+        "hirf_allowed": Partner::HirF.allowed(),
+        "hirf_folders": crate::partners::list(Partner::HirF),
+        "hirf_access": partner_access_json(Partner::HirF),
         // POST /profiles/{id}/start understands {"proxy": "..."} for that launch only.
         "start_proxy": true,
     }))
@@ -1514,8 +1547,8 @@ fn router() -> Router {
         .route("/automation/modules/:id", delete(remove_module))
         // Layers run last-added first: token (401), then key (license_required),
         // then whether HirS is let in (hirs_not_allowed).
-        .route_layer(middleware::from_fn(hirs_scope))
-        .route_layer(middleware::from_fn(hirs_gate))
+        .route_layer(middleware::from_fn(partner_scope))
+        .route_layer(middleware::from_fn(partner_gate))
         .route_layer(middleware::from_fn(license_gate))
         .route_layer(middleware::from_fn(auth));
 
@@ -1593,16 +1626,17 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
     }
 
-    /// Only a request that says it is HirS is turned away by the switch; any
-    /// other client with the same token goes through.
+    /// Only a request that says it is a partner tool is turned away by its switch; any other
+    /// client with the same token goes through.
     #[tokio::test]
-    async fn hirs_is_refused_while_the_switch_is_off() {
-        let ok = |req: &Request<Body>| is_hirs(req);
+    async fn a_partner_is_told_apart_by_its_header() {
         let with = |v: &str| Request::builder().uri("/running").header("X-Hir-Client", v).body(Body::empty()).unwrap();
-        assert!(ok(&with("HirS")));
-        assert!(ok(&with(" hirs ")));
-        assert!(!ok(&with("mcp")));
-        assert!(!ok(&Request::builder().uri("/running").body(Body::empty()).unwrap()));
+        assert_eq!(partner_of(&with("HirS")), Some(Partner::HirS));
+        assert_eq!(partner_of(&with(" hirs ")), Some(Partner::HirS));
+        assert_eq!(partner_of(&with("HirF")), Some(Partner::HirF));
+        assert_eq!(partner_of(&with("Hir-F")), Some(Partner::HirF));
+        assert_eq!(partner_of(&with("mcp")), None);
+        assert_eq!(partner_of(&Request::builder().uri("/running").body(Body::empty()).unwrap()), None);
     }
 
     /// A start the team refuses because another machine has the profile open is a 409 with a

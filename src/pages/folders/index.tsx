@@ -6,7 +6,7 @@ import { toast } from "../../shared/model/toast";
 import { confirmModal } from "../../shared/model/confirm";
 import { useNav } from "../../shared/model/navigation";
 import { startTeamRole, teamCall, useTeam, canShare } from "../../shared/model/teamRole";
-import { useProfile, useFolders, useHirsShare } from "../../entities/profile";
+import { useProfile, useFolders, usePartnerShare, PARTNERS } from "../../entities/profile";
 import { ShareFolderModal } from "../../features/manage-profiles/ui/ShareFolderModal";
 import { Section, Pill } from "../settings/ui";
 import { useContextMenu } from "../../shared/hooks/useContextMenu";
@@ -34,18 +34,21 @@ export function FoldersPage() {
   const [name, setName] = useState("");
   const [filter, setFilter] = useState("");
   const [limit, setLimit] = useState(50);
-  // HirS counts as one more person a folder is shared with (in the Chia sẻ dialog); it only
-  // sees the folders shared with it, so it never writes its proxies into any other.
-  const hirsAllowed = useHirsShare((s) => s.allowed);
-  const hirsAccess = useHirsShare((s) => s.access);
-  const loadHirs = useHirsShare((s) => s.load);
-  const hirsOf = (f: string) => (hirsAllowed ? hirsAccess[f] : undefined);
-  const hirsPill = (f: string) => {
-    const l = hirsOf(f);
-    return l && <Pill tone={l === "manage" ? "primary" : "neutral"}>HirS · {l === "manage" ? "quản lý" : "dùng"}</Pill>;
-  };
+  // The partner tools (HirS, Hir-F) count as more people a folder is shared with (in the Chia sẻ
+  // dialog); each only sees the folders shared with it, so it never writes its proxies into any
+  // other.
+  const partnerAllowed = usePartnerShare((s) => s.allowed);
+  const partnerAccess = usePartnerShare((s) => s.access);
+  const loadPartners = usePartnerShare((s) => s.load);
+  /** The partner tools a folder is shared with, and how far. */
+  const partnersOf = (f: string) =>
+    PARTNERS.filter((p) => partnerAllowed[p.key] && partnerAccess[p.key][f]).map((p) => ({ name: p.name, level: partnerAccess[p.key][f] }));
+  const partnerPills = (f: string) =>
+    partnersOf(f).map((p) => (
+      <Pill key={p.name} tone={p.level === "manage" ? "primary" : "neutral"}>{p.name} · {p.level === "manage" ? "quản lý" : "dùng"}</Pill>
+    ));
 
-  useEffect(() => { startTeamRole(); loadHirs(); }, [loadHirs]);
+  useEffect(() => { startTeamRole(); loadPartners(); }, [loadPartners]);
 
   const load = useCallback(async () => {
     // No team on this machine: nothing to ask the server (canShare is "open" for a
@@ -168,7 +171,7 @@ export function FoldersPage() {
                   <FolderIcon className="size-5 text-icon-soft-400" />
                   <span className="flex-1 text-label-sm text-text-strong-950">{f}</span>
                   <Pill>{localCount[f] ?? 0} profile</Pill>
-                  {hirsPill(f)}
+                  {partnerPills(f)}
                   <Pill tone="neutral">Chỉ dùng</Pill>
                 </div>
               ))}
@@ -189,8 +192,8 @@ export function FoldersPage() {
             {rows.length > 0 && filtered.length === 0 && <div className="px-5 py-10 text-center text-paragraph-xs text-text-soft-400">Không có thư mục nào khớp “{filter}”.</div>}
             {filtered.slice(0, limit).map((f) => {
               const people = Object.entries(f.access);
-              const withHirs = !!hirsOf(f.name);
-              const max = withHirs ? 2 : 3;
+              const shared = partnersOf(f.name);
+              const max = Math.max(1, 3 - shared.length);
               const deletable = f.profiles === 0 && (f.local || f.canDelete !== false);
               const open = () => { setFolder(f.name); setSection("browsers"); };
               const menu = [
@@ -216,12 +219,12 @@ export function FoldersPage() {
                   {/* Who has it, on one line: the first few, then how many more (all of them on hover). */}
                   <div
                     className="flex min-w-0 items-center gap-1 overflow-hidden"
-                    title={[...(withHirs ? [`HirS · ${hirsOf(f.name) === "manage" ? "quản lý" : "được dùng"}`] : []), ...people.map(([id, lvl]) => `${nameOf(id)} · ${lvl === "manage" ? "quản lý" : "được dùng"}`)].join("\n") || undefined}
+                    title={[...shared.map((p) => `${p.name} · ${p.level === "manage" ? "quản lý" : "được dùng"}`), ...people.map(([id, lvl]) => `${nameOf(id)} · ${lvl === "manage" ? "quản lý" : "được dùng"}`)].join("\n") || undefined}
                   >
-                    {people.length === 0 && !withHirs
+                    {people.length === 0 && shared.length === 0
                       ? <span className="text-paragraph-xs text-text-soft-400">Chưa chia sẻ</span>
                       : <>
-                        {hirsPill(f.name)}
+                        {partnerPills(f.name)}
                         {people.slice(0, max).map(([id, lvl]) => (
                           <Pill key={id} tone={lvl === "manage" ? "primary" : "neutral"}>{nameOf(id)} · {lvl === "manage" ? "quản lý" : "dùng"}</Pill>
                         ))}

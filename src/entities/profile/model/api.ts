@@ -53,12 +53,16 @@ export const helperClose = () => invoke<void>("helper_close");
 /** The operator closed the panel — a refusal about this page only. */
 export const helperDismiss = (profile: string) => invoke<void>("helper_dismiss", { profile });
 export const folderDelete = (folder: string, deleteProfiles: boolean) => invoke<number>("folder_delete", { folder, deleteProfiles });
-/** Folders shared with HirS and how far: "use" = open, close; "manage" = also add, edit, delete. */
-export type HirsLevel = "use" | "manage";
-export const hirsFolders = () => invoke<Record<string, HirsLevel>>("hirs_folders");
-export const hirsFolderSet = (folder: string, level: HirsLevel | "none") => invoke<Record<string, HirsLevel>>("hirs_folder_set", { folder, level });
-/** "Cho phép HirS kết nối" (Settings → Nâng cao). */
-export const hirsAllowed = () => invoke<{ hirs_allowed?: boolean }>("settings_get").then((s) => s.hirs_allowed === true);
+/** The partner tools that may borrow profiles: HirS (Shopee video tool) and Hir-F (Flow tool). */
+export type PartnerKey = "hirs" | "hirf";
+/** How far a folder is shared with one: "use" = open, close; "manage" = also add, edit, delete. */
+export type ShareLevel = "use" | "manage";
+export const partnerFolders = (partner: PartnerKey) => invoke<Record<string, ShareLevel>>("partner_folders", { partner });
+export const partnerFolderSet = (partner: PartnerKey, folder: string, level: ShareLevel | "none") =>
+  invoke<Record<string, ShareLevel>>("partner_folder_set", { partner, folder, level });
+/** Their "Cho phép … kết nối" switches (Settings → Nâng cao). */
+export const partnersAllowed = () =>
+  invoke<{ hirs_allowed?: boolean; hirf_allowed?: boolean }>("settings_get").then((s) => ({ hirs: s.hirs_allowed === true, hirf: s.hirf_allowed === true }));
 export const cookiesExportToFile = (profileId: string, path: string) => invoke<number>("cookies_export_to_file", { profileId, path });
 export const cookiesImport = (profileId: string, cookies: any[]) => invoke<number>("cookies_import", { profileId, cookies });
 /** The text of a cookie file: JSON (array or {cookies}), Netscape cookies.txt, or a Facebook cookie string. */

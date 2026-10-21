@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { cn } from "@proxyshard/shardx-ui-kit";
 import { useContextMenu } from "../../shared/hooks/useContextMenu";
 import { useT } from "../../shared/i18n";
-import { useProfile, useFolders, useHirsShare } from "../../entities/profile";
+import { useProfile, useFolders, usePartnerShare, PARTNERS, type PartnerKey } from "../../entities/profile";
 import { toast } from "../../shared/model/toast";
 import { useTeam, canEdit, canShare, startTeamRole } from "../../shared/model/teamRole";
 import { FolderListButton, inlineFolders } from "../../shared/ui/FolderListButton";
@@ -48,16 +48,18 @@ export function FolderTabs() {
       if (!folderNames.includes(f) && !profiles.some((p) => p.folder === f)) forgetFolder(f);
     }
   }, [folderNames, registry, profiles, forgetFolder]);
-  // HirS is shared with like a person, in the Chia sẻ dialog; only shown while it may connect.
-  const hirsAllowed = useHirsShare((s) => s.allowed);
-  const hirsAccess = useHirsShare((s) => s.access);
-  const hirs = hirsAllowed ? Object.keys(hirsAccess) : [];
-  const loadHirs = useHirsShare((s) => s.load);
-  const setHirs = useHirsShare((s) => s.set);
-  useEffect(() => { startTeamRole(); loadHirs(); }, [loadHirs]);
-  const flipHirs = async (f: string) => {
-    const on = !hirs.includes(f);
-    try { await setHirs(f, on ? "use" : "none"); toast.ok(t(on ? "folderTabs.hirsOn" : "folderTabs.hirsOff", { folder: f })); }
+  // The partner tools (HirS, Hir-F) are shared with like people, in the Chia sẻ dialog; only
+  // shown while they may connect.
+  const partnerAllowed = usePartnerShare((s) => s.allowed);
+  const partnerAccess = usePartnerShare((s) => s.access);
+  const loadPartners = usePartnerShare((s) => s.load);
+  const setPartner = usePartnerShare((s) => s.set);
+  const allowedPartners = PARTNERS.filter((p) => partnerAllowed[p.key]);
+  const sharedWith = (f: string) => allowedPartners.filter((p) => partnerAccess[p.key][f]);
+  useEffect(() => { startTeamRole(); loadPartners(); }, [loadPartners]);
+  const flipPartner = async (key: PartnerKey, name: string, f: string) => {
+    const on = !partnerAccess[key][f];
+    try { await setPartner(key, f, on ? "use" : "none"); toast.ok(t(on ? "folderTabs.hirsOn" : "folderTabs.hirsOff", { folder: f, tool: name })); }
     catch (e) { toast.err(String(e)); }
   };
 
@@ -105,8 +107,11 @@ export function FolderTabs() {
       ...(canShare(role, configured) ? [{ label: "Chia sẻ quyền…", onClick: () => setSharing(f) }] : []),
       // A team member has no Chia sẻ dialog, yet still decides what the HirS on their own machine
       // may touch.
-      ...(!canShare(role, configured) && hirsAllowed
-        ? [{ label: hirs.includes(f) ? `✓ ${t("folderTabs.unshareWithHirs")}` : t("folderTabs.shareWithHirs"), onClick: () => flipHirs(f) }]
+      ...(!canShare(role, configured)
+        ? allowedPartners.map((p) => ({
+            label: partnerAccess[p.key][f] ? `✓ ${t("folderTabs.unshareWithHirs", { tool: p.name })}` : t("folderTabs.shareWithHirs", { tool: p.name }),
+            onClick: () => flipPartner(p.key, p.name, f),
+          }))
         : []),
       ...(canEdit(role, configured) ? [{ label: t("folderTabs.deleteFolder"), onClick: () => deleteFolder(f), danger: true }] : []),
     ]);
@@ -125,12 +130,12 @@ export function FolderTabs() {
           key={f}
           className={cn(tabBase, "max-w-[160px]", folder === f ? tabActive : tabIdle, dropTarget === f && tabDrop)}
           onClick={() => setFolder(f)}
-          title={`${f} — ${t("folderTabs.folderTabHint")}${hirs.includes(f) ? `\n${t("folderTabs.hirsShared")}` : ""}`}
+          title={`${f} — ${t("folderTabs.folderTabHint")}${sharedWith(f).length > 0 ? `\n${t("folderTabs.hirsShared", { tool: sharedWith(f).map((p) => p.name).join(", ") })}` : ""}`}
           onContextMenu={(e) => folderMenu(e, f)}
           {...dropProps(f, f)}
         >
           <span className="truncate">{f}</span>
-          {hirs.includes(f) && <span className="size-1.5 flex-none rounded-full bg-primary-base" />}
+          {sharedWith(f).length > 0 && <span className="size-1.5 flex-none rounded-full bg-primary-base" />}
           <span className={badge(folder === f)}>{counts.get(f) ?? 0}</span>
         </button>
       ))}
