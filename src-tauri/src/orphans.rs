@@ -78,6 +78,14 @@ pub async fn adopt_leftovers() -> usize {
     adopted
 }
 
+/// Whether any process runs from the engine right now — a browser of a profile, this app's or one
+/// left by an earlier run. Its files cannot be replaced then (and moving the folder would make it
+/// start new tabs from another version), so an engine update waits.
+pub fn engine_in_use() -> bool {
+    let Ok(bin) = crate::launch::resolve_binary() else { return false };
+    !list_engine_processes(&bin).is_empty()
+}
+
 /// The engine's processes, by executable.
 fn list_engine_processes(bin: &Path) -> Vec<EngineProcess> {
     #[cfg(windows)]
@@ -111,7 +119,10 @@ fn list_engine_processes(bin: &Path) -> Vec<EngineProcess> {
             .filter_map(|l| {
                 let l = l.trim_start();
                 let (pid, cmd) = l.split_once(' ')?;
-                cmd.starts_with(&exe).then(|| EngineProcess { pid: pid.parse().ok()?, cmdline: cmd.to_string() })?
+                if !cmd.starts_with(&exe) {
+                    return None;
+                }
+                Some(EngineProcess { pid: pid.parse().ok()?, cmdline: cmd.to_string() })
             })
             .collect()
     }

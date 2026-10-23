@@ -700,15 +700,46 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
     let need_browser =
         force || !installed_now || engine_outdated(&local, &manifest, &spec.browser.key);
     let browser_etag = if need_browser {
-        // Wipe the old engine tree first. The archive extracts *over* the
-        // existing dir but never deletes files the new version dropped — most
-        // critically the previous `<version>.manifest`, which lingers beside the
-        // new one and poisons version detection into an endless re-download (and
-        // stale DLLs/.so could be loaded). Applies to win + linux + mac alike.
-        let _ = fs::remove_dir_all(base.join(engine_root_dir()));
-        download_and_extract(&window, &spec.browser, &base)
-            .await
-            .map_err(|e| e.to_string())?
+        // The old engine tree is replaced whole, not extracted over. The archive extracts *over*
+        // the existing dir but never deletes files the new version dropped — most critically the
+        // previous `<version>.manifest`, which lingers beside the new one and poisons version
+        // detection into an endless re-download (and stale DLLs/.so could be loaded).
+        //
+        // It is moved aside, not deleted, and only after the new one has been downloaded: a
+        // browser still running from it (one an earlier run left open across an update, or a
+        // profile open right now) holds its files, and deleting first left a half-deleted engine
+        // and "The process cannot access the file because it is being used by another process
+        // (os error 32)" on a screen that would not let the person in. With a browser running,
+        // the engine stays as it is and the update waits for a start with none open.
+        let engine = base.join(engine_root_dir());
+        let aside = base.join(format!("{}.old", engine_root_dir()));
+        let _ = fs::remove_dir_all(&aside);
+        if installed_now && crate::orphans::engine_in_use() {
+            eprintln!("[runtime] engine update deferred: a browser is running from the current engine");
+            crate::cloud_sync::log_line("engine update deferred: a browser is still running from the current engine — it is kept, and replaced at a start with no browser open");
+            return runtime_status().await;
+        }
+        let (tmp, etag) = download(&window, &spec.browser, &base).await.map_err(|e| e.to_string())?;
+        // A browser may have started while the archive was downloading.
+        if installed_now && crate::orphans::engine_in_use() {
+            let _ = fs::remove_file(&tmp);
+            crate::cloud_sync::log_line("engine update deferred: a browser started from the current engine while the new one was downloading");
+            return runtime_status().await;
+        }
+        if engine.exists() && fs::rename(&engine, &aside).is_err() {
+            // No working engine to keep: clear what can be cleared, as before.
+            let _ = fs::remove_dir_all(&engine);
+        }
+        if let Err(e) = extract(&window, &spec.browser, &tmp, &base).await {
+            // Put the old engine back rather than leave a half-extracted one.
+            if aside.exists() {
+                let _ = fs::remove_dir_all(&engine);
+                let _ = fs::rename(&aside, &engine);
+            }
+            return Err(e.to_string());
+        }
+        let _ = fs::remove_dir_all(&aside);
+        etag
     } else {
         local.browser_etag.clone().unwrap_or_default()
     };
@@ -831,6 +862,13 @@ async fn install_fingerprints(
 
 /// Stream archive → temp file → extract; emits `runtime:progress` events.
 async fn download_and_extract(window: &Window, spec: &ArchiveSpec, base: &Path) -> Result<String> {
+    let (tmp, etag) = download(window, spec, base).await?;
+    extract(window, spec, &tmp, base).await?;
+    Ok(etag)
+}
+
+/// Streams the archive to `<base>/<key>.tmp`; answers that path and the archive's etag.
+async fn download(window: &Window, spec: &ArchiveSpec, base: &Path) -> Result<(PathBuf, String)> {
     let url = format!("{PUB_BASE}/{}", spec.key);
     let mut resp = reqwest::Client::new().get(&url).send().await?.error_for_status()?;
     let total = resp.content_length().unwrap_or(0);
@@ -867,7 +905,12 @@ async fn download_and_extract(window: &Window, spec: &ArchiveSpec, base: &Path) 
         }
         out.flush().await?;
     }
+    Ok((tmp, etag))
+}
 
+/// Unpacks a downloaded archive into `base` and removes it.
+async fn extract(window: &Window, spec: &ArchiveSpec, tmp: &Path, base: &Path) -> Result<()> {
+    let total = fs::metadata(tmp).map(|m| m.len()).unwrap_or(0);
     let _ = window.emit(
         "runtime:progress",
         serde_json::json!({
@@ -879,7 +922,7 @@ async fn download_and_extract(window: &Window, spec: &ArchiveSpec, base: &Path) 
         }),
     );
 
-    let zip_path = tmp.clone();
+    let zip_path = tmp.to_path_buf();
     let dest = base.to_path_buf();
     tokio::task::spawn_blocking(move || -> Result<()> {
         // On macOS / Linux shell out to the system `unzip`: the Rust `zip`
@@ -927,7 +970,7 @@ async fn download_and_extract(window: &Window, spec: &ArchiveSpec, base: &Path) 
     })
     .await??;
 
-    let _ = fs::remove_file(&tmp);
+    let _ = fs::remove_file(tmp);
 
     // Linux/mac archives produced on Windows lose every Unix exec bit;
     // restore +x on every ELF/Mach-O file under the runtime tree (not
@@ -940,7 +983,7 @@ async fn download_and_extract(window: &Window, spec: &ArchiveSpec, base: &Path) 
         }
     }
 
-    Ok(etag)
+    Ok(())
 }
 
 /// First-4-bytes magic check; matches ELF + every Mach-O flavour.
