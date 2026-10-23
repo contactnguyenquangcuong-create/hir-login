@@ -677,6 +677,13 @@ pub async fn runtime_install(window: Window, force: bool) -> Result<RuntimeStatu
     fs::create_dir_all(&base).map_err(|e| e.to_string())?;
 
     let installed_now = binary_path().map(|p| p.exists()).unwrap_or(false);
+    // A dev build pointed at a scratch data dir (tests beside the real app) shares the real app's
+    // engine folder: it must never replace it. A test app that started an engine update wiped the
+    // real browser and was closed before the download ended, and the real app could not open a
+    // profile until the engine was downloaded again.
+    if cfg!(debug_assertions) && std::env::var_os("HIR_LOGIN_CONFIG_DIR").is_some() && installed_now && !force {
+        return runtime_status().await;
+    }
     let local = load_manifest();
     let manifest = fetch_manifest().await;
 

@@ -66,6 +66,52 @@ async fn cdp_browser_close(ws_url: &str) -> bool {
         .is_some()
 }
 
+/// Whether a process is still running.
+pub(crate) fn pid_alive(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+        use windows_sys::Win32::System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+        // SAFETY: plain Win32 calls on a handle opened and closed here.
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                return false;
+            }
+            let mut code = 0u32;
+            let ok = GetExitCodeProcess(h, &mut code) != 0;
+            CloseHandle(h);
+            ok && code == STILL_ACTIVE as u32
+        }
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: signal 0 only asks whether the process exists.
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+}
+
+/// Asks a process to end (WM_CLOSE / SIGTERM), or ends it with its helpers (`force`).
+fn end_process(pid: u32, force: bool) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let p = pid.to_string();
+        let args: Vec<&str> = if force { vec!["/F", "/T", "/PID", &p] } else { vec!["/PID", &p] };
+        let _ = std::process::Command::new("taskkill")
+            .args(&args)
+            .creation_flags(0x08000000)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    #[cfg(unix)]
+    {
+        // SAFETY: a signal to a browser of this app's profile.
+        unsafe { libc::kill(pid as libc::pid_t, if force { libc::SIGKILL } else { libc::SIGTERM }); }
+    }
+}
+
 pub(crate) fn closing_begin(id: &str) {
     if let Ok(mut s) = closing_set().lock() {
         s.insert(id.to_string());
@@ -112,20 +158,8 @@ impl Tracker {
         // Graceful shutdown (SIGTERM / taskkill WM_CLOSE) → 5s → hard kill.
         // Graceful path flushes session state so next launch skips the restore prompt.
         let started_at = Instant::now();
-        // While the browser runs, keep a second copy of its login every few minutes — the cookie
-        // file can be lost with a computer that is switched off under it (see `cookies::snapshot`).
         if !temporary {
-            let id = profile_id.clone();
-            tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(180)).await;
-                    if !Self::shared().is_running(&id) {
-                        break;
-                    }
-                    let id2 = id.clone();
-                    let _ = tokio::task::spawn_blocking(move || crate::cookies::snapshot(&id2)).await;
-                }
-            });
+            Self::keep_snapshots(profile_id.clone());
         }
         tokio::spawn(async move {
             // How it ended, for the close line in the sync log: "a profile closes by itself" could
@@ -177,6 +211,79 @@ impl Tracker {
                     "stopped from the app (the Stop button, an automation run or the API)".to_string()
                 }
             };
+            Self::after_exit(profile_id, temporary, started_at, how).await;
+        });
+
+        pid
+    }
+
+    /// While the browser runs, keep a second copy of its login every few minutes — the cookie
+    /// file can be lost with a computer that is switched off under it (see `cookies::snapshot`).
+    fn keep_snapshots(id: String) {
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(180)).await;
+                if !Self::shared().is_running(&id) {
+                    break;
+                }
+                let id2 = id.clone();
+                let _ = tokio::task::spawn_blocking(move || crate::cookies::snapshot(&id2)).await;
+            }
+        });
+    }
+
+    /// Takes back a browser of this app's profile that runs without being tracked — one started by
+    /// an earlier run of the app, which its installer ended for an update (see `orphans`). From
+    /// here it is like one this run started: listed as running, stopped by the Stop button or the
+    /// API, and its close saved to the team. False when the profile is tracked already.
+    pub fn adopt(self: &'static Self, profile_id: String, pid: u32, temporary: bool, cdp: Option<CdpInfo>) -> bool {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<()>(1);
+        {
+            let mut g = self.inner.lock().unwrap();
+            if g.contains_key(&profile_id) {
+                return false;
+            }
+            g.insert(profile_id.clone(), ChildEntry { pid, killer: tx, cdp, started_at: Instant::now() });
+        }
+        let started_at = Instant::now();
+        if !temporary {
+            Self::keep_snapshots(profile_id.clone());
+        }
+        tokio::spawn(async move {
+            let gone = async {
+                while pid_alive(pid) {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+            };
+            let how: String = tokio::select! {
+                _ = gone => "the browser closed (one an earlier Hir-Login had left running)".to_string(),
+                _ = rx.recv() => {
+                    let closed_by_cdp = match Self::shared().cdp(&profile_id) {
+                        Some(c) => cdp_browser_close(&c.web_socket_debugger_url).await,
+                        None => false,
+                    };
+                    if !closed_by_cdp {
+                        end_process(pid, false);
+                    }
+                    let until = Instant::now() + std::time::Duration::from_secs(5);
+                    while pid_alive(pid) && Instant::now() < until {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                    if pid_alive(pid) {
+                        end_process(pid, true);
+                    }
+                    "stopped from the app (the Stop button, an automation run or the API)".to_string()
+                }
+            };
+            Self::after_exit(profile_id, temporary, started_at, how).await;
+        });
+        true
+    }
+
+    /// Everything that follows a browser's exit: the profile is no longer running, its close is
+    /// saved to the team, a temporary one is deleted.
+    async fn after_exit(profile_id: String, temporary: bool, started_at: Instant, how: String) {
+        {
             // From here until the close has been saved, the profile counts as "being saved".
             closing_begin(&profile_id);
             if let Ok(mut g) = Self::shared().inner.lock() {
@@ -219,9 +326,7 @@ impl Tracker {
                     Err(e) => eprintln!("[launcher] temporary profile {profile_id} cleanup failed: {e}"),
                 }
             }
-        });
-
-        pid
+        }
     }
 
     /// Attach CDP to a tracked profile; no-op if the profile already exited.

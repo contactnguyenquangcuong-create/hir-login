@@ -160,6 +160,7 @@ export function SettingsPage() {
                 label={`Phiên bản hiện tại: ${appVersion || "…"}`}
                 hint={
                   updateStatus === "available" ? `Đã có bản mới v${updateVersion}` :
+                  updateStatus === "saving" ? "Đang đợi lưu xong profile lên nhóm rồi mới cập nhật…" :
                   updateStatus === "downloading" ? `Đang tải bản cập nhật… ${Math.round(updateProgress * 100)}%` :
                   updateStatus === "ready" ? "Đã tải xong, đang khởi động lại…" :
                   updateStatus === "error" ? "Kiểm tra thất bại, thử lại sau." :

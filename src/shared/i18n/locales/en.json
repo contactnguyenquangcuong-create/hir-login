@@ -50,6 +50,7 @@
   "appUpdate.available": "Update v{v} available",
   "appUpdate.downloading": "Downloading update… {pct}%",
   "appUpdate.updateNow": "Update now",
+  "appUpdate.waitingSave": "Saving {n} profile(s) before updating…",
   "automation.colName": "Name",
   "automation.colSteps": "Steps",
   "automation.colUpdated": "Updated",

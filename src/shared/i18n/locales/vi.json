@@ -50,6 +50,7 @@
   "appUpdate.available": "Có bản mới v{v}",
   "appUpdate.downloading": "Đang tải bản cập nhật… {pct}%",
   "appUpdate.updateNow": "Cập nhật ngay",
+  "appUpdate.waitingSave": "Đợi lưu xong {n} profile rồi cập nhật…",
   "automation.colName": "Tên",
   "automation.colSteps": "Số bước",
   "automation.colUpdated": "Cập nhật lúc",

@@ -68,6 +68,12 @@ enum Upstream {
 /// Starts the forwarder for `profile_id` (replacing any earlier one) and returns
 /// the loopback port the browser should use as its HTTP proxy.
 pub async fn start(profile_id: &str, p: &ProxyEntry) -> Result<u16> {
+    start_on(profile_id, p, 0).await
+}
+
+/// The same on a given loopback port (0 = any): a browser this app takes back after it was
+/// restarted still points at the port of the forwarder that ended with the old app.
+pub async fn start_on(profile_id: &str, p: &ProxyEntry, port: u16) -> Result<u16> {
     let addr = format!("{}:{}", p.host, p.port);
     let upstream = match p.kind {
         ProxyKind::Socks5 => Upstream::Socks5 { addr, user: p.username.clone(), pass: p.password.clone() },
@@ -76,7 +82,10 @@ pub async fn start(profile_id: &str, p: &ProxyEntry) -> Result<u16> {
             auth: base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", p.username, p.password)),
         },
     };
-    let listener = TcpListener::bind("127.0.0.1:0").await.context("bind local proxy relay")?;
+    let listener = TcpListener::bind(("127.0.0.1", port)).await.context("bind local proxy relay")?;
+    // Not inherited by the browser it serves: one that kept it held the port after the app was
+    // ended for an update, and the forwarder could not be started again on it.
+    crate::api::no_inherit(&listener);
     let port = listener.local_addr()?.port();
     let task = tokio::spawn(async move {
         loop {

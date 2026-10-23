@@ -42,6 +42,7 @@ mod team_invite;
 mod tailscale;
 mod firewall;
 mod partners;
+mod orphans;
 
 use serde_json::Value;
 
@@ -4466,6 +4467,15 @@ pub fn run() {
             });
 
             // Keep profiles in step with the team server without any click.
+            // Browsers an earlier run of the app started and left behind (an update ends the app
+            // without closing them): taken back before the first sync round looks at the profiles.
+            tauri::async_runtime::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                let n = orphans::adopt_leftovers().await;
+                if n > 0 {
+                    eprintln!("[launcher] took back {n} browser(s) left running by an earlier run");
+                }
+            });
             tauri::async_runtime::spawn(cloud_sync::run_forever());
             tauri::async_runtime::spawn(cloud_sync::watch_locks());
 

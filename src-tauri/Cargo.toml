@@ -107,5 +107,6 @@ windows-sys = { version = "0.59", features = [
     "Win32_UI_WindowsAndMessaging", # EnumWindows / SetWindowPos (src/winhide.rs)
     "Win32_System_Time",           # GetTimeZoneInformation (src/runner/rowlog.rs)
     "Win32_System_Shutdown",       # ShutdownBlockReasonCreate (src/shutdown_guard.rs)
+    "Win32_System_Threading",      # OpenProcess / GetExitCodeProcess (src/process.rs, adopted browsers)
 ] }
 

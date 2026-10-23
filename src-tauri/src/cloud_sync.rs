@@ -1472,6 +1472,23 @@ async fn relock_as(c: &reqwest::Client, base: &str, token: &str, id: &str, holde
 /// was refused, the failure only went to a log, and the next open replaced the
 /// local copy (with the fresh login in it) by the older one on the server.
 /// While the profile runs, renew it every half hour.
+/// A browser of a team profile that this app takes back after a restart (see `orphans`): its lock
+/// was no longer renewed while no app tracked it, so renew it now and keep renewing it.
+pub fn resume_lock(profile_id: &str) {
+    let id = profile_id.to_string();
+    tokio::spawn(async move {
+        let Ok(Some((cfg, base, token))) = active_config() else { return };
+        if stays_personal(&base, &token, &id).await {
+            return;
+        }
+        let holder = device_name(&cfg);
+        if let Err(e) = relock(&client(), &base, &token, &id, &holder).await {
+            slog!("adopt {id}: could not renew its lock: {e:#}");
+        }
+        keep_lock_alive(&id, &holder);
+    });
+}
+
 fn keep_lock_alive(profile_id: &str, holder: &str) {
     static RUNNING: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
     let set = RUNNING.get_or_init(|| Mutex::new(std::collections::HashSet::new()));

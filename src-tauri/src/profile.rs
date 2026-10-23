@@ -401,6 +401,11 @@ pub fn purge_temporary() -> Result<usize> {
             continue;
         };
         if stored.meta.temporary && !stored.meta.id.is_empty() {
+            // Its browser still running (the app was ended under it — an update): it is taken
+            // back at start-up and deleted when it closes, like any temporary profile.
+            if user_data_dir(&stored.meta.id).map(|d| crate::process::Tracker::user_data_in_use(&d)).unwrap_or(false) {
+                continue;
+            }
             let _ = delete(&stored.meta.id);
             n += 1;
         }

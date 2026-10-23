@@ -131,6 +131,7 @@ impl Bus {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .context("bind sync bus")?;
+        crate::api::no_inherit(&listener);
         let port = listener.local_addr()?.port();
         let bus = Arc::new(Bus {
             port,

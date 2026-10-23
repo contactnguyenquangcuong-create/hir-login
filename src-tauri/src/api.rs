@@ -1544,9 +1544,10 @@ async fn remove_module(Path(id): Path<String>) -> ApiResult {
 /// Keeps the listening socket out of the browsers this app starts. A browser is a child process
 /// (CreateProcess with handle inheritance), so one that inherited the socket kept the port bound
 /// after this app quit or updated: the new instance then got "Only one usage of each socket
-/// address" for as long as that browser stayed open, and HirS / Hir-F saw no API.
+/// address" for as long as that browser stayed open, and HirS / Hir-F saw no API. The same holds
+/// for every port the app listens on — see the other callers.
 #[cfg(windows)]
-fn no_inherit(listener: &tokio::net::TcpListener) {
+pub(crate) fn no_inherit(listener: &tokio::net::TcpListener) {
     use std::os::windows::io::AsRawSocket;
     use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT};
     // SAFETY: the socket handle is valid for as long as `listener` is borrowed.
@@ -1556,7 +1557,7 @@ fn no_inherit(listener: &tokio::net::TcpListener) {
 }
 
 #[cfg(not(windows))]
-fn no_inherit(_listener: &tokio::net::TcpListener) {}
+pub(crate) fn no_inherit(_listener: &tokio::net::TcpListener) {}
 
 pub async fn serve(secret: String, port: u16) {
     set_secret(&secret);

@@ -1260,6 +1260,9 @@ pub async fn start(port: u16, token: String) -> Result<u16> {
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await
         .with_context(|| format!("không bind được port {port}"))?;
+    // Not inherited by the browsers this machine opens: one that kept it held port 8787 after the
+    // app was ended for an update, and the new instance could not start the team's server.
+    crate::api::no_inherit(&listener);
     let actual_port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
 
     // Update state with actual port
