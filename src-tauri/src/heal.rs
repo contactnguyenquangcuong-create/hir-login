@@ -199,6 +199,56 @@ pub(crate) fn is_blank_tab(url: &str) -> bool {
         || u.starts_with("chrome-search://local-ntp")
 }
 
+/// A page an extension opens by itself on every start and nobody asked for: the Authenticator's
+/// "Chrome issues" help page (authenticator.cc/docs/…/chrome-issues, short link otp.ee/chromeissues).
+pub(crate) fn is_junk_tab(url: &str) -> bool {
+    let u = url.trim().to_ascii_lowercase();
+    (u.contains("authenticator.cc/docs") && u.contains("chrome-issues")) || u.contains("otp.ee/chromeissues")
+}
+
+/// For the first half minute of a browser that is driven over CDP: closes those pages as they
+/// appear (never a blank tab, which the tool may be using). A junk page that is the only one open
+/// is turned into a blank one instead, so the browser keeps a window. Returns how many it dealt with.
+pub async fn close_junk_tabs(ws_url: &str) -> Result<usize> {
+    let (stream, _) = tokio_tungstenite::connect_async(ws_url).await.context("connect")?;
+    let (sink, source) = stream.split();
+    let mut c = Conn { sink, source, next: 0 };
+    let mut dealt = 0usize;
+    for _ in 0..20 {
+        let t = c.call("Target.getTargets", json!({}), None).await?;
+        let pages: Vec<(String, String)> = t
+            .get("targetInfos")
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter(|t| t.get("type").and_then(|x| x.as_str()) == Some("page"))
+                    .map(|t| {
+                        let s = |k: &str| t.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+                        (s("targetId"), s("url"))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let junk: Vec<&(String, String)> = pages.iter().filter(|(_, u)| is_junk_tab(u)).collect();
+        let others = pages.len() - junk.len();
+        for (i, (id, _)) in junk.iter().enumerate() {
+            if others == 0 && i == 0 {
+                if let Ok(a) = c.call("Target.attachToTarget", json!({ "targetId": id, "flatten": true }), None).await {
+                    if let Some(session) = a.get("sessionId").and_then(|v| v.as_str()).map(String::from) {
+                        let _ = c.call("Page.navigate", json!({ "url": "about:blank" }), Some(&session)).await;
+                        let _ = c.call("Target.detachFromTarget", json!({ "sessionId": session }), None).await;
+                    }
+                }
+            } else {
+                let _ = c.call("Target.closeTarget", json!({ "targetId": id }), None).await;
+            }
+            dealt += 1;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    }
+    Ok(dealt)
+}
+
 /// Which tabs go, from (target id, url) of every open page: with any page of the person's open,
 /// every blank one goes; with none, exactly one stays (`Some(id)` when it is not `about:blank`
 /// yet and should be turned into one). Returns (to close, to blank).

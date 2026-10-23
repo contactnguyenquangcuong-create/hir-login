@@ -49,6 +49,73 @@ pub async fn launch_profile(
     launch_profile_synced(profile_id, enable_cdp, headless, None, 0, "").await
 }
 
+/// What an API launch may ask for beyond `headless` and a proxy.
+#[derive(Default, Clone)]
+pub struct LaunchExtras {
+    /// This launch's own proxy (see `launch_profile_via`).
+    pub proxy: Option<proxy::ProxyEntry>,
+    /// Open clean: the tabs of the last session are not brought back (one blank tab), and the pages
+    /// an extension opens by itself on every start (the Authenticator's "chrome-issues" help page)
+    /// are closed again. For a tool that drives the browser over CDP and opens and closes the same
+    /// profile many times: each open used to add the previous tabs back and one more page.
+    pub fresh: bool,
+    /// Switches for this launch only, already checked by `allowed_chromium_args`.
+    pub chromium_args: Vec<String>,
+}
+
+/// The Chromium switches an API client may add to ONE launch, to make a heavy profile lighter on a
+/// weak machine. A short list, not any string: a switch such as `--renderer-cmd-prefix` runs a
+/// program of the caller's choosing, and the API is reachable by anything on this machine that
+/// holds the token.
+pub fn allowed_chromium_args(args: &[String]) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for a in args {
+        let a = a.trim();
+        let ok = matches!(a, "--disable-gpu" | "--disable-software-rasterizer" | "--disable-gpu-compositing")
+            || a.strip_prefix("--renderer-process-limit=")
+                .and_then(|n| n.parse::<u32>().ok())
+                .is_some_and(|n| (1..=16).contains(&n));
+        if !ok {
+            return Err(format!(
+                "Cờ Chromium không được phép: {a}. Chỉ nhận --disable-gpu, --disable-software-rasterizer, --disable-gpu-compositing, --renderer-process-limit=1..16."
+            ));
+        }
+        if !out.iter().any(|x: &String| x == a) {
+            out.push(a.to_string());
+        }
+    }
+    Ok(out)
+}
+
+/// A launch with the extras above. With a proxy it is `launch_profile_via` plus the rest.
+pub async fn launch_profile_with(
+    profile_id: &str,
+    enable_cdp: bool,
+    headless: bool,
+    extras: LaunchExtras,
+) -> Result<LaunchOutcome> {
+    // No id: the proxy store's "checked once, trusted after" records are keyed by it.
+    let proxy = extras.proxy.map(|p| proxy::ProxyEntry { id: String::new(), ..p });
+    launch_inner(profile_id, enable_cdp, headless, None, 0, "", proxy, extras.fresh, &extras.chromium_args).await
+}
+
+/// The browser's saved session of open tabs, so that it has nothing to bring back.
+fn clear_saved_session(udd: &std::path::Path) {
+    let sessions = udd.join("Default").join("Sessions");
+    if let Ok(rd) = std::fs::read_dir(&sessions) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with("Session_") || name.starts_with("Tabs_") {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+    // The older names of the same thing.
+    for old in ["Current Session", "Current Tabs", "Last Session", "Last Tabs"] {
+        let _ = std::fs::remove_file(udd.join("Default").join(old));
+    }
+}
+
 /// As `launch_profile`, but joins the browser to a synchronisation group:
 /// every profile launched under the same `sync_group` mirrors input.
 /// Whether the profile's browser has a session saved that it will reopen by
@@ -74,7 +141,7 @@ pub async fn launch_profile_synced(
     bus_port: u16,
     bus_token: &str,
 ) -> Result<LaunchOutcome> {
-    launch_inner(profile_id, enable_cdp, headless, sync_group, bus_port, bus_token, None).await
+    launch_inner(profile_id, enable_cdp, headless, sync_group, bus_port, bus_token, None, false, &[]).await
 }
 
 /// As `launch_profile`, through `proxy` for this launch only, in place of the profile's own.
@@ -88,7 +155,7 @@ pub async fn launch_profile_via(
 ) -> Result<LaunchOutcome> {
     // No id: the proxy store's "checked once, trusted after" records are keyed by it.
     let proxy = proxy::ProxyEntry { id: String::new(), ..proxy };
-    launch_inner(profile_id, enable_cdp, headless, None, 0, "", Some(proxy)).await
+    launch_inner(profile_id, enable_cdp, headless, None, 0, "", Some(proxy), false, &[]).await
 }
 
 async fn launch_inner(
@@ -99,6 +166,8 @@ async fn launch_inner(
     bus_port: u16,
     bus_token: &str,
     proxy_override: Option<proxy::ProxyEntry>,
+    fresh: bool,
+    chromium_args: &[String],
 ) -> Result<LaunchOutcome> {
     let ephemeral_proxy = proxy_override.is_some();
     // One browser per profile: two children sharing a user-data dir corrupt each other's
@@ -495,6 +564,11 @@ async fn launch_inner(
         cmd.arg("--shardx-android-media");
     }
 
+    // This launch's own switches (already checked), before the operator's so theirs win a repeat.
+    for a in chromium_args {
+        cmd.arg(a);
+    }
+
     // Operator's own switches, last so they win a repeat.
     let extra_args = settings::parse_extra_args(&s.extra_args);
     let operator_start_url = extra_args.iter().any(|a| !a.starts_with('-'));
@@ -512,6 +586,9 @@ async fn launch_inner(
     // brings back the page the profile was last on, and a start URL on top of
     // that is one more `about:blank` tab per launch — a profile opened a dozen
     // times by automation ended up with a dozen of them.
+    if fresh {
+        clear_saved_session(&udd);
+    }
     if !operator_start_url && !has_saved_session(&udd) {
         cmd.arg("about:blank");
     }
@@ -585,6 +662,16 @@ async fn launch_inner(
             Some(c) => {
                 eprintln!("[launcher] CDP ready for {profile_id}: {}", c.web_socket_debugger_url);
                 Tracker::shared().set_cdp(profile_id, c.clone());
+                if fresh {
+                    let (id, ws) = (profile_id.to_string(), c.web_socket_debugger_url.clone());
+                    tokio::spawn(async move {
+                        match crate::heal::close_junk_tabs(&ws).await {
+                            Ok(n) if n > 0 => crate::cloud_sync::log_line(&format!("tabs {id}: closed {n} page(s) an extension opened by itself")),
+                            Ok(_) => {}
+                            Err(e) => crate::cloud_sync::log_line(&format!("tabs {id}: could not look for extension pages: {e:#}")),
+                        }
+                    });
+                }
                 Some(c)
             }
             None => {

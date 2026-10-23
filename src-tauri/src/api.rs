@@ -921,6 +921,14 @@ struct StartReq {
     /// team; the time zone / language / location it leads to are not pinned either.
     #[serde(default)]
     proxy: Option<String>,
+    /// Open clean: no tabs of the last session, no page an extension opens by itself. On by default
+    /// for a partner tool (`X-Hir-Client`), off otherwise; either can say.
+    #[serde(default)]
+    fresh: Option<bool>,
+    /// Chromium switches for this launch only — a few are allowed, see
+    /// `launch::allowed_chromium_args`.
+    #[serde(default)]
+    chromium_args: Option<Vec<String>>,
 }
 
 /// The team refused to hand this profile over because another machine has it open (or is
@@ -968,9 +976,17 @@ fn in_use_response(id: &str, launch_error: &str) -> Option<Response> {
 
 /// Launch with CDP; body `{ "headless": true }` opt-in, `{ "proxy": "..." }` for this launch
 /// only (the answer then says `"proxy_override": true`).
-async fn start_profile(Path(id): Path<String>, body: Option<Json<StartReq>>) -> Response {
+async fn start_profile(Path(id): Path<String>, headers: axum::http::HeaderMap, body: Option<Json<StartReq>>) -> Response {
     let req = body.map(|Json(b)| b).unwrap_or_default();
     let headless = req.headless;
+    let from_partner = headers.get("x-hir-client").and_then(|h| h.to_str().ok()).and_then(Partner::from_header).is_some();
+    let fresh = req.fresh.unwrap_or(from_partner);
+    let chromium_args = match crate::launch::allowed_chromium_args(req.chromium_args.as_deref().unwrap_or(&[])) {
+        Ok(a) => a,
+        Err(message) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({ "error": message, "message": message, "code": "bad_chromium_args" }))).into_response();
+        }
+    };
     let override_proxy = match req.proxy.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         None => None,
         Some(s) => match crate::proxy::parse_single(s) {
@@ -982,9 +998,14 @@ async fn start_profile(Path(id): Path<String>, body: Option<Json<StartReq>>) -> 
         },
     };
     let proxy_override = override_proxy.is_some();
-    let launched = match override_proxy {
-        Some(p) => crate::launch::launch_profile_via(&id, true, headless, p).await,
-        None => crate::launch::launch_profile(&id, true, headless).await,
+    let launched = if fresh || !chromium_args.is_empty() {
+        let extras = crate::launch::LaunchExtras { proxy: override_proxy, fresh, chromium_args: chromium_args.clone() };
+        crate::launch::launch_profile_with(&id, true, headless, extras).await
+    } else {
+        match override_proxy {
+            Some(p) => crate::launch::launch_profile_via(&id, true, headless, p).await,
+            None => crate::launch::launch_profile(&id, true, headless).await,
+        }
     };
     let outcome = match launched {
         Ok(o) => o,
@@ -1001,6 +1022,8 @@ async fn start_profile(Path(id): Path<String>, body: Option<Json<StartReq>>) -> 
         "cdp": outcome.cdp,
         "cdp_error": outcome.cdp_error,
         "proxy_override": proxy_override,
+        "fresh": fresh,
+        "chromium_args": chromium_args,
     }))
     .into_response()
 }
