@@ -537,12 +537,36 @@ async fn list_profiles() -> ApiResult {
                 "pid": r.map(|x| x.pid),
                 "cdp": r.and_then(|x| x.cdp.clone()),
                 "in_use_elsewhere": elsewhere.get(&m.id).map(|l| json!({ "by": l.by, "saving": l.saving })),
+                // What this machine is doing with it: idle | starting | running | saving (its
+                // close going up to the team) | syncing (the team's newer copy coming down). A
+                // client can wait instead of calling /start into it.
+                "state": profile_state(&m.id, r.is_some()),
                 // This machine's last close of it, with the team: ok | pending | failed | none.
                 "sync": close_sync.of(&m.id),
             })
         })
         .collect();
     Ok(Json(json!(out)))
+}
+
+fn profile_state(id: &str, running: bool) -> &'static str {
+    if running {
+        "running"
+    } else if crate::launch::is_starting(id) {
+        "starting"
+    } else if crate::process::is_closing(id) || crate::cloud_sync::busy_phase(id) == Some("push") {
+        "saving"
+    } else if crate::cloud_sync::busy_phase(id) == Some("pull") {
+        "syncing"
+    } else {
+        "idle"
+    }
+}
+
+/// A /start that cannot go ahead right now, answered at once with a code and how long to wait
+/// (`retry_after`, seconds) instead of holding the request until the profile is free.
+fn not_now(code: &str, message: &str, retry_after: u32) -> Response {
+    (StatusCode::CONFLICT, Json(json!({ "error": message, "message": message, "code": code, "retry_after": retry_after }))).into_response()
 }
 
 async fn get_profile(Path(id): Path<String>) -> ApiResult {
@@ -980,6 +1004,26 @@ async fn start_profile(Path(id): Path<String>, headers: axum::http::HeaderMap, b
     let req = body.map(|Json(b)| b).unwrap_or_default();
     let headless = req.headless;
     let from_partner = headers.get("x-hir-client").and_then(|h| h.to_str().ok()).and_then(Partner::from_header).is_some();
+    // Already open: say so with its process and debugging port, so a client whose earlier /start
+    // gave up waiting can take the browser over instead of opening a second one.
+    if let Some(r) = crate::process::Tracker::shared().running().into_iter().find(|r| r.profile_id == id) {
+        let message = "Profile này đang mở rồi.";
+        return (StatusCode::CONFLICT, Json(json!({ "error": message, "message": message, "code": "profile_running", "pid": r.pid, "cdp": r.cdp }))).into_response();
+    }
+    if crate::launch::is_starting(&id) {
+        return not_now("profile_starting", "Profile này đang được mở, đợi vài giây.", 3);
+    }
+    // A partner tool is told at once that the profile is busy with the team — its last close
+    // still going up, or a newer copy coming down — rather than kept waiting (up to a minute and
+    // more) for it; other clients keep the old behaviour of waiting for it.
+    if from_partner {
+        if crate::process::is_closing(&id) || crate::cloud_sync::busy_phase(&id) == Some("push") {
+            return not_now("profile_saving", "Profile đang được lưu lên nhóm (vừa đóng, hoặc vừa sửa). Đợi vài giây rồi mở lại.", 5);
+        }
+        if crate::cloud_sync::busy_phase(&id) == Some("pull") {
+            return not_now("profile_syncing", "Profile đang được tải bản mới từ nhóm. Đợi vài giây rồi mở lại.", 5);
+        }
+    }
     let fresh = req.fresh.unwrap_or(from_partner);
     let chromium_args = match crate::launch::allowed_chromium_args(req.chromium_args.as_deref().unwrap_or(&[])) {
         Ok(a) => a,

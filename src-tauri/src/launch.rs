@@ -49,6 +49,26 @@ pub async fn launch_profile(
     launch_profile_synced(profile_id, enable_cdp, headless, None, 0, "").await
 }
 
+/// Profiles whose launch is under way (the team copy coming down, the browser starting), so a
+/// second open of the same profile is answered at once instead of racing the first.
+fn starting() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static S: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    S.get_or_init(Default::default)
+}
+
+pub fn is_starting(profile_id: &str) -> bool {
+    starting().lock().map(|s| s.contains(profile_id)).unwrap_or(false)
+}
+
+struct StartingGuard(String);
+impl Drop for StartingGuard {
+    fn drop(&mut self) {
+        if let Ok(mut s) = starting().lock() {
+            s.remove(&self.0);
+        }
+    }
+}
+
 /// What an API launch may ask for beyond `headless` and a proxy.
 #[derive(Default, Clone)]
 pub struct LaunchExtras {
@@ -175,6 +195,10 @@ async fn launch_inner(
     if Tracker::shared().is_running(profile_id) {
         anyhow::bail!("profile {profile_id} is already running");
     }
+    if !starting().lock().map(|mut s| s.insert(profile_id.to_string())).unwrap_or(true) {
+        anyhow::bail!("profile {profile_id} is already starting");
+    }
+    let _starting = StartingGuard(profile_id.to_string());
     // No-op unless Settings > Team Sync is configured; otherwise locks the
     // profile on the sync server and pulls its latest state down first.
     let t_start = std::time::Instant::now();

@@ -187,6 +187,12 @@ pub fn activity() -> SyncActivity {
     SyncActivity { busy, generation: GENERATION.load(Ordering::Relaxed), elsewhere }
 }
 
+/// What a background pass is doing with this profile right now: "push" (sending it up — its close,
+/// or an edit), "pull" (bringing the team's newer copy down), or none.
+pub fn busy_phase(profile_id: &str) -> Option<&'static str> {
+    busy_map().lock().ok().and_then(|m| m.get(profile_id).copied())
+}
+
 /// How this machine's last close of a profile went with the team, for the local API:
 /// "none" (no team sync here), "pending" (its close is still being saved), "failed" (the last
 /// close never reached the server — the next close sends it again) or "ok".
