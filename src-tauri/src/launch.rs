@@ -413,6 +413,16 @@ async fn launch_inner(
     if let Err(e) = strip_bound_sessions(&udd) {
         eprintln!("[launcher] could not clear device-bound sessions: {e:#}");
     }
+    // Extensions other software on a computer put into the profile (NordVPN, McAfee…), and ones
+    // whose files are gone: out, before the browser shows an "Error Loading Extension" box.
+    match crate::ext_cleanup::clean(&udd) {
+        Ok(r) if !r.is_empty() => crate::cloud_sync::log_line(&format!(
+            "extensions {profile_id}: removed {}",
+            r.iter().map(|x| format!("{} [{}] ({})", x.name, x.id, x.why)).collect::<Vec<_>>().join(", ")
+        )),
+        Ok(_) => {}
+        Err(e) => crate::cloud_sync::log_line(&format!("extensions {profile_id}: could not check them: {e:#}")),
+    }
 
     // Interactive launches: suppress the crash bubble. Restoring the session is
     // the browser's own "On startup" setting — forcing it here overrode it.
