@@ -12,7 +12,7 @@ export function ConfirmHost() {
       open
       onClose={() => done(null)}
       title={req.title ?? "Confirm"}
-      maxWidthClassName="max-w-md"
+      maxWidthClassName={req.equal ? "max-w-xl" : "max-w-md"}
       footer={
         <div className={req.equal ? "grid w-full grid-cols-2 gap-2" : "flex flex-wrap justify-end gap-2"}>
           {req.buttons.map((b, i) => (
@@ -21,7 +21,7 @@ export function ConfirmHost() {
               size="small"
               variant={b.danger ? "error" : b.primary ? "primary" : "neutral"}
               mode={b.danger || b.primary ? "filled" : "stroke"}
-              className={req.equal ? "w-full" : undefined}
+              className={req.equal ? "w-full whitespace-nowrap" : undefined}
               leftIcon={b.current ? <CheckCircleIcon className="size-4" /> : undefined}
               onClick={() => done(b.value)}
             >
