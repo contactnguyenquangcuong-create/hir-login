@@ -19,6 +19,8 @@ export function ProfileRowActions({ profile, onMore }: {
   // here, and no other machine can open the profile until it is through.
   const isSaving = useProfile((s) => s.syncing.has(p.id));
   const elsewhere = useProfile((s) => s.elsewhere[p.id]);
+  // Opened by HirS / Hir-F: that tool is working in it and closes it, so no Stop here.
+  const tool = useProfile((s) => s.openedBy[p.id]);
   const startStop = useProfile((s) => s.startStop);
 
   return (
@@ -35,6 +37,19 @@ export function ProfileRowActions({ profile, onMore }: {
           title={t("profileRowActions.syncingTitle")}
         >
           {t("profileRowActions.syncing")}
+        </Button>
+      ) : isRunning && tool ? (
+        <Button
+          variant="neutral"
+          mode="lighter"
+          size="xsmall"
+          fullRadius
+          className="w-[120px] max-w-[120px] flex-none justify-start overflow-hidden"
+          leftIcon={<PlayIcon className="size-3.5" />}
+          disabled
+          title={t("profileRowActions.toolUsingTitle", { who: tool })}
+        >
+          <span className="min-w-0 truncate">{t("profileRowActions.usedBy", { who: tool })}</span>
         </Button>
       ) : !isRunning && elsewhere ? (
         <Button

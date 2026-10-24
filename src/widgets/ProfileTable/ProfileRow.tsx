@@ -21,6 +21,7 @@ export function ProfileRow({ profile, proxy, onMenu }: {
   const isRunning = useProfile((s) => !!s.running[p.id]);
   const isSyncing = useProfile((s) => s.syncing.has(p.id));
   const elsewhere = useProfile((s) => s.elsewhere[p.id]);
+  const tool = useProfile((s) => s.openedBy[p.id]);
   const runningSince = useProfile((s) => s.running[p.id]);
   const isSel = useProfile((s) => s.selected.has(p.id));
   const isExpanded = useProfile((s) => s.expanded === p.id);
@@ -44,7 +45,8 @@ export function ProfileRow({ profile, proxy, onMenu }: {
 
   // Per-profile action menu shared by right-click and the ⋮ button.
   const menu = (): ContextItem[] => [
-    { label: isRunning ? t("profileRow.menuStop") : t("profileRow.menuLaunch"), onClick: () => startStop(p) },
+    // Opened by HirS / Hir-F: that tool closes it, so there is no Stop here.
+    ...(isRunning && tool ? [] : [{ label: isRunning ? t("profileRow.menuStop") : t("profileRow.menuLaunch"), onClick: () => startStop(p) }]),
     ...(isRunning ? [{ label: t("profileRow.menuShowWindow"), onClick: () => { profileShowWindow(p.id).catch(() => {}); } }] : []),
     { label: t("profileRow.menuEdit"), onClick: () => expand(p.id) },
     { label: t("profileRow.menuClone"), onClick: () => cloneProfile(p.id) },

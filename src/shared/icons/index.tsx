@@ -53,6 +53,8 @@ import {
   FilterIcon as HugeFilterIcon,
   Cancel01Icon,
   WorkflowSquare03Icon,
+  CloudSavingDone01Icon,
+  CloudOffIcon,
 } from "@hugeicons/core-free-icons";
 import type { ComponentProps } from "react";
 
@@ -113,6 +115,8 @@ export const PlayIcon = make(HugePlayIcon);
 export const StopIcon = make(HugeStopIcon);
 export const MoreIcon = make(MoreVerticalIcon);
 export const SyncIcon = make(Link04Icon);
+export const TeamCloudIcon = make(CloudSavingDone01Icon);
+export const LocalOnlyIcon = make(CloudOffIcon);
 export const RestoreIcon = make(ArchiveRestoreIcon);
 export const FilterIcon = make(HugeFilterIcon);
 export const CloseIcon = make(Cancel01Icon);

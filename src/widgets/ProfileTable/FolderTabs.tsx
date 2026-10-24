@@ -7,6 +7,7 @@ import { toast } from "../../shared/model/toast";
 import { useTeam, canEdit, canShare, startTeamRole } from "../../shared/model/teamRole";
 import { FolderListButton, inlineFolders } from "../../shared/ui/FolderListButton";
 import { ShareFolderModal } from "../../features/manage-profiles/ui/ShareFolderModal";
+import { teamFoldersGone } from "../../shared/model/folderSync";
 
 /* UI-kit "line" tab look, hand-rolled because tabs are drop targets too. */
 const tabBase =
@@ -38,16 +39,17 @@ export function FolderTabs() {
   const configured = useTeam((s) => s.configured);
   const [sharing, setSharing] = useState<string | null>(null);
   const folderNames = useTeam((s) => s.folderNames);
-  const registry = useProfile((s) => s.folderRegistry);
   const forgetFolder = useProfile((s) => s.forgetFolder);
   // A folder the server no longer shows this person (deleted, or access removed) goes from the
-  // list here as well; only empty ones, so no profile is ever hidden by this.
+  // list here as well; only empty ones, so no profile is ever hidden by this. Only one the server
+  // showed before: an empty folder kept on this machine only ("Chỉ trên máy này") stays.
   useEffect(() => {
     if (folderNames === null) return;
-    for (const f of registry) {
-      if (!folderNames.includes(f) && !profiles.some((p) => p.folder === f)) forgetFolder(f);
+    const { folderRegistry, profiles: all } = useProfile.getState();
+    for (const f of teamFoldersGone(folderNames)) {
+      if (folderRegistry.includes(f) && !all.some((p) => p.folder === f)) forgetFolder(f);
     }
-  }, [folderNames, registry, profiles, forgetFolder]);
+  }, [folderNames, forgetFolder]);
   // The partner tools (HirS, Hir-F) are shared with like people, in the Chia sẻ dialog; only
   // shown while they may connect.
   const partnerAllowed = usePartnerShare((s) => s.allowed);

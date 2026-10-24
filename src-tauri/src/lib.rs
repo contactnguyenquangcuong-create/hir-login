@@ -2640,8 +2640,21 @@ fn read_text_file(path: String) -> Result<String, String> {
 // ---- Process tracker ----
 
 #[tauri::command]
-fn process_list() -> Vec<process::RunningProfile> {
-    process::Tracker::shared().running()
+fn process_list() -> Vec<RunningRow> {
+    process::Tracker::shared()
+        .running()
+        .into_iter()
+        .map(|p| RunningRow { opened_by: api::opened_by(&p.profile_id, p.pid), p })
+        .collect()
+}
+
+/// A running browser, and the partner tool (HirS, Hir-F) that opened it, if one did.
+#[derive(serde::Serialize)]
+struct RunningRow {
+    #[serde(flatten)]
+    p: process::RunningProfile,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    opened_by: Option<&'static str>,
 }
 
 #[tauri::command]

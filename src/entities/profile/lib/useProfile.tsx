@@ -6,6 +6,7 @@ import { confirmModal } from "../../../shared/lib/confirm";
 import { clip } from "../../../shared/lib/clipboard";
 import { readTextFile } from "../../../shared/lib/utils";
 import { storeBus } from "../../../shared/lib/storeBus";
+import { offerTeamFolder } from "../../../shared/model/folderSync";
 import { t } from "../../../shared/i18n";
 import { proxyList, type ProxyEntry } from "../../proxy";
 import { fingerprintList, fingerprintGet, type FingerprintEntry } from "../../fingerprint";
@@ -171,6 +172,9 @@ export type ProfileStore = {
   syncing: Set<string>;
   /** Profiles another machine has open or is still saving: who, and whether it is saving. */
   elsewhere: Record<string, { by: string; saving: boolean }>;
+  /** Running browsers a partner tool (HirS, Hir-F) opened: profile → the tool's name. That tool
+   *  works in it and closes it; here it is shown as in use, with no Stop. */
+  openedBy: Record<string, string>;
   selected: Set<string>;
 
   // UI state lives in the store so feature buttons stay prop-free.
@@ -268,6 +272,7 @@ export const useProfile = create<ProfileStore>((set, get) => ({
   startBusy: new Set<string>(),
   syncing: new Set<string>(),
   elsewhere: {},
+  openedBy: {},
   selected: new Set<string>(),
 
   search: "",
@@ -341,9 +346,14 @@ export const useProfile = create<ProfileStore>((set, get) => ({
         const now = Date.now();
         const prev = get().running;
         const next: Record<string, number> = {};
+        const by: Record<string, string> = {};
         for (const r of list) {
           next[r.profile_id] = prev[r.profile_id] ?? (now - r.uptime_ms);
+          if (r.opened_by) by[r.profile_id] = r.opened_by;
         }
+        const prevBy = get().openedBy;
+        const byIds = Object.keys(by);
+        if (byIds.length !== Object.keys(prevBy).length || byIds.some((id) => prevBy[id] !== by[id])) set({ openedBy: by });
         const justExited = Object.keys(prev).some((id) => !(id in next));
         // A new object every 2 s redrew everything that reads `running` (the
         // whole profile table) even with nothing running: only set it on change.
@@ -370,6 +380,10 @@ export const useProfile = create<ProfileStore>((set, get) => ({
   clearFilters: () => set({ filters: emptyFilters() }),
 
   rememberFolder: (f) => {
+    // A folder this machine has not had before (a new name typed in the editor, the move dialog,
+    // a bulk create…): on a team, whoever may make team folders is asked whether it is the team's.
+    const isNew = !get().folderRegistry.includes(f) && !get().profiles.some((p) => p.folder === f);
+    if (isNew) void offerTeamFolder(f);
     const next = get().folderRegistry.includes(f)
       ? get().folderRegistry
       : [...get().folderRegistry, f];
@@ -482,6 +496,8 @@ export const useProfile = create<ProfileStore>((set, get) => ({
   // pre-warm); surfacing the busy state is what the user reads as "did it work?".
   startStop: async (p) => {
     if (get().running[p.id]) {
+      const tool = get().openedBy[p.id];
+      if (tool) { toast.err(t("profileRowActions.toolUsingTitle", { who: tool })); return; }
       try { await processKill(p.id); }
       catch (e) { toast.err(String(e)); }
       return;
@@ -668,6 +684,7 @@ export const useProfile = create<ProfileStore>((set, get) => ({
 
   bulkStop: async () => {
     for (const id of get().selected) {
+      if (get().openedBy[id]) continue; // the partner tool's: it closes it
       try { await processKill(id); } catch {}
     }
     get().clearSelected();

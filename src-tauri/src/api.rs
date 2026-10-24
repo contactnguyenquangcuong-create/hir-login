@@ -259,6 +259,13 @@ fn opened_by_partner(p: Partner, id: &str) -> bool {
     who == p && crate::process::Tracker::shared().running().iter().any(|r| r.profile_id == id && r.pid == pid)
 }
 
+/// The partner tool that opened the browser running now in `id` (process `pid`), by name: the
+/// app shows it as in use by that tool instead of offering to stop it.
+pub(crate) fn opened_by(id: &str, pid: u32) -> Option<&'static str> {
+    let (who, p) = started_by().lock().ok()?.get(id).copied()?;
+    (p == pid).then(|| who.name())
+}
+
 /// A profile's folder, and whether it is a temporary one.
 fn profile_scope(id: &str) -> Option<(String, bool)> {
     crate::profile::load_raw(id).ok().map(|p| (p.meta.folder, p.meta.temporary))

@@ -8,9 +8,10 @@ import { useNav } from "../../shared/model/navigation";
 import { startTeamRole, teamCall, useTeam, canShare } from "../../shared/model/teamRole";
 import { useProfile, useFolders, usePartnerShare, PARTNERS } from "../../entities/profile";
 import { ShareFolderModal } from "../../features/manage-profiles/ui/ShareFolderModal";
+import { offerTeamFolder, makeTeamFolder, stopTeamFolder, askFolderSync } from "../../shared/model/folderSync";
 import { Section, Pill } from "../settings/ui";
 import { useContextMenu } from "../../shared/hooks/useContextMenu";
-import { MoreIcon } from "../../shared/icons";
+import { MoreIcon, TeamCloudIcon, LocalOnlyIcon } from "../../shared/icons";
 
 type Member = { id: string; name: string; role: "manager" | "member"; disabled: boolean };
 type ServerFolder = { name: string; profiles: number; access: Record<string, string>; canDelete?: boolean; createdBy?: { role: "admin" | "manager"; name: string } };
@@ -92,8 +93,14 @@ export function FoldersPage() {
   const create = async () => {
     const n = name.trim();
     if (!n) return;
-    try { if (configured === true) await teamCall("PUT", "/admin/folders", { name: n }); rememberFolder(n); setName(""); toast.ok(`Đã tạo thư mục "${n}"`); await load(); }
-    catch (e) { toast.err(/409|exists/i.test(String(e)) ? "Thư mục này đã tồn tại." : String(e)); }
+    if (rows.some((r) => r.name === n)) { toast.err("Thư mục này đã tồn tại."); return; }
+    // On a team, whoever makes it says whether it is the team's or this machine's only.
+    const where = await offerTeamFolder(n);
+    if (where === null) return;
+    rememberFolder(n);
+    setName("");
+    toast.ok(where === "team" ? `Đã tạo thư mục "${n}" cho cả nhóm` : `Đã tạo thư mục "${n}"`);
+    await load();
   };
   const remove = async (f: string, onServer: boolean) => {
     const ok = await confirmModal({
@@ -122,6 +129,24 @@ export function FoldersPage() {
   const restore = async (f: string) => {
     try { await teamCall("POST", `/admin/folders/${encodeURIComponent(f)}/restore`); toast.ok(`Đã khôi phục "${f}"`); await load(); }
     catch (e) { toast.err(/409/.test(String(e)) ? "Đã có thư mục cùng tên, hãy đổi tên hoặc xoá thư mục đó trước." : String(e)); }
+  };
+  /** The folder's sync mark was pressed: keep it as it is, or switch between the team's and this machine's. */
+  const changeSync = async (f: { name: string; local: boolean; profiles: number; access: Record<string, string> }) => {
+    const want = await askFolderSync(f.name, f.local ? "local" : "team");
+    if (!want || want === (f.local ? "local" : "team")) return;
+    if (want === "team") { if (await makeTeamFolder(f.name)) await load(); return; }
+    const people = Object.keys(f.access).length + partnersOf(f.name).length;
+    if (f.profiles === 0 && people > 0) {
+      const ok = await confirmModal({
+        title: `Ngừng đồng bộ "${f.name}"?`,
+        message: `Thư mục đang chia sẻ cho ${people} người / công cụ; sau khi ngừng đồng bộ họ không còn thấy nó. Đồng bộ lại sau sẽ trả lại phần chia sẻ.`,
+      });
+      if (ok !== true) return;
+    }
+    if (await stopTeamFolder(f.name, f.profiles)) {
+      rememberFolder(f.name);
+      await load();
+    }
   };
   const purge = async (f: string) => {
     const ok = await confirmModal({ title: `Xoá vĩnh viễn "${f}"?`, message: "Sau khi xoá vĩnh viễn không khôi phục được nữa.", danger: true });
@@ -199,6 +224,7 @@ export function FoldersPage() {
               const menu = [
                 { label: "Xem profile trong thư mục", onClick: open },
                 { label: "Chia sẻ…", onClick: () => setSharing(f.name) },
+                ...(configured === true ? [{ label: f.local ? "Đồng bộ cho cả nhóm" : "Ngừng đồng bộ (chỉ trên máy này)", onClick: () => changeSync(f) }] : []),
                 ...(deletable ? [{ sep: true, label: "", onClick: () => {} }, { label: "Xoá thư mục", onClick: () => remove(f.name, !f.local), danger: true }] : []),
               ];
               return (
@@ -213,7 +239,18 @@ export function FoldersPage() {
                     >
                       {f.name}
                     </button>
-                    {f.local && <Pill tone="warning">Chỉ trên máy này</Pill>}
+                    {configured === true && (
+                      // Whether the folder is synced for the team; pressing it switches.
+                      <button
+                        type="button"
+                        className={`sync-mark inline-flex flex-none cursor-pointer items-center gap-1 rounded-full border-0 px-2 py-0.5 text-paragraph-xs font-medium ${f.local ? "bg-warning-alpha-10 text-warning-base hover:bg-warning-alpha-16" : "bg-success-alpha-10 text-success-base hover:bg-success-alpha-16"}`}
+                        title={f.local ? "Chỉ trên máy này, không đồng bộ lên nhóm. Bấm để đổi." : "Đang đồng bộ cho cả nhóm. Bấm để đổi."}
+                        onClick={() => changeSync(f)}
+                      >
+                        {f.local ? <LocalOnlyIcon className="size-3.5" /> : <TeamCloudIcon className="size-3.5" />}
+                        {f.local ? "Chỉ trên máy này" : "Đồng bộ"}
+                      </button>
+                    )}
                   </div>
                   <div className={`cell-count text-paragraph-xs ${f.profiles > 0 ? "text-text-sub-600" : "text-text-soft-400"}`}>{f.profiles}</div>
                   {/* Who has it, on one line: the first few, then how many more (all of them on hover). */}

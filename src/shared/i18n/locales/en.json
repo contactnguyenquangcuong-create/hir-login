@@ -927,6 +927,7 @@
   "profileRowActions.syncingTitle": "Being saved to the team. It can be opened again — here or elsewhere — once this is done.",
   "profileRowActions.usedBy": "{who} has it open",
   "profileRowActions.usedByTitle": "{who} has this profile open. Wait for them to close it.",
+  "profileRowActions.toolUsingTitle": "{who} opened this profile and is working in it. {who} closes it when done; it cannot be stopped here.",
   "profileRowActions.savedBy": "{who} is syncing",
   "profileRowActions.savedByTitle": "{who} has just closed this profile and it is being saved to the team. Wait for it to finish.",
   "profileRowActions.starting": "Starting…",

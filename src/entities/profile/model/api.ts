@@ -19,7 +19,7 @@ export type ImportReport = { imported: number; failed: BundleFailure[]; warnings
 export const profileExportFolder = (ids: string[], dest: string) => invoke<ExportReport>("profile_export_folder", { ids, dest });
 export const profileImportFolder = (src: string) => invoke<ImportReport>("profile_import_folder", { src });
 export const profileCreateFromTemplate = (templateId: string) => invoke<ProfileMeta>("profile_create_from_template", { templateId });
-export const processList = () => invoke<{ profile_id: string; pid: number; uptime_ms: number }[]>("process_list");
+export const processList = () => invoke<{ profile_id: string; pid: number; uptime_ms: number; opened_by?: string }[]>("process_list");
 export const processKill = (profileId: string) => invoke<boolean>("process_kill", { profileId });
 export const launch = (profileId: string) => invoke<number>("launch", { profileId });
 

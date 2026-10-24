@@ -927,6 +927,7 @@
   "profileRowActions.syncingTitle": "正在保存到团队。完成后才能再次打开，其他电脑也一样。",
   "profileRowActions.usedBy": "{who} 正在使用",
   "profileRowActions.usedByTitle": "{who} 正在使用此配置，请等待对方关闭。",
+  "profileRowActions.toolUsingTitle": "{who} 正在使用此配置，完成后会自行关闭，此处无法停止。",
   "profileRowActions.savedBy": "{who} 同步中",
   "profileRowActions.savedByTitle": "{who} 刚关闭此配置，正在同步到团队，请等待完成。",
   "profileRowActions.starting": "启动中…",

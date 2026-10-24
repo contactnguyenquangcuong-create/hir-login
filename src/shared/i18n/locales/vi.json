@@ -927,6 +927,7 @@
   "profileRowActions.syncingTitle": "Đang lưu lên nhóm. Đợi xong mới mở lại được, máy khác cũng chưa mở được.",
   "profileRowActions.usedBy": "{who} đang dùng",
   "profileRowActions.usedByTitle": "{who} đang mở profile này. Đợi họ đóng rồi mới mở được.",
+  "profileRowActions.toolUsingTitle": "{who} đang mở và làm việc trong profile này. {who} tự đóng khi xong, ở đây không dừng được.",
   "profileRowActions.savedBy": "{who} đang đồng bộ",
   "profileRowActions.savedByTitle": "{who} vừa đóng profile này và đang đồng bộ lên nhóm. Đợi xong rồi mở.",
   "profileRowActions.starting": "Đang khởi động…",

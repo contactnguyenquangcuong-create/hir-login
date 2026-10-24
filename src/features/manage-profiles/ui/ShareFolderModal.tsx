@@ -4,6 +4,7 @@ import { FolderIcon } from "../../../shared/icons";
 import { toast } from "../../../shared/model/toast";
 import { teamCall, useTeam } from "../../../shared/model/teamRole";
 import { PARTNERS, usePartnerShare, type PartnerKey } from "../../../entities/profile";
+import { makeTeamFolder } from "../../../shared/model/folderSync";
 
 type Level = "none" | "use" | "manage";
 type Member = { id: string; name: string; role: "manager" | "member"; disabled: boolean };
@@ -21,6 +22,7 @@ export function ShareFolderModal({ folder, onClose }: { folder: string; onClose:
   const [members, setMembers] = useState<Member[] | null>(null);
   const [access, setAccess] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState<string | null>(null);
+  const [onServer, setOnServer] = useState(true);
   const allowed = usePartnerShare((s) => s.allowed);
   const partnerAccess = usePartnerShare((s) => s.access);
   const loadPartners = usePartnerShare((s) => s.load);
@@ -32,13 +34,12 @@ export function ShareFolderModal({ folder, onClose }: { folder: string; onClose:
     // No team on this machine: only the partner tools are left to share with.
     if (configured !== true) { setMembers([]); return; }
     try {
-      // A folder that only exists locally is registered on the server first.
-      let folders = (await teamCall<{ folders: Folder[] }>("GET", "/admin/folders")).folders;
-      if (!folders.some((f) => f.name === folder)) {
-        try { await teamCall("PUT", "/admin/folders", { name: folder }); } catch { /* already there */ }
-        folders = (await teamCall<{ folders: Folder[] }>("GET", "/admin/folders")).folders;
-      }
-      setAccess(folders.find((f) => f.name === folder)?.access ?? {});
+      // A folder only on this machine stays so until it is shared with a member (opening this
+      // dialog — to share it with HirS, say — no longer puts it on the team's server).
+      const folders = (await teamCall<{ folders: Folder[] }>("GET", "/admin/folders")).folders;
+      const found = folders.find((f) => f.name === folder);
+      setOnServer(!!found);
+      setAccess(found?.access ?? {});
       setMembers((await teamCall<{ members: Member[] }>("GET", "/admin/members")).members.filter((m) => !m.disabled));
     } catch (e) {
       toast.err(String(e));
@@ -50,6 +51,11 @@ export function ShareFolderModal({ folder, onClose }: { folder: string; onClose:
   const set = async (m: Member, level: Level) => {
     setBusy(m.id);
     try {
+      // Sharing with a member makes it a team folder: on the server first.
+      if (!onServer && level !== "none") {
+        if (!(await makeTeamFolder(folder))) return;
+        setOnServer(true);
+      }
       await teamCall("PUT", `/admin/folders/${encodeURIComponent(folder)}/access`, { memberId: m.id, level });
       setAccess((a) => {
         const n = { ...a };
