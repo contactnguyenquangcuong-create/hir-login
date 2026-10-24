@@ -39,11 +39,12 @@ export async function offerTeamFolder(name: string): Promise<"team" | "local" | 
     title: `Đồng bộ thư mục "${folder}" cho cả nhóm?`,
     message:
       "Đồng bộ: thư mục có trên máy chủ của nhóm, profile trong đó được đồng bộ lên nhóm, và bạn chia sẻ được cho nhân sự. " +
-      "Chỉ trên máy này: thư mục và profile trong đó ở lại máy này. Muốn đồng bộ sau thì vào trang Thư mục → ⋮ → Đồng bộ cho cả nhóm.",
+      "Chỉ trên máy này: thư mục và profile trong đó ở lại máy này. Muốn đổi sau thì bấm nhãn của thư mục ở trang Thư mục.",
     buttons: [
       { label: "Chỉ trên máy này", value: "local" },
       { label: "Đồng bộ cho cả nhóm", value: "team", primary: true },
     ],
+    equal: true,
   });
   if (choice === "team") {
     const ok = await makeTeamFolder(folder);
@@ -113,8 +114,9 @@ export async function askFolderSync(folder: string, now: "team" | "local"): Prom
       ? "Đang đồng bộ cho cả nhóm: thư mục có trên máy chủ của nhóm, profile trong đó được đồng bộ, và chia sẻ được cho nhân sự."
       : "Đang chỉ trên máy này: thư mục và profile trong đó không đồng bộ lên nhóm.",
     buttons: [
-      { label: now === "local" ? "Chỉ trên máy này (đang chọn)" : "Chỉ trên máy này", value: "local", primary: now === "local" },
-      { label: now === "team" ? "Đồng bộ cho cả nhóm (đang chọn)" : "Đồng bộ cho cả nhóm", value: "team", primary: now === "team" },
+      { label: "Chỉ trên máy này", value: "local", primary: now === "local", current: now === "local" },
+      { label: "Đồng bộ cho cả nhóm", value: "team", primary: now === "team", current: now === "team" },
     ],
+    equal: true,
   });
 }

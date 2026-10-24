@@ -21,6 +21,7 @@ export function confirmModal(opts: {
   message: string;
   buttons?: ConfirmButton[];
   danger?: boolean;
+  equal?: boolean;
 }): Promise<any> {
   return new Promise((resolve) => {
     // Callers pass text that is already translated; the default buttons are
@@ -38,6 +39,7 @@ export function confirmModal(opts: {
       title: opts.title,
       message: opts.message,
       buttons,
+      equal: opts.equal,
       resolve: (v) => {
         useConfirmStore.getState().clear();
         resolve(v);

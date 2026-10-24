@@ -13,11 +13,13 @@ export type Section =
 
 export type ToastItem = { id: number; kind: "ok" | "err" | "info"; text: string; detail?: string };
 
-export type ConfirmButton = { label: string; value: any; danger?: boolean; primary?: boolean };
+export type ConfirmButton = { label: string; value: any; danger?: boolean; primary?: boolean; /** The choice in effect now: shown with a tick. */ current?: boolean };
 export type ConfirmReq = {
   title?: string;
   message: string;
   buttons: ConfirmButton[];
+  /** Two choices side by side, the same width (instead of right-aligned buttons that wrap). */
+  equal?: boolean;
   resolve: (v: any) => void;
 };
 

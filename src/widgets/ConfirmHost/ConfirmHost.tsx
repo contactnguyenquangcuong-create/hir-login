@@ -1,5 +1,6 @@
 import { Button, Modal } from "@proxyshard/shardx-ui-kit";
 import { useConfirmStore } from "../../shared/model/confirm";
+import { CheckCircleIcon } from "../../shared/icons";
 
 /// Global confirm dialog — UI-kit Modal fed by the zustand confirm store.
 export function ConfirmHost() {
@@ -13,13 +14,15 @@ export function ConfirmHost() {
       title={req.title ?? "Confirm"}
       maxWidthClassName="max-w-md"
       footer={
-        <div className="flex flex-wrap justify-end gap-2">
+        <div className={req.equal ? "grid w-full grid-cols-2 gap-2" : "flex flex-wrap justify-end gap-2"}>
           {req.buttons.map((b, i) => (
             <Button
               key={i}
               size="small"
               variant={b.danger ? "error" : b.primary ? "primary" : "neutral"}
               mode={b.danger || b.primary ? "filled" : "stroke"}
+              className={req.equal ? "w-full" : undefined}
+              leftIcon={b.current ? <CheckCircleIcon className="size-4" /> : undefined}
               onClick={() => done(b.value)}
             >
               {b.label}
