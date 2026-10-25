@@ -142,6 +142,24 @@ pub fn set_fp_pin(id: &str, pin: FpPin) -> Result<()> {
 }
 
 /// Binds the profile to `proxy` (or to none), and stamps the change if it is one.
+/// The proxy a profile opens with: the temporary one if it has one, else the bound proxy, else the
+/// inline one.
+pub fn launch_proxy(meta: &StoredMeta) -> Option<crate::proxy::ProxyEntry> {
+    meta.temp_proxy
+        .clone()
+        .or_else(|| meta.proxy_id.as_deref().and_then(|pid| crate::proxy::get(pid).ok().flatten()))
+        .or_else(|| meta.inline_proxy.clone())
+}
+
+/// `profile.json` as it goes to the team: without what is only this machine's (a temporary or
+/// inline proxy carries its login).
+pub fn team_json(stored: &StoredProfile) -> serde_json::Result<String> {
+    let mut copy = stored.clone();
+    copy.meta.temp_proxy = None;
+    copy.meta.inline_proxy = None;
+    serde_json::to_string_pretty(&copy)
+}
+
 pub fn bind_proxy_stamped(meta: &mut StoredMeta, proxy: Option<String>) {
     if meta.proxy_id != proxy {
         meta.proxy_id = proxy;
@@ -188,6 +206,11 @@ pub struct StoredMeta {
     /// Inline proxy from temporary profile API; not in proxy store.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inline_proxy: Option<crate::proxy::ProxyEntry>,
+    /// A proxy put on this profile for a while (a partner tool swapping the exit IP for one job):
+    /// opens the profile in place of the bound proxy, is not in the proxy list, and never goes to
+    /// the team. Any later choice of proxy (`proxy_id`, even "") ends it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temp_proxy: Option<crate::proxy::ProxyEntry>,
     /// Hidden from listings; auto-deleted on close.
     #[serde(default, skip_serializing_if = "is_false")]
     pub temporary: bool,
@@ -1546,5 +1569,23 @@ mod bundle_tests {
         let n = fs::read_dir(&dest).unwrap().count();
         assert_eq!(n, 2, "same name twice still gives two folders");
         assert_eq!(name_of(&a), "Lan - Sale 1 🚀");
+    }
+
+    #[test]
+    fn a_temporary_proxy_opens_the_profile_and_stays_off_the_team() {
+        let temp = crate::proxy::parse_single("https://svc:secret@br.prod.surfshark.com:443").unwrap();
+        let inline = crate::proxy::parse_single("socks5://u:p@10.0.0.1:1080").unwrap();
+        let mut sp = StoredProfile::default();
+        sp.meta.inline_proxy = Some(inline.clone());
+        assert_eq!(launch_proxy(&sp.meta).map(|p| p.host), Some(inline.host.clone()), "no temporary one: the inline proxy opens it");
+        sp.meta.temp_proxy = Some(temp.clone());
+        assert_eq!(launch_proxy(&sp.meta).map(|p| p.host), Some(temp.host.clone()), "the temporary proxy wins");
+
+        let sent = team_json(&sp).unwrap();
+        assert!(!sent.contains("surfshark") && !sent.contains("secret"), "the temporary proxy and its login are not sent: {sent}");
+        assert!(!sent.contains("10.0.0.1"), "nor the inline one");
+        // This machine keeps it (profile.json on disk), so the next open still uses it.
+        let kept = serde_json::to_string(&sp).unwrap();
+        assert!(kept.contains("surfshark"));
     }
 }

@@ -1661,12 +1661,7 @@ async fn run_block(
                 "host" => None,
                 "profile" if !bound.id.is_empty() => {
                     let stored = profile::load_raw(&bound.id)?;
-                    let bound_proxy = stored
-                        .meta
-                        .proxy_id
-                        .as_deref()
-                        .and_then(|id| proxy::get(id).ok().flatten())
-                        .or(stored.meta.inline_proxy);
+                    let bound_proxy = profile::launch_proxy(&stored.meta);
                     match bound_proxy {
                         Some(pr) => Some(proxy::effective(&pr).await.to_proxy_server_arg()),
                         None => None,

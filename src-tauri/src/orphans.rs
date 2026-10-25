@@ -54,7 +54,7 @@ pub async fn adopt_leftovers() -> usize {
         let mut relay = "";
         if let Some(port) = loopback_proxy_port(&p.cmdline) {
             // Resolved as the launch resolves it: the bound proxy, else the profile's inline one.
-            let px = stored.meta.proxy_id.as_deref().and_then(|pid| crate::proxy::get(pid).ok().flatten()).or_else(|| stored.meta.inline_proxy.clone());
+            let px = crate::profile::launch_proxy(&stored.meta);
             if let Some(px) = px {
                 let px = crate::proxy::effective(&px).await;
                 relay = match crate::proxy_relay::start_on(&id, &px, port).await {

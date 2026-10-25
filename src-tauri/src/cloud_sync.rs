@@ -742,7 +742,7 @@ fn build_bundle(id: &str) -> Result<Vec<u8>> {
         let opts = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated);
         zip.start_file("profile.json", opts)?;
-        zip.write_all(serde_json::to_string_pretty(&stored)?.as_bytes())?;
+        zip.write_all(crate::profile::team_json(&stored)?.as_bytes())?;
         // `null` when the profile connects directly, so unbinding syncs too.
         zip.start_file("proxy.json", opts)?;
         zip.write_all(serde_json::to_string(&bound_proxy(id))?.as_bytes())?;

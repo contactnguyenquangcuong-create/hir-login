@@ -189,7 +189,6 @@ async fn launch_inner(
     fresh: bool,
     chromium_args: &[String],
 ) -> Result<LaunchOutcome> {
-    let ephemeral_proxy = proxy_override.is_some();
     // One browser per profile: two children sharing a user-data dir corrupt each other's
     // state, and the second displaces the first in the tracker, leaving it unstoppable.
     if Tracker::shared().is_running(profile_id) {
@@ -217,17 +216,15 @@ async fn launch_inner(
     let bin = resolve_binary()?;
     let stored = profile::load_raw(profile_id)?;
     let udd = profile::user_data_dir(profile_id)?;
+    // A proxy for this launch only, given or temporary: what is read from its exit (time zone,
+    // language) is not kept in the profile, which the team shares.
+    let ephemeral_proxy = proxy_override.is_some() || stored.meta.temp_proxy.is_some();
 
     // This launch's own proxy when one was given, else the stored proxy by id, else ephemeral
     // inline (quick profiles, not in store).
     let bound_proxy: Option<proxy::ProxyEntry> = match proxy_override {
         Some(p) => Some(p),
-        None => stored
-            .meta
-            .proxy_id
-            .as_deref()
-            .and_then(|pid| proxy::get(pid).ok().flatten())
-            .or_else(|| stored.meta.inline_proxy.clone()),
+        None => profile::launch_proxy(&stored.meta),
     };
     // Whether this proxy was already checked before this open (for the launch log).
     let was_verified = bound_proxy.as_ref().map(proxy::proxy_is_verified);

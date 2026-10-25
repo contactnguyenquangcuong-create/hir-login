@@ -822,6 +822,10 @@ struct EditReq {
     proxy_id: Option<String>,
     /// Proxy string: stored + tested, then bound.
     proxy: Option<String>,
+    /// With `proxy`: use it for a while only — not stored in the proxy list, not sent to the team,
+    /// ended by the next `proxy_id`. Default: true for Hir-F (which swaps the exit IP for one
+    /// job), false for everyone else.
+    temporary: Option<bool>,
     /// `#rrggbb`; "" goes back to the name-derived colour.
     color: Option<String>,
     /// Replaces the whole list; `[]` loads none.
@@ -855,7 +859,8 @@ fn validate_extension_ids(ids: &[String]) -> Result<(), ApiError> {
 }
 
 /// Edit profile; only provided fields change. Returns the updated profile.
-async fn edit_profile(Path(id): Path<String>, Json(body): Json<EditReq>) -> ApiResult {
+async fn edit_profile(Path(id): Path<String>, headers: axum::http::HeaderMap, Json(body): Json<EditReq>) -> ApiResult {
+    let from_hirf = headers.get("x-hir-client").and_then(|h| h.to_str().ok()).and_then(Partner::from_header) == Some(Partner::HirF);
     let mut stored = crate::profile::load_raw(&id)
         .map_err(|e| err(StatusCode::NOT_FOUND, e.to_string()))?;
 
@@ -876,15 +881,22 @@ async fn edit_profile(Path(id): Path<String>, Json(body): Json<EditReq>) -> ApiR
     if let Some(pid) = body.proxy_id.as_ref() {
         crate::profile::bind_proxy_stamped(&mut stored.meta, if pid.is_empty() { None } else { Some(pid.clone()) });
         stored.meta.inline_proxy = None;
+        stored.meta.temp_proxy = None;
     } else if let Some(pstr) = body.proxy.as_ref() {
         let entry = crate::proxy::parse_single(pstr)
             .ok_or_else(|| err(StatusCode::BAD_REQUEST, format!("unparseable proxy: {pstr}")))?;
-        let s = crate::proxy::upsert_dedup(entry)
-            .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-        let _ = crate::proxy::full_test(&s).await;
-        crate::profile::bind_proxy_stamped(&mut stored.meta, Some(s.id));
-        stored.meta.inline_proxy = None;
-        crate::notify_store_changed("proxies");
+        if body.temporary.unwrap_or(from_hirf) {
+            // For a while only: the bound proxy stays as it was, so the team's copy is untouched.
+            stored.meta.temp_proxy = Some(entry);
+        } else {
+            let s = crate::proxy::upsert_dedup(entry)
+                .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+            let _ = crate::proxy::full_test(&s).await;
+            crate::profile::bind_proxy_stamped(&mut stored.meta, Some(s.id));
+            stored.meta.inline_proxy = None;
+            stored.meta.temp_proxy = None;
+            crate::notify_store_changed("proxies");
+        }
     }
     if let Some(c) = body.color.as_ref() {
         // "" is how a caller asks for the derived colour back.
