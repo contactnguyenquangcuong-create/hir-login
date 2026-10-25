@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { confirmModal } from "./confirm";
 import { teamCall, useTeam, canShare } from "./teamRole";
-import { toast } from "./toast";
+import { toast, useToastStore } from "./toast";
 
 /** Answers already given this session, so one new folder is asked about once. */
 const answered = new Map<string, "team" | "local">();
@@ -58,8 +58,21 @@ export async function offerTeamFolder(name: string): Promise<"team" | "local" | 
   return null;
 }
 
-/** Puts a folder on the team's server; its profiles then go up with the next sync. */
+/** Whether the team's server lists `folder` for this person right now. */
+async function onServer(folder: string): Promise<boolean> {
+  try {
+    const r = await teamCall<{ folders: { name: string }[] }>("GET", "/admin/folders");
+    return r.folders.some((f) => f.name === folder);
+  } catch { return false; }
+}
+
+/**
+ * Puts a folder on the team's server; its profiles then go up with the next sync. True only when
+ * the server really lists it afterwards — a "done" that left the folder marked local is worse than
+ * an error, so a refusal is said out loud.
+ */
 export async function makeTeamFolder(folder: string): Promise<boolean> {
+  let why = "";
   try {
     await teamCall("PUT", "/admin/folders", { name: folder });
   } catch (e) {
@@ -67,7 +80,13 @@ export async function makeTeamFolder(folder: string): Promise<boolean> {
     if (!/409|exists/i.test(msg)) { toast.err(msg); return false; }
     // The name is taken: already the team's, or in the team's trash after "stop syncing" — then
     // bring it back, with whom it was shared.
-    await teamCall("POST", `/admin/folders/${encodeURIComponent(folder)}/restore`).catch(() => {});
+    try { await teamCall("POST", `/admin/folders/${encodeURIComponent(folder)}/restore`); }
+    catch (e2) { why = String(e2); }
+  }
+  if (!(await onServer(folder))) {
+    // Pushed as is (not through friendlyError): the server's own words go in the details.
+    useToastStore.getState().push("err", `Máy chủ nhóm chưa nhận thư mục "${folder}", nên chưa đồng bộ được. Hãy thử lại, hoặc nhờ quản trị kiểm tra máy chủ.`, why || undefined);
+    return false;
   }
   answered.set(folder, "team");
   toast.ok(`Đã đồng bộ thư mục "${folder}" cho cả nhóm`);

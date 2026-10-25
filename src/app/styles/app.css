@@ -138,7 +138,7 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Folders table: name · profiles · shared with · made by · actions */
+/* Folders table: name · (sync, on a team) · profiles · shared with · made by · actions */
 .f-cols {
   display: grid;
   column-gap: 16px;
@@ -146,6 +146,9 @@
   min-height: 52px;
   align-items: center;
   grid-template-columns: minmax(200px, 1.4fr) 64px minmax(240px, 2fr) minmax(90px, 0.6fr) 112px;
+}
+.f-cols.f-sync {
+  grid-template-columns: minmax(200px, 1.4fr) 150px 64px minmax(240px, 2fr) minmax(90px, 0.6fr) 112px;
 }
 .f-cols.f-head {
   min-height: 36px;

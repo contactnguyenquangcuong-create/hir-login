@@ -11,7 +11,7 @@ import { ShareFolderModal } from "../../features/manage-profiles/ui/ShareFolderM
 import { offerTeamFolder, makeTeamFolder, stopTeamFolder, askFolderSync } from "../../shared/model/folderSync";
 import { Section, Pill } from "../settings/ui";
 import { useContextMenu } from "../../shared/hooks/useContextMenu";
-import { MoreIcon, TeamCloudIcon, LocalOnlyIcon } from "../../shared/icons";
+import { MoreIcon, TeamCloudIcon, LocalOnlyIcon, SyncIcon } from "../../shared/icons";
 
 type Member = { id: string; name: string; role: "manager" | "member"; disabled: boolean };
 type ServerFolder = { name: string; profiles: number; access: Record<string, string>; canDelete?: boolean; createdBy?: { role: "admin" | "manager"; name: string } };
@@ -34,6 +34,8 @@ export function FoldersPage() {
   const [trash, setTrash] = useState<TrashedFolder[]>([]);
   const [name, setName] = useState("");
   const [filter, setFilter] = useState("");
+  /** Folders whose sync mark is being switched: the mark says so until the server has answered. */
+  const [switching, setSwitching] = useState<Set<string>>(new Set());
   const [limit, setLimit] = useState(50);
   // The partner tools (HirS, Hir-F) count as more people a folder is shared with (in the Chia sẻ
   // dialog); each only sees the folders shared with it, so it never writes its proxies into any
@@ -132,8 +134,14 @@ export function FoldersPage() {
   };
   /** The folder's sync mark was pressed: keep it as it is, or switch between the team's and this machine's. */
   const changeSync = async (f: { name: string; local: boolean; profiles: number; access: Record<string, string> }) => {
+    if (switching.has(f.name)) return;
     const want = await askFolderSync(f.name, f.local ? "local" : "team");
     if (!want || want === (f.local ? "local" : "team")) return;
+    setSwitching((s) => new Set(s).add(f.name));
+    try { await switchSync(f, want); }
+    finally { setSwitching((s) => { const n = new Set(s); n.delete(f.name); return n; }); }
+  };
+  const switchSync = async (f: { name: string; profiles: number; access: Record<string, string> }, want: "team" | "local") => {
     if (want === "team") { if (await makeTeamFolder(f.name)) await load(); return; }
     const people = Object.keys(f.access).length + partnersOf(f.name).length;
     if (f.profiles === 0 && people > 0) {
@@ -206,8 +214,9 @@ export function FoldersPage() {
         {canShare(role, configured) && (
           // One row per folder, in columns: what it is, how many profiles, who has it, who made it.
           <div className="overflow-hidden rounded-lg bg-bg-white-0 shadow-[var(--shadow-xs)] ring-1 ring-inset ring-stroke-soft-200">
-            <div className="f-cols f-head border-b border-stroke-soft-200 bg-bg-weak-50 text-subheading-2xs text-text-soft-400">
+            <div className={`f-cols f-head ${configured === true ? "f-sync" : ""} border-b border-stroke-soft-200 bg-bg-weak-50 text-subheading-2xs text-text-soft-400`}>
               <div>TÊN</div>
+              {configured === true && <div>ĐỒNG BỘ</div>}
               <div className="cell-count">PROFILE</div>
               <div>CHIA SẺ CHO</div>
               <div>NGƯỜI TẠO</div>
@@ -228,7 +237,7 @@ export function FoldersPage() {
                 ...(deletable ? [{ sep: true, label: "", onClick: () => {} }, { label: "Xoá thư mục", onClick: () => remove(f.name, !f.local), danger: true }] : []),
               ];
               return (
-                <div key={f.name} className="f-cols border-t border-stroke-soft-200 transition-colors first:border-t-0 hover:bg-bg-weak-50" onContextMenu={(e) => ctx.open(e, menu)}>
+                <div key={f.name} className={`f-cols ${configured === true ? "f-sync" : ""} border-t border-stroke-soft-200 transition-colors first:border-t-0 hover:bg-bg-weak-50`} onContextMenu={(e) => ctx.open(e, menu)}>
                   <div className="flex min-w-0 items-center gap-2.5">
                     <FolderIcon className="size-[18px] flex-none text-icon-soft-400" />
                     <button
@@ -239,19 +248,22 @@ export function FoldersPage() {
                     >
                       {f.name}
                     </button>
-                    {configured === true && (
-                      // Whether the folder is synced for the team; pressing it switches.
+                  </div>
+                  {configured === true && (
+                    <div className="flex min-w-0 items-center">
+                      {/* Whether the folder is synced for the team; pressing it switches. */}
                       <button
                         type="button"
                         className={`sync-mark inline-flex flex-none cursor-pointer items-center gap-1 rounded-full border-0 px-2 py-0.5 text-paragraph-xs font-medium ${f.local ? "bg-warning-alpha-10 text-warning-base hover:bg-warning-alpha-16" : "bg-success-alpha-10 text-success-base hover:bg-success-alpha-16"}`}
                         title={f.local ? "Chỉ trên máy này, không đồng bộ lên nhóm. Bấm để đổi." : "Đang đồng bộ cho cả nhóm. Bấm để đổi."}
                         onClick={() => changeSync(f)}
                       >
-                        {f.local ? <LocalOnlyIcon className="size-3.5" /> : <TeamCloudIcon className="size-3.5" />}
-                        {f.local ? "Chỉ trên máy này" : "Đồng bộ"}
+                        {switching.has(f.name)
+                          ? <><span className="spin-icon inline-grid place-items-center"><SyncIcon className="size-3.5" /></span>Đang chuyển…</>
+                          : <>{f.local ? <LocalOnlyIcon className="size-3.5" /> : <TeamCloudIcon className="size-3.5" />}{f.local ? "Chỉ trên máy này" : "Đồng bộ"}</>}
                       </button>
-                    )}
-                  </div>
+                    </div>
+                  )}
                   <div className={`cell-count text-paragraph-xs ${f.profiles > 0 ? "text-text-sub-600" : "text-text-soft-400"}`}>{f.profiles}</div>
                   {/* Who has it, on one line: the first few, then how many more (all of them on hover). */}
                   <div
