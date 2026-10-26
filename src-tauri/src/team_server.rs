@@ -245,8 +245,28 @@ fn authenticate(headers: &HeaderMap, admin_token: &str) -> Option<Identity> {
     load_acl().authenticate(&token)
 }
 
+/// A token the server does not know. Said only when the server can really tell: while it cannot
+/// read its members (see `members_unreadable`) every token would look unknown, and a machine told
+/// 401 deletes the team's profiles — so it is told to come back later instead.
 fn unauthorized() -> Response {
+    if let Some(why) = members_unreadable() {
+        eprintln!("[team-server] members cannot be read ({why}): answering 503, not 401");
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"ok":false,"error":"team members cannot be read right now, try again later"}))).into_response();
+    }
     (StatusCode::UNAUTHORIZED, Json(json!({"ok":false,"error":"unauthorized"}))).into_response()
+}
+
+/// Why the server cannot tell who is a member right now, if it cannot: the members file is there
+/// but unreadable, or it is missing from a server that already holds the team's profiles.
+fn members_unreadable() -> Option<String> {
+    let dir = server_data_dir().ok()?;
+    if let Err(e) = AclStore::load_checked(&dir) {
+        return Some(e);
+    }
+    let had_members = dir.join("members.json").exists() || dir.join("members.json.bak").exists();
+    let holds_profiles = std::fs::read_dir(bundles_dir().ok()?).map(|mut d| d.next().is_some()).unwrap_or(false);
+    // (A team run on the admin token alone has no member to tell apart, so nobody loses by it.)
+    (!had_members && holds_profiles).then(|| "members.json is missing on a server that holds the team's profiles".to_string())
 }
 
 fn forbidden(reason: &str) -> Response {

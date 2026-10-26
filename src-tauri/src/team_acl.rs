@@ -153,15 +153,60 @@ pub fn new_token() -> String {
 }
 
 impl AclStore {
+    /// The members and sharing, or an empty store when there is nothing readable. Use `load_checked`
+    /// wherever an empty answer would be taken for "nobody is a member".
     pub fn load(dir: &Path) -> AclStore {
-        std::fs::read_to_string(dir.join("members.json"))
-            .ok()
-            .and_then(|t| serde_json::from_str(&t).ok())
-            .unwrap_or_default()
+        Self::load_checked(dir).unwrap_or_default()
     }
 
+    /// The members and sharing. Err when the file is there (or was, by its backup) but cannot be
+    /// read right now — locked, half-written, damaged: "nobody is a member" would then be answered
+    /// to every machine, and each one takes that for being removed from the team.
+    pub fn load_checked(dir: &Path) -> Result<AclStore, String> {
+        // A file being replaced or scanned is briefly unreadable on Windows (sharing violation, or
+        // gone for an instant between delete and move): read it again a few times first.
+        let read = |name: &str| -> Result<Option<AclStore>, String> {
+            let mut last = String::new();
+            for attempt in 0..6 {
+                if attempt > 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(40));
+                }
+                match std::fs::read_to_string(dir.join(name)) {
+                    Ok(t) => match serde_json::from_str(&t) {
+                        Ok(acl) => return Ok(Some(acl)),
+                        Err(e) => last = format!("{name}: {e}"), // half-written: try again
+                    },
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound && attempt >= 2 => return Ok(None),
+                    Err(e) => last = format!("{name}: {e}"),
+                }
+            }
+            Err(last)
+        };
+        let main = match read("members.json") {
+            Ok(Some(acl)) => return Ok(acl),
+            other => other,
+        };
+        // Gone or unreadable: the last good copy, if there is one.
+        match (main, read("members.json.bak")) {
+            (_, Ok(Some(acl))) => Ok(acl),
+            (Err(e), _) | (_, Err(e)) => Err(e),
+            _ => Ok(AclStore::default()), // a new server: neither file was ever written
+        }
+    }
+
+    /// Writes the store, keeping the previous good file as `members.json.bak`. Refuses when the file
+    /// on disk cannot be read: writing then would replace every member with what this one request
+    /// saw (nobody).
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
         let path = dir.join("members.json");
+        if let Err(e) = Self::load_checked(dir) {
+            return Err(std::io::Error::other(format!("members not saved: the file on disk cannot be read ({e})")));
+        }
+        if let Ok(t) = std::fs::read_to_string(&path) {
+            if serde_json::from_str::<AclStore>(&t).is_ok() {
+                let _ = std::fs::write(dir.join("members.json.bak"), t);
+            }
+        }
         let tmp = dir.join("members.json.tmp");
         std::fs::write(&tmp, serde_json::to_string_pretty(self).unwrap_or_default())?;
         crate::winfs::rename_replace(&tmp, &path)

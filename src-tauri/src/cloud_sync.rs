@@ -477,16 +477,75 @@ async fn denied(resp: reqwest::Response, what: &str) -> anyhow::Error {
     }
 }
 
-/// The server said 401: this machine's token is no longer valid — disabled or
-/// deleted from above, not a network blip or a permission limit on one action
-/// (that's 403). Turns sync off locally at once and tells the running app, so
-/// a revoked member is logged out within moments instead of only finding out
-/// the next time they happen to notice a failed action. Safe to call
-/// repeatedly (e.g. a retry loop hitting the same 401 every few seconds):
-/// once `sync.enabled` is already false, this is a no-op.
+/// The server said 401: this machine's token may no longer be valid — disabled or deleted from
+/// above. It is believed only once it holds: the server is asked again, `KICK_REFUSALS` times
+/// `KICK_GAP` apart, and only refusals come back. A team server that could not read its members for
+/// a moment (while it was being updated) once answered 401 to every machine at the same instant,
+/// and each of them deleted all of the team's profiles on the spot. Safe to call repeatedly: one
+/// check runs at a time.
 fn kicked_out() {
+    static CHECKING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    use std::sync::atomic::Ordering::SeqCst;
+    let Ok(Some((_cfg, base, token))) = active_config() else { return };
+    if CHECKING.swap(true, SeqCst) {
+        return;
+    }
+    slog!("the team server refused this machine's token (401) — asking again before treating it as removed from the team");
+    tauri::async_runtime::spawn(async move {
+        if still_refused(&base, &token).await {
+            removed_from_team(&token);
+        } else {
+            slog!("the team server did not confirm the refusal — nothing was removed");
+        }
+        CHECKING.store(false, SeqCst);
+    });
+}
+
+/// Time between the checks of a refusal: a minute (50 ms under test; a debug build may set
+/// `HIR_LOGIN_KICK_GAP_MS` for its end-to-end tests).
+fn kick_gap() -> Duration {
+    #[cfg(test)]
+    return Duration::from_millis(50);
+    #[cfg(all(not(test), debug_assertions))]
+    if let Some(ms) = std::env::var("HIR_LOGIN_KICK_GAP_MS").ok().and_then(|v| v.parse().ok()) {
+        return Duration::from_millis(ms);
+    }
+    #[allow(unreachable_code)]
+    Duration::from_secs(60)
+}
+/// Refusals in a row that mean it (about five minutes apart from the first).
+const KICK_REFUSALS: usize = 5;
+/// Tries in all: a server that cannot be reached or answers anything else is not a refusal, and
+/// after this long without a verdict nothing is removed.
+const KICK_TRIES: usize = 30;
+
+/// Whether the server keeps refusing `token`: `KICK_REFUSALS` 401s, and nothing accepted it meanwhile.
+async fn still_refused(base: &str, token: &str) -> bool {
+    let mut refusals = 0;
+    for _ in 0..KICK_TRIES {
+        tokio::time::sleep(kick_gap()).await;
+        let Ok(resp) = client().get(format!("{base}/me")).bearer_auth(token).timeout(Duration::from_secs(15)).send().await else { continue };
+        match resp.status().as_u16() {
+            401 => {
+                refusals += 1;
+                if refusals >= KICK_REFUSALS {
+                    return true;
+                }
+            }
+            200..=299 => return false,
+            _ => {} // 503 (the server cannot read its members), a proxy error…: no verdict
+        }
+    }
+    false
+}
+
+/// This machine was removed from the team: sync off, the token forgotten, and the team's profiles
+/// deleted (switching sync off alone left every profile that had been downloaded fully usable on
+/// the machine of someone who no longer has any right to it). Not when the token was replaced
+/// meanwhile (the person joined again with a new one).
+fn removed_from_team(token: &str) {
     let Ok(mut s) = settings::load() else { return };
-    if !s.sync.enabled {
+    if !s.sync.enabled || s.sync.token.as_deref() != Some(token) {
         return;
     }
     s.sync.enabled = false;
@@ -499,9 +558,6 @@ fn kicked_out() {
         use tauri::Emitter;
         let _ = app.emit("team:kicked-out", ());
     }
-    // Being removed from the team takes the team's profiles with it: switching sync off alone left
-    // every profile that had been downloaded fully usable on the machine of someone who no longer
-    // has any right to it.
     tauri::async_runtime::spawn(async {
         let n = wipe_team_data().await;
         slog!("this machine was removed from the team — {n} team profiles were deleted from it");
@@ -4398,6 +4454,11 @@ mod tests {
 
         let err = list_remote().await;
 
+        // The refusal is checked a few more times before it counts.
+        let started = std::time::Instant::now();
+        while settings::load().unwrap().sync.enabled && started.elapsed() < Duration::from_secs(10) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
         let after = settings::load().unwrap();
 
         let _ = crate::team_server::stop();
