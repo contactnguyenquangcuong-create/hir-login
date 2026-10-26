@@ -208,7 +208,7 @@ export function FoldersPage() {
       title: `Xoá thư mục "${f.name}"?`,
       message: `Thư mục đang có ${n} profile. Anh/chị muốn làm gì với chúng?`,
       buttons: [
-        { label: "Huỷ", value: "cancel" },
+        { label: "Hủy", value: "cancel" },
         { label: "Chuyển sang thư mục khác…", value: "move", primary: true },
         { label: `Xoá cả ${n} profile`, value: "delete", danger: true },
       ],

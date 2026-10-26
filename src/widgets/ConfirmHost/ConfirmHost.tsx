@@ -16,7 +16,7 @@ export function ConfirmHost() {
       footer={
         <div
           className={req.equal ? "grid w-full gap-2" : "flex flex-wrap justify-end gap-2"}
-          style={req.equal ? { gridTemplateColumns: `repeat(${req.buttons.length}, minmax(0, 1fr))` } : undefined}
+          style={req.equal ? { gridTemplateColumns: req.buttons.length >= 3 ? `auto repeat(${req.buttons.length - 1}, minmax(0, 1fr))` : `repeat(${req.buttons.length}, minmax(0, 1fr))` } : undefined}
         >
           {req.buttons.map((b, i) => (
             <Button
@@ -24,7 +24,7 @@ export function ConfirmHost() {
               size="small"
               variant={b.danger ? "error" : b.primary ? "primary" : "neutral"}
               mode={b.danger || b.primary ? "filled" : "stroke"}
-              className={req.equal ? "w-full whitespace-nowrap" : undefined}
+              className={req.equal ? (req.buttons.length >= 3 && i === 0 ? "whitespace-nowrap px-6" : "w-full whitespace-nowrap") : undefined}
               leftIcon={b.current ? <CheckCircleIcon className="size-4" /> : undefined}
               onClick={() => done(b.value)}
             >
