@@ -55,6 +55,28 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: npm run tauri build -- --bundles app,dmg
 
+      # Without a signature on the whole app, a Mac that downloads it reports "Hir-Login is damaged
+      # and can't be opened". The app is signed ad hoc by the build ("signingIdentity": "-"); this
+      # checks that it really is — the app, the copy inside the dmg and the update archive — and
+      # stops here, before anything is published, when it is not.
+      - name: Check the app is signed
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="src-tauri/target/release/bundle/macos/Hir-Login.app"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          test -f "$APP/Contents/_CodeSignature/CodeResources"
+          codesign -dv "$APP" 2>&1 | head -12
+          DMG=$(ls src-tauri/target/release/bundle/dmg/*.dmg | head -1)
+          MNT=$(mktemp -d)
+          hdiutil attach "$DMG" -mountpoint "$MNT" -nobrowse -quiet
+          codesign --verify --deep --strict --verbose=2 "$MNT/Hir-Login.app"
+          hdiutil detach "$MNT" -quiet
+          TMP=$(mktemp -d)
+          tar -xzf src-tauri/target/release/bundle/macos/Hir-Login.app.tar.gz -C "$TMP"
+          codesign --verify --deep --strict --verbose=2 "$TMP/Hir-Login.app"
+          echo "signed: app, dmg and update archive"
+
       - name: Publish to the Mac channel
         env:
           UPLOAD_KEY: ${{ secrets.HIRLOGIN_UPLOAD_KEY }}
