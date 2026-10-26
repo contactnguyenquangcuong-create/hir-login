@@ -9,9 +9,10 @@ import { startTeamRole, teamCall, useTeam, canShare } from "../../shared/model/t
 import { useProfile, useFolders, usePartnerShare, PARTNERS } from "../../entities/profile";
 import { ShareFolderModal } from "../../features/manage-profiles/ui/ShareFolderModal";
 import { offerTeamFolder, makeTeamFolder, stopTeamFolder, askFolderSync } from "../../shared/model/folderSync";
+import { friendlyError } from "../../shared/lib/errorText";
 import { Section, Pill } from "../settings/ui";
 import { useContextMenu } from "../../shared/hooks/useContextMenu";
-import { MoreIcon, TeamCloudIcon, LocalOnlyIcon, SyncIcon } from "../../shared/icons";
+import { MoreIcon, TeamCloudIcon, LocalOnlyIcon, SyncIcon, RefreshIcon } from "../../shared/icons";
 
 type Member = { id: string; name: string; role: "manager" | "member"; disabled: boolean };
 type ServerFolder = { name: string; profiles: number; access: Record<string, string>; canDelete?: boolean; createdBy?: { role: "admin" | "manager"; name: string } };
@@ -25,6 +26,7 @@ export function FoldersPage() {
   const profiles = useProfile((s) => s.profiles);
   const rememberFolder = useProfile((s) => s.rememberFolder);
   const forgetFolder = useProfile((s) => s.forgetFolder);
+  const deleteFolderWithProfiles = useProfile((s) => s.deleteFolder);
   const setFolder = useProfile((s) => s.setFolder);
   const ctx = useContextMenu();
   const localFolders = useFolders();
@@ -53,17 +55,34 @@ export function FoldersPage() {
 
   useEffect(() => { startTeamRole(); loadPartners(); }, [loadPartners]);
 
+  /** Why the team server's folder list could not be read, while it cannot. */
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
   const load = useCallback(async () => {
     // No team on this machine: nothing to ask the server (canShare is "open" for a
     // local install, which must not turn into a call that can only fail).
     if (configured !== true || !canShare(role, configured)) return;
     try {
       setServer((await teamCall<{ folders: ServerFolder[] }>("GET", "/admin/folders")).folders);
+      setLoadError(null);
       setMembers((await teamCall<{ members: Member[] }>("GET", "/admin/members")).members);
       setTrash((await teamCall<{ items: TrashedFolder[] }>("GET", "/admin/folders/trash").catch(() => ({ items: [] as TrashedFolder[] }))).items);
-    } catch (e) { if (!/sync is not enabled/i.test(String(e))) toast.err(String(e)); }
+    } catch (e) {
+      if (!/sync is not enabled/i.test(String(e))) setLoadError(friendlyError(String(e)).text);
+    }
   }, [role, configured]);
   useEffect(() => { load(); }, [load, sharing]);
+  // The list is read again every so often, and quickly while it is unknown: a first read made as
+  // the app starts (network or VPN not up yet) used to leave every folder shown as "only on this
+  // machine" until the page was left and entered again.
+  useEffect(() => {
+    if (configured !== true || !canShare(role, configured)) return;
+    const t = setInterval(() => { void load(); }, server === null || loadError ? 8_000 : 60_000);
+    return () => clearInterval(t);
+  }, [configured, role, load, server, loadError]);
+  const refresh = async () => { setRefreshing(true); try { await load(); } finally { setRefreshing(false); } };
+  /** Whether it is not known which folders the team has (the read failed, and nothing was read before). */
+  const unknown = configured === true && canShare(role, configured) && server === null;
 
   const localCount = useMemo(() => {
     const m: Record<string, number> = {};
@@ -178,6 +197,7 @@ export function FoldersPage() {
           <form className="flex items-center gap-2" onSubmit={(e) => { e.preventDefault(); create(); }}>
             <div className="w-64"><Input inputSize="small" value={name} onChange={(e) => setName(e.target.value)} placeholder="Tên thư mục mới, ví dụ: Shop A" /></div>
             <Button type="submit" variant="primary" size="small" disabled={!name.trim()}>Tạo thư mục</Button>
+            <Button type="button" variant="neutral" mode="stroke" size="small" onlyIcon title="Làm mới danh sách từ máy chủ nhóm" disabled={refreshing} leftIcon={<RefreshIcon className={`size-4 ${refreshing ? "spin-icon" : ""}`} />} onClick={refresh} />
           </form>
         )}
       </div>
@@ -211,6 +231,15 @@ export function FoldersPage() {
           </Section>
         )}
 
+        {unknown && loadError && (
+          <div className="flex flex-wrap items-center gap-3 rounded-lg bg-warning-alpha-10 px-4 py-3 text-paragraph-xs text-warning-base">
+            <span className="min-w-0 flex-1">
+              Chưa lấy được danh sách thư mục từ máy chủ nhóm ({loadError}). Các thư mục bên dưới là bản trên máy này, chưa biết đã đồng bộ hay chưa. Đang thử lại tự động.
+            </span>
+            <Button variant="neutral" mode="stroke" size="xsmall" onClick={refresh} disabled={refreshing}>Thử lại ngay</Button>
+          </div>
+        )}
+
         {canShare(role, configured) && (
           // One row per folder, in columns: what it is, how many profiles, who has it, who made it.
           <div className="overflow-hidden rounded-lg bg-bg-white-0 shadow-[var(--shadow-xs)] ring-1 ring-inset ring-stroke-soft-200">
@@ -229,12 +258,16 @@ export function FoldersPage() {
               const shared = partnersOf(f.name);
               const max = Math.max(1, 3 - shared.length);
               const deletable = f.profiles === 0 && (f.local || f.canDelete !== false);
+              // A folder that is only on this machine can go even with profiles in it (asked what
+              // to do with them, as in the browsers list): none of it is the team's.
+              const localWithProfiles = f.local && !unknown && f.profiles > 0;
               const open = () => { setFolder(f.name); setSection("browsers"); };
               const menu = [
                 { label: "Xem profile trong thư mục", onClick: open },
                 { label: "Chia sẻ…", onClick: () => setSharing(f.name) },
                 ...(configured === true ? [{ label: f.local ? "Đồng bộ cho cả nhóm" : "Ngừng đồng bộ (chỉ trên máy này)", onClick: () => changeSync(f) }] : []),
                 ...(deletable ? [{ sep: true, label: "", onClick: () => {} }, { label: "Xoá thư mục", onClick: () => remove(f.name, !f.local), danger: true }] : []),
+                ...(localWithProfiles ? [{ sep: true, label: "", onClick: () => {} }, { label: "Xoá thư mục khỏi máy này…", onClick: () => { void deleteFolderWithProfiles(f.name); }, danger: true }] : []),
               ];
               return (
                 <div key={f.name} className={`f-cols ${configured === true ? "f-sync" : ""} border-t border-stroke-soft-200 transition-colors first:border-t-0 hover:bg-bg-weak-50`} onContextMenu={(e) => ctx.open(e, menu)}>
@@ -254,13 +287,16 @@ export function FoldersPage() {
                       {/* Whether the folder is synced for the team; pressing it switches. */}
                       <button
                         type="button"
-                        className={`sync-mark inline-flex flex-none cursor-pointer items-center gap-1 rounded-full border-0 px-2 py-0.5 text-paragraph-xs font-medium ${f.local ? "bg-warning-alpha-10 text-warning-base hover:bg-warning-alpha-16" : "bg-success-alpha-10 text-success-base hover:bg-success-alpha-16"}`}
-                        title={f.local ? "Chỉ trên máy này, không đồng bộ lên nhóm. Bấm để đổi." : "Đang đồng bộ cho cả nhóm. Bấm để đổi."}
+                        disabled={unknown}
+                        className={`sync-mark inline-flex flex-none items-center gap-1 rounded-full border-0 px-2 py-0.5 text-paragraph-xs font-medium ${unknown ? "cursor-default bg-bg-weak-50 text-text-soft-400" : f.local ? "cursor-pointer bg-warning-alpha-10 text-warning-base hover:bg-warning-alpha-16" : "cursor-pointer bg-success-alpha-10 text-success-base hover:bg-success-alpha-16"}`}
+                        title={unknown ? "Chưa lấy được danh sách thư mục từ máy chủ nhóm, nên chưa biết thư mục này đã đồng bộ hay chưa." : f.local ? "Chỉ trên máy này, không đồng bộ lên nhóm. Bấm để đổi." : "Đang đồng bộ cho cả nhóm. Bấm để đổi."}
                         onClick={() => changeSync(f)}
                       >
-                        {switching.has(f.name)
-                          ? <><span className="spin-icon inline-grid place-items-center"><SyncIcon className="size-3.5" /></span>Đang chuyển…</>
-                          : <>{f.local ? <LocalOnlyIcon className="size-3.5" /> : <TeamCloudIcon className="size-3.5" />}{f.local ? "Chỉ trên máy này" : "Đồng bộ"}</>}
+                        {unknown
+                          ? <><span className="spin-icon inline-grid place-items-center"><SyncIcon className="size-3.5" /></span>Đang kiểm tra…</>
+                          : switching.has(f.name)
+                            ? <><span className="spin-icon inline-grid place-items-center"><SyncIcon className="size-3.5" /></span>Đang chuyển…</>
+                            : <>{f.local ? <LocalOnlyIcon className="size-3.5" /> : <TeamCloudIcon className="size-3.5" />}{f.local ? "Chỉ trên máy này" : "Đồng bộ"}</>}
                       </button>
                     </div>
                   )}
