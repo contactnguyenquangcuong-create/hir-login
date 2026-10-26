@@ -44,6 +44,7 @@ mod firewall;
 mod partners;
 mod orphans;
 mod ext_cleanup;
+mod cache_clean;
 
 use serde_json::Value;
 
@@ -4492,6 +4493,8 @@ pub fn run() {
             });
             tauri::async_runtime::spawn(cloud_sync::run_forever());
             tauri::async_runtime::spawn(cloud_sync::watch_locks());
+            // Caches left in profiles closed by an earlier version (or while the app was not running).
+            tauri::async_runtime::spawn(cache_clean::sweep());
 
             // Trash older than its week.
             match trash::purge_expired() {

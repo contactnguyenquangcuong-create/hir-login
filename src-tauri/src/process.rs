@@ -317,6 +317,24 @@ impl Tracker {
                 if let Err(e) = crate::cloud_sync::checkin(&profile_id).await {
                     eprintln!("[launcher] cloud_sync checkin({profile_id}) failed: {e:#}");
                 }
+                // The caches go while the profile still counts as closing, so nothing reopens it
+                // meanwhile; the browser's last helper processes are given a moment to end.
+                if let Ok(udd) = crate::profile::user_data_dir(&profile_id) {
+                    let freed = tokio::task::spawn_blocking(move || {
+                        for _ in 0..20 {
+                            if !Self::user_data_in_use(&udd) {
+                                break;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(250));
+                        }
+                        crate::cache_clean::clean(&udd)
+                    })
+                    .await
+                    .unwrap_or(0);
+                    if freed >= 1_000_000 {
+                        crate::cloud_sync::log_line(&format!("close {profile_id}: browser caches removed ({} MB)", freed / 1_000_000));
+                    }
+                }
             }
             closing_end(&profile_id);
             // Tear down temporary profile (config + udd) on close.
