@@ -212,6 +212,7 @@ export function FoldersPage() {
         { label: "Chuyển sang thư mục khác…", value: "move", primary: true },
         { label: `Xoá cả ${n} profile`, value: "delete", danger: true },
       ],
+      equal: true,
     });
     if (choice === "move") setMover({ from: f.name, team: !f.local, deleteAfter: true });
     else if (choice === "delete") await deleteWithProfiles(f, n);

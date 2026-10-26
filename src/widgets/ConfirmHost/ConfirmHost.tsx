@@ -12,9 +12,12 @@ export function ConfirmHost() {
       open
       onClose={() => done(null)}
       title={req.title ?? "Confirm"}
-      maxWidthClassName={req.equal ? "max-w-xl" : "max-w-md"}
+      maxWidthClassName={req.equal ? (req.buttons.length >= 3 ? "max-w-3xl" : "max-w-xl") : "max-w-md"}
       footer={
-        <div className={req.equal ? "grid w-full grid-cols-2 gap-2" : "flex flex-wrap justify-end gap-2"}>
+        <div
+          className={req.equal ? "grid w-full gap-2" : "flex flex-wrap justify-end gap-2"}
+          style={req.equal ? { gridTemplateColumns: `repeat(${req.buttons.length}, minmax(0, 1fr))` } : undefined}
+        >
           {req.buttons.map((b, i) => (
             <Button
               key={i}
