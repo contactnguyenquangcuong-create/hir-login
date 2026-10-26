@@ -6,9 +6,10 @@ import { toast } from "../../shared/model/toast";
 import { confirmModal } from "../../shared/model/confirm";
 import { useNav } from "../../shared/model/navigation";
 import { startTeamRole, teamCall, useTeam, canShare } from "../../shared/model/teamRole";
-import { useProfile, useFolders, usePartnerShare, PARTNERS } from "../../entities/profile";
+import { useProfile, useFolders, usePartnerShare, PARTNERS, folderDelete } from "../../entities/profile";
+import { FolderModal } from "../../features/manage-profiles/ui/FolderModal";
 import { ShareFolderModal } from "../../features/manage-profiles/ui/ShareFolderModal";
-import { offerTeamFolder, makeTeamFolder, stopTeamFolder, askFolderSync } from "../../shared/model/folderSync";
+import { offerTeamFolder, makeTeamFolder, stopTeamFolder, askFolderSync, waitTeamFolderEmpty } from "../../shared/model/folderSync";
 import { friendlyError } from "../../shared/lib/errorText";
 import { Section, Pill } from "../settings/ui";
 import { useContextMenu } from "../../shared/hooks/useContextMenu";
@@ -26,7 +27,9 @@ export function FoldersPage() {
   const profiles = useProfile((s) => s.profiles);
   const rememberFolder = useProfile((s) => s.rememberFolder);
   const forgetFolder = useProfile((s) => s.forgetFolder);
-  const deleteFolderWithProfiles = useProfile((s) => s.deleteFolder);
+  const bulkMoveToFolder = useProfile((s) => s.bulkMoveToFolder);
+  const setFolderTab = useProfile((s) => s.setFolder);
+  const currentTab = useProfile((s) => s.folder);
   const setFolder = useProfile((s) => s.setFolder);
   const ctx = useContextMenu();
   const localFolders = useFolders();
@@ -175,6 +178,83 @@ export function FoldersPage() {
       await load();
     }
   };
+  /** A folder whose profiles are being moved out (to delete it, or just to empty it): asks where to. */
+  const [mover, setMover] = useState<{ from: string; team: boolean; deleteAfter: boolean } | null>(null);
+  const busy = (name: string, on: boolean) => setSwitching((s) => { const n = new Set(s); if (on) n.add(name); else n.delete(name); return n; });
+
+  /** The folder itself, once nothing is in it: off the team's server (to its trash) or this machine's list. */
+  const dropFolder = async (name: string, team: boolean): Promise<boolean> => {
+    if (team) {
+      const left = await waitTeamFolderEmpty(name);
+      if (left > 0) {
+        toast.err(`Thư mục "${name}" chưa xoá được: máy chủ nhóm còn ${left} profile trong đó (chưa đồng bộ xong, hoặc profile chưa có trên máy này). Hãy thử lại sau ít phút.`);
+        return false;
+      }
+      try { await teamCall("POST", `/admin/folders/${encodeURIComponent(name)}/delete`); }
+      catch (e) { toast.err(String(e)); return false; }
+    }
+    forgetFolder(name);
+    if (currentTab === name) setFolderTab("all");
+    toast.ok(`Đã xoá thư mục "${name}"`);
+    return true;
+  };
+
+  /** ⋮ → Xoá thư mục: with profiles in it, asks what becomes of them. */
+  const removeFolder = async (f: { name: string; local: boolean; profiles: number }) => {
+    const here = profiles.filter((p) => p.folder === f.name);
+    if (here.length === 0 && f.profiles === 0) { await remove(f.name, !f.local); return; }
+    const n = Math.max(here.length, f.profiles);
+    const choice = await confirmModal({
+      title: `Xoá thư mục "${f.name}"?`,
+      message: `Thư mục đang có ${n} profile. Anh/chị muốn làm gì với chúng?`,
+      buttons: [
+        { label: "Huỷ", value: "cancel" },
+        { label: "Chuyển sang thư mục khác…", value: "move", primary: true },
+        { label: `Xoá cả ${n} profile`, value: "delete", danger: true },
+      ],
+    });
+    if (choice === "move") setMover({ from: f.name, team: !f.local, deleteAfter: true });
+    else if (choice === "delete") await deleteWithProfiles(f, n);
+  };
+
+  const deleteWithProfiles = async (f: { name: string; local: boolean }, n: number) => {
+    const ok = await confirmModal({
+      title: `Xoá thư mục "${f.name}" và ${n} profile trong đó?`,
+      message: f.local
+        ? "Các profile vào thùng rác của Hir-Login, giữ 7 ngày rồi xoá hẳn."
+        : "Các profile vào thùng rác (giữ 7 ngày) và biến mất khỏi mọi máy trong nhóm. Thư mục vào thùng rác của nhóm 30 ngày.",
+      danger: true,
+    });
+    if (ok !== true) return;
+    busy(f.name, true);
+    try {
+      await folderDelete(f.name, true);
+      await useProfile.getState().reload();
+      const still = useProfile.getState().profiles.filter((p) => p.folder === f.name).length;
+      if (still > 0) { toast.err(`${still} profile đang mở nên chưa xoá được, thư mục được giữ lại. Đóng chúng rồi xoá lại.`); return; }
+      await dropFolder(f.name, !f.local);
+    } catch (e) { toast.err(String(e)); }
+    finally { busy(f.name, false); await load(); }
+  };
+
+  /** Moves every profile of the folder to `dest`, then removes the folder if that was asked. */
+  const runMove = async (dest: string) => {
+    const m = mover;
+    setMover(null);
+    if (!m) return;
+    busy(m.from, true);
+    try {
+      // A team folder's profiles go to a team folder: a new name is made one first.
+      if (m.team && !(server ?? []).some((x) => x.name === dest)) {
+        if (!(await makeTeamFolder(dest))) return;
+      }
+      const ids = profiles.filter((p) => p.folder === m.from).map((p) => p.id);
+      const { failed } = await bulkMoveToFolder(ids, dest);
+      if (failed > 0) return; // some stayed: the folder is not removed under them
+      if (m.deleteAfter) await dropFolder(m.from, m.team);
+    } finally { busy(m.from, false); await load(); }
+  };
+
   const purge = async (f: string) => {
     const ok = await confirmModal({ title: `Xoá vĩnh viễn "${f}"?`, message: "Sau khi xoá vĩnh viễn không khôi phục được nữa.", danger: true });
     if (ok !== true) return;
@@ -257,17 +337,15 @@ export function FoldersPage() {
               const people = Object.entries(f.access);
               const shared = partnersOf(f.name);
               const max = Math.max(1, 3 - shared.length);
-              const deletable = f.profiles === 0 && (f.local || f.canDelete !== false);
-              // A folder that is only on this machine can go even with profiles in it (asked what
-              // to do with them, as in the browsers list): none of it is the team's.
-              const localWithProfiles = f.local && !unknown && f.profiles > 0;
+              const deletable = f.local ? !unknown : f.canDelete !== false;
+              const hasProfiles = !unknown && (f.profiles > 0 || (localCount[f.name] ?? 0) > 0);
               const open = () => { setFolder(f.name); setSection("browsers"); };
               const menu = [
                 { label: "Xem profile trong thư mục", onClick: open },
                 { label: "Chia sẻ…", onClick: () => setSharing(f.name) },
                 ...(configured === true ? [{ label: f.local ? "Đồng bộ cho cả nhóm" : "Ngừng đồng bộ (chỉ trên máy này)", onClick: () => changeSync(f) }] : []),
-                ...(deletable ? [{ sep: true, label: "", onClick: () => {} }, { label: "Xoá thư mục", onClick: () => remove(f.name, !f.local), danger: true }] : []),
-                ...(localWithProfiles ? [{ sep: true, label: "", onClick: () => {} }, { label: "Xoá thư mục khỏi máy này…", onClick: () => { void deleteFolderWithProfiles(f.name); }, danger: true }] : []),
+                ...(hasProfiles && !switching.has(f.name) ? [{ label: "Chuyển profile sang thư mục khác…", onClick: () => setMover({ from: f.name, team: !f.local, deleteAfter: false }) }] : []),
+                ...(deletable && !switching.has(f.name) ? [{ sep: true, label: "", onClick: () => {} }, { label: "Xoá thư mục", onClick: () => { void removeFolder(f); }, danger: true }] : []),
               ];
               return (
                 <div key={f.name} className={`f-cols ${configured === true ? "f-sync" : ""} border-t border-stroke-soft-200 transition-colors first:border-t-0 hover:bg-bg-weak-50`} onContextMenu={(e) => ctx.open(e, menu)}>
@@ -361,6 +439,15 @@ export function FoldersPage() {
         )}
       </div>
 
+      {mover && (
+        <FolderModal
+          mode="move"
+          existing={(mover.team ? (server ?? []).map((x) => x.name) : localFolders).filter((x) => x !== mover.from)}
+          onPick={(dest) => { void runMove(dest); }}
+          onCreate={(name) => { const d = name.trim(); if (d) void runMove(d); }}
+          onClose={() => setMover(null)}
+        />
+      )}
       {sharing && <ShareFolderModal folder={sharing} onClose={() => { setSharing(null); load(); }} />}
       {ctx.node}
     </section>

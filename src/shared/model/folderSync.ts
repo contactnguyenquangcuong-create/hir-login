@@ -125,6 +125,27 @@ export async function stopTeamFolder(folder: string, teamProfiles: number): Prom
   return true;
 }
 
+/**
+ * Waits until the team's server shows no profile left in `folder` (profiles moved or deleted here
+ * reach it with the next sync round, which is asked for every few seconds). Returns how many it
+ * still shows — 0 when it is empty, more when the wait ran out.
+ */
+export async function waitTeamFolderEmpty(folder: string, ms = 150_000): Promise<number> {
+  const t0 = Date.now();
+  let left = -1;
+  for (let i = 0; Date.now() - t0 < ms; i++) {
+    if (i % 3 === 0) void invoke("sync_kick").catch(() => {});
+    try {
+      const r = await teamCall<{ folders: { name: string; profiles: number }[] }>("GET", "/admin/folders");
+      const f = r.folders.find((x) => x.name === folder);
+      left = f ? f.profiles : 0;
+      if (left === 0) return 0;
+    } catch { /* try again */ }
+    await new Promise((res) => setTimeout(res, 3000));
+  }
+  return left;
+}
+
 /** The choice behind a folder's sync mark: the team's, or this machine's only. Null when closed. */
 export async function askFolderSync(folder: string, now: "team" | "local"): Promise<"team" | "local" | null> {
   return confirmModal({

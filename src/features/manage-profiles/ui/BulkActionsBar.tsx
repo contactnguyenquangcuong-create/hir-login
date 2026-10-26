@@ -5,6 +5,7 @@ import {
   StopIcon,
   DeleteIcon,
   SyncIcon,
+  FolderIcon,
 } from "../../../shared/icons";
 import { useProfile, useSyncBlockReason } from "../../../entities/profile";
 import { useT } from "../../../shared/i18n";
@@ -29,6 +30,8 @@ export function BulkActionsBar() {
   const role = useTeam((s) => s.role);
   const configured = useTeam((s) => s.configured);
   const clearSelected = useProfile((s) => s.clearSelected);
+  const setFolderModal = useProfile((s) => s.setFolderModal);
+  const selectedIds = useProfile((s) => s.selected);
   const syncBlocked = useSyncBlockReason();
 
   if (count === 0) return null;
@@ -64,6 +67,18 @@ export function BulkActionsBar() {
       <Button variant="neutral" mode="stroke" className="pr-2" size="2xsmall" onClick={bulkUnbindProxy}>
         {proxiedCount > 0 ? t("bulkActionsBar.noProxy", { n: proxiedCount }) : t("bulkActionsBar.noProxyAll")}
       </Button>
+      {canEdit(role, configured) && (
+        <Button
+          variant="neutral"
+          mode="stroke"
+          className="pr-2"
+          size="2xsmall"
+          leftIcon={<FolderIcon className="size-3.5" />}
+          onClick={() => setFolderModal({ profileId: null, profileIds: [...selectedIds] })}
+        >
+          Chuyển thư mục
+        </Button>
+      )}
       <Button variant="neutral" mode="stroke" className="pr-2" size="2xsmall" onClick={bulkExportCookies}>{t("bulkActionsBar.exportCookies")}</Button>
       <Button variant="neutral" mode="stroke" className="pr-2" size="2xsmall" onClick={() => setImporting(true)}>{t("bulkActionsBar.importCookies")}</Button>
       {androidCount > 0 && canEdit(role, configured) && (

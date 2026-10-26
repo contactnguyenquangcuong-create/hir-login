@@ -28,7 +28,7 @@ const loadFolderRegistry = (): string[] => {
 };
 
 export type QuickEditTarget = { kind: "proxy" | "notes"; profile: ProfileMeta };
-export type FolderModalTarget = { profileId: string | null };
+export type FolderModalTarget = { profileId: string | null; /** Several profiles at once: the selection. */ profileIds?: string[] };
 
 /** Narrows the list beyond the folder tab and the search box. */
 export type ProfileFilters = {
@@ -242,6 +242,8 @@ export type ProfileStore = {
   syncGroup: string | null;
   bulkStop: () => Promise<void>;
   bulkDelete: () => Promise<void>;
+  /** Moves profiles to a folder ("" = no folder), one by one; says how many moved and why any did not. */
+  bulkMoveToFolder: (ids: string[], folder: string) => Promise<{ moved: number; failed: number }>;
   /** Unbinds the proxy from every selected profile that has one (direct connection). */
   bulkUnbindProxy: () => Promise<void>;
   /** Turns the Android profiles in the selection into desktop ones (asks which OS). */
@@ -707,6 +709,29 @@ export const useProfile = create<ProfileStore>((set, get) => ({
     get().reload();
     storeBus.emit("profiles");
     toast.ok(t("useProfile.movedToTrash", { n: ids.length }));
+  },
+
+  bulkMoveToFolder: async (ids, folder) => {
+    const target = folder.trim();
+    let moved = 0, failed = 0, same = 0, last = "";
+    for (const id of ids) {
+      const p = get().profiles.find((x) => x.id === id);
+      if (p && p.folder === target) { same++; continue; }
+      try { await profileSetFolder(id, target); moved++; }
+      catch (e) { failed++; last = String(e); }
+    }
+    if (target && moved > 0) get().rememberFolder(target);
+    if (moved > 0) {
+      get().reload();
+      storeBus.emit("profiles");
+      // A team profile's new folder goes to the team with the next round.
+      void syncKick().catch(() => {});
+    }
+    const to = target ? `thư mục "${target}"` : "không thư mục";
+    if (moved > 0) toast.ok(`Đã chuyển ${moved} profile sang ${to}${same ? ` (${same} profile đã ở đó)` : ""}`);
+    else if (same > 0 && failed === 0) toast.info(`Các profile đã ở sẵn trong ${to}`);
+    if (failed > 0) toast.err(`${failed} profile chưa chuyển được: ${last}`);
+    return { moved, failed };
   },
 
   bulkUnbindProxy: async () => {
