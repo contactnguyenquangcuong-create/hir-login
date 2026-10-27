@@ -29,7 +29,8 @@ use std::time::Duration;
 
 // HIR-IMG Supabase (Project Settings → API). The anon key is meant to be
 // public/embedded in clients — RLS denies it any direct table access.
-const SUPABASE_URL: &str = "https://bgmytknwztagahfpemgc.supabase.co";
+// 27/10/2026: kho key chuyển từ Supabase sang Cloudflare Worker hir-key (cùng giao thức /rest/v1/rpc/…; anon key chỉ để tương thích, Worker bỏ qua).
+const SUPABASE_URL: &str = "https://hir-key.hir-contact-vn.workers.dev";
 const SUPABASE_ANON_KEY: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJnbXl0a253enRhZ2FoZnBlbWdjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTIwOTA2NDYsImV4cCI6MjEwNzY2NjY0Nn0.Z0dXBYn1PVFxkuezzs7sbU86fSQfaaeN_vxq3GQ4_sg";
 
 const PREFIX: &str = "HLG-";
