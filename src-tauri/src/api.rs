@@ -378,8 +378,17 @@ async fn partner_scope(req: Request, next: Next) -> Response {
                 Some(x) => x,
                 None => return next.run(req).await, // unknown id: the handler's own 404
             };
+            let (req, patch_body) = if method == Method::PATCH && rest.is_empty() {
+                match take_json(req).await {
+                    Ok((r, b)) => (r, Some(b)),
+                    Err(r) => return r,
+                }
+            } else {
+                (req, None)
+            };
             let need = match (&method, rest) {
                 (&Method::GET, []) | (&Method::POST, ["start"]) | (&Method::POST, ["stop"]) => Level::Use,
+                (&Method::PATCH, []) if patch_body.as_ref().is_some_and(|b| is_temp_proxy_swap(b, id)) => Level::Use,
                 (&Method::PATCH, []) | (&Method::DELETE, []) => Level::Manage,
                 _ => {
                     // Still say "not shared" first, so nothing is learnt about other folders.
@@ -400,8 +409,7 @@ async fn partner_scope(req: Request, next: Next) -> Response {
                     return r;
                 }
             }
-            if method == Method::PATCH {
-                let (req, body) = match take_json(req).await { Ok(x) => x, Err(r) => return r };
+            if let Some(body) = patch_body {
                 if let Some(target) = body.get("folder").and_then(|f| f.as_str()) {
                     if target.trim() != current {
                         return run_into_folder(p, req, next, target).await;
@@ -421,6 +429,24 @@ async fn partner_scope(req: Request, next: Next) -> Response {
         }
 
         _ => partner_route_refused(p),
+    }
+}
+
+/// A partner tool swapping a profile's exit IP for a while: `{proxy}` (temporary unless it says
+/// `temporary: false`), or `{proxy_id}` giving back the proxy the profile already has. Nothing the
+/// team shares changes, so a folder shared as "use" is enough.
+fn is_temp_proxy_swap(body: &Value, id: &str) -> bool {
+    let Some(o) = body.as_object() else { return false };
+    if !o.keys().all(|k| matches!(k.as_str(), "proxy" | "temporary" | "proxy_id")) {
+        return false;
+    }
+    match (o.get("proxy"), o.get("proxy_id")) {
+        (Some(px), None) => px.is_string() && o.get("temporary").and_then(Value::as_bool).unwrap_or(true),
+        (None, Some(pid)) => {
+            let bound = crate::profile::load_raw(id).ok().and_then(|p| p.meta.proxy_id).unwrap_or_default();
+            pid.as_str() == Some(bound.as_str())
+        }
+        _ => false,
     }
 }
 
@@ -860,9 +886,13 @@ fn validate_extension_ids(ids: &[String]) -> Result<(), ApiError> {
 
 /// Edit profile; only provided fields change. Returns the updated profile.
 async fn edit_profile(Path(id): Path<String>, headers: axum::http::HeaderMap, Json(body): Json<EditReq>) -> ApiResult {
-    let from_hirf = headers.get("x-hir-client").and_then(|h| h.to_str().ok()).and_then(Partner::from_header) == Some(Partner::HirF);
+    let partner = headers.get("x-hir-client").and_then(|h| h.to_str().ok()).and_then(Partner::from_header);
     let mut stored = crate::profile::load_raw(&id)
         .map_err(|e| err(StatusCode::NOT_FOUND, e.to_string()))?;
+    // Temporary unless it says otherwise: always for Hir-F, and for any partner that may only use
+    // the folder (it cannot change what the team shares).
+    let from_hirf = partner == Some(Partner::HirF)
+        || partner.is_some_and(|p| crate::partners::level(p, &stored.meta.folder) == Some(Level::Use));
 
     if let Some(fp) = body.fingerprint {
         let mut cfg = fp
@@ -888,6 +918,10 @@ async fn edit_profile(Path(id): Path<String>, headers: axum::http::HeaderMap, Js
         if body.temporary.unwrap_or(from_hirf) {
             // For a while only: the bound proxy stays as it was, so the team's copy is untouched.
             stored.meta.temp_proxy = Some(entry);
+            stored.meta.temp_proxy_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
         } else {
             let s = crate::proxy::upsert_dedup(entry)
                 .map_err(|e| err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;

@@ -302,6 +302,12 @@ impl Tracker {
                 }
                 let _ = crate::cookies::snapshot(&profile_id);
                 crate::cloud_sync::log_line(&format!("close {profile_id}: ran {} s, {how} — {}", started_at.elapsed().as_secs(), crate::cookies::census(&profile_id)));
+                // A proxy put on for this session only (a partner tool's swap of the exit IP) ends
+                // with it: the next open uses the profile's own proxy again.
+                if crate::profile::end_temp_proxy(&profile_id) {
+                    crate::cloud_sync::log_line(&format!("close {profile_id}: temporary proxy ended, back to the profile's own"));
+                    crate::notify_store_changed("profiles");
+                }
             }
             // Bump the persisted total runtime; non-temporary only (temp
             // profiles get deleted next line so their counter is moot).

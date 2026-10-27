@@ -57,6 +57,13 @@ pub async fn sweep() {
         wait = std::time::Duration::from_millis(ms);
     }
     tokio::time::sleep(wait).await;
+    // Same moment, same reason: a temporary proxy left on a profile by an app that quit while it
+    // was in use ends here, for every profile not open.
+    let ended = crate::profile::end_stale_temp_proxies(|id| crate::process::Tracker::shared().is_running(id) || crate::launch::is_starting(id), 10 * 60 * 1000);
+    if ended > 0 {
+        crate::cloud_sync::log_line(&format!("temporary proxies: ended on {ended} closed profiles"));
+        crate::notify_store_changed("profiles");
+    }
     let Ok(root) = crate::store::user_data_root() else { return };
     let Ok(dirs) = std::fs::read_dir(&root) else { return };
     let ids: Vec<String> = dirs.flatten().filter(|e| e.path().is_dir()).map(|e| e.file_name().to_string_lossy().into_owned()).collect();

@@ -151,11 +151,37 @@ pub fn launch_proxy(meta: &StoredMeta) -> Option<crate::proxy::ProxyEntry> {
         .or_else(|| meta.inline_proxy.clone())
 }
 
+/// Ends the temporary proxy of a profile whose browser has closed: it goes back to its own proxy.
+/// One put on in the last second is a partner tool's swap for the next open (it closes the profile,
+/// then sets the proxy, then opens it again) and stays. Returns whether one was ended.
+pub fn end_temp_proxy(id: &str) -> bool {
+    end_temp_proxy_older_than(id, 1000)
+}
+
+fn end_temp_proxy_older_than(id: &str, min_age_ms: u64) -> bool {
+    let _guard = file_lock();
+    let Ok(mut p) = load_raw(id) else { return false };
+    if p.meta.temp_proxy.is_none() || now_ms().saturating_sub(p.meta.temp_proxy_at) < min_age_ms {
+        return false;
+    }
+    p.meta.temp_proxy = None;
+    p.meta.temp_proxy_at = 0;
+    save_raw_locked(&mut p).is_ok()
+}
+
+/// Ends the temporary proxy of every profile that is not open and has had it for `min_age_ms`
+/// (an app that quit with one in use; one put on a moment ago is for an open about to come).
+pub fn end_stale_temp_proxies(open: impl Fn(&str) -> bool, min_age_ms: u64) -> usize {
+    let Ok(all) = list_all() else { return 0 };
+    all.into_iter().filter(|m| !open(&m.id) && end_temp_proxy_older_than(&m.id, min_age_ms)).count()
+}
+
 /// `profile.json` as it goes to the team: without what is only this machine's (a temporary or
 /// inline proxy carries its login).
 pub fn team_json(stored: &StoredProfile) -> serde_json::Result<String> {
     let mut copy = stored.clone();
     copy.meta.temp_proxy = None;
+    copy.meta.temp_proxy_at = 0;
     copy.meta.inline_proxy = None;
     serde_json::to_string_pretty(&copy)
 }
@@ -211,6 +237,9 @@ pub struct StoredMeta {
     /// the team. Any later choice of proxy (`proxy_id`, even "") ends it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temp_proxy: Option<crate::proxy::ProxyEntry>,
+    /// When `temp_proxy` was put on (ms since the epoch).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub temp_proxy_at: u64,
     /// Hidden from listings; auto-deleted on close.
     #[serde(default, skip_serializing_if = "is_false")]
     pub temporary: bool,
