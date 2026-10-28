@@ -7,6 +7,10 @@
 //! needs again. So it is removed once the profile has closed (and, at startup, from every profile
 //! that is not open). Logins, extensions, site data (Local Storage, IndexedDB), history and
 //! settings are not touched.
+//!
+//! Only once they have grown past `KEEP_UNDER` (28/10): removed at every close, a tool that closes
+//! and reopens a profile for each job (HirS, every 3-4 minutes) made every open start cold — the
+//! site downloaded, its scripts compiled and the GPU shaders rebuilt again, ten profiles at once.
 
 use std::path::Path;
 
@@ -24,9 +28,20 @@ const CACHES: &[&str] = &[
     "component_crx_cache",
 ];
 
-/// Removes the caches of the profile in `udd`, unless a browser has it open. Returns the bytes freed.
+/// Caches smaller than this together stay: they are what makes the next open quick.
+const KEEP_UNDER: u64 = 150_000_000;
+
+/// Removes the caches of the profile in `udd` once they have grown past `KEEP_UNDER`, unless a
+/// browser has it open. Returns the bytes freed.
 pub fn clean(udd: &Path) -> u64 {
+    clean_over(udd, KEEP_UNDER)
+}
+
+fn clean_over(udd: &Path, keep_under: u64) -> u64 {
     if !udd.is_dir() || crate::process::Tracker::user_data_in_use(udd) {
+        return 0;
+    }
+    if CACHES.iter().map(|rel| dir_size(&udd.join(rel))).sum::<u64>() < keep_under {
         return 0;
     }
     let mut freed = 0;
@@ -119,14 +134,16 @@ mod tests {
         put("Default/Extensions/abc/1.0_0/manifest.json", 10);
         put("Default/Preferences", 10);
 
-        assert_eq!(clean(&udd), 11000);
+        assert_eq!(clean(&udd), 0, "small caches stay");
+        assert!(udd.join("Default/Code Cache/js/abc").exists());
+        assert_eq!(clean_over(&udd, 0), 11000);
         for gone in ["Default/Cache", "Default/Code Cache", "GrShaderCache", "Default/Service Worker/CacheStorage"] {
             assert!(!udd.join(gone).exists(), "{gone} stays");
         }
         for kept in ["Default/Service Worker/Database/CURRENT", "Default/Network/Cookies", "Default/Local Storage/leveldb/000003.log", "Default/IndexedDB/https_x/1.log", "Default/Extensions/abc/1.0_0/manifest.json", "Default/Preferences"] {
             assert!(udd.join(kept).exists(), "{kept} was removed");
         }
-        assert_eq!(clean(&udd), 0, "nothing left to free");
+        assert_eq!(clean_over(&udd, 0), 0, "nothing left to free");
         let _ = std::fs::remove_dir_all(&udd);
     }
 }

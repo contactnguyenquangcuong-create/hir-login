@@ -1,6 +1,6 @@
 [package]
 name = "Hir-Login"
-version = "0.2.40"
+version = "0.2.41"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -108,5 +108,6 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Time",           # GetTimeZoneInformation (src/runner/rowlog.rs)
     "Win32_System_Shutdown",       # ShutdownBlockReasonCreate (src/shutdown_guard.rs)
     "Win32_System_Threading",      # OpenProcess / GetExitCodeProcess (src/process.rs, adopted browsers)
+    "Win32_System_Diagnostics_ToolHelp", # process snapshot: helpers a browser left behind (src/process.rs)
 ] }
 

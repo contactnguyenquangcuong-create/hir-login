@@ -91,8 +91,56 @@ pub(crate) fn pid_alive(pid: u32) -> bool {
     }
 }
 
+/// Ends the engine processes whose parent was `parent` — the helpers of a browser that has ended
+/// (they outlive it when one hangs). A snapshot of the process list: no scan of command lines.
+/// Returns how many it ended.
+pub(crate) fn end_children(parent: u32) -> usize {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+        };
+        if parent == 0 || pid_alive(parent) {
+            return 0;
+        }
+        let Ok(bin) = crate::launch::resolve_binary() else { return 0 };
+        let engine = bin.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let mut found = Vec::new();
+        // SAFETY: a process snapshot walked with a correctly sized entry, closed here.
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snap == INVALID_HANDLE_VALUE {
+                return 0;
+            }
+            let mut e: PROCESSENTRY32W = std::mem::zeroed();
+            e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+            let mut ok = Process32FirstW(snap, &mut e) != 0;
+            while ok {
+                if e.th32ParentProcessID == parent {
+                    let len = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
+                    if String::from_utf16_lossy(&e.szExeFile[..len]).to_lowercase() == engine {
+                        found.push(e.th32ProcessID);
+                    }
+                }
+                ok = Process32NextW(snap, &mut e) != 0;
+            }
+            CloseHandle(snap);
+        }
+        for p in &found {
+            end_process(*p, true);
+        }
+        found.len()
+    }
+    #[cfg(unix)]
+    {
+        let _ = parent;
+        0
+    }
+}
+
 /// Asks a process to end (WM_CLOSE / SIGTERM), or ends it with its helpers (`force`).
-fn end_process(pid: u32, force: bool) {
+pub(crate) fn end_process(pid: u32, force: bool) {
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -159,7 +207,7 @@ impl Tracker {
         // Graceful path flushes session state so next launch skips the restore prompt.
         let started_at = Instant::now();
         if !temporary {
-            Self::keep_snapshots(profile_id.clone());
+            Self::keep_snapshots(profile_id.clone(), pid);
         }
         tokio::spawn(async move {
             // How it ended, for the close line in the sync log: "a profile closes by itself" could
@@ -205,13 +253,20 @@ impl Tracker {
                         child.wait(),
                     ).await;
                     if graceful.is_err() {
-                        let _ = child.kill().await;
+                        // The whole tree, not only the browser process: `child.kill()` left its
+                        // renderers and GPU process behind when it hung, each still holding its
+                        // memory commit — on a 16 GB machine that opens and closes ten profiles all
+                        // day, Windows ran out of commit with RAM free (tabs died with code 39).
+                        match child.id() {
+                            Some(p) => end_process(p, true),
+                            None => { let _ = child.kill().await; }
+                        }
                         let _ = child.wait().await;
                     }
                     "stopped from the app (the Stop button, an automation run or the API)".to_string()
                 }
             };
-            Self::after_exit(profile_id, temporary, started_at, how).await;
+            Self::after_exit(profile_id, pid, temporary, started_at, how).await;
         });
 
         pid
@@ -219,11 +274,13 @@ impl Tracker {
 
     /// While the browser runs, keep a second copy of its login every few minutes — the cookie
     /// file can be lost with a computer that is switched off under it (see `cookies::snapshot`).
-    fn keep_snapshots(id: String) {
+    /// Bound to the launch (`pid`): a tool that closes and reopens a profile within the 3 minutes
+    /// found it "running" again, so every launch added one more loop for that profile.
+    fn keep_snapshots(id: String, pid: u32) {
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(180)).await;
-                if !Self::shared().is_running(&id) {
+                if Self::shared().pid_of(&id) != Some(pid) {
                     break;
                 }
                 let id2 = id.clone();
@@ -247,7 +304,7 @@ impl Tracker {
         }
         let started_at = Instant::now();
         if !temporary {
-            Self::keep_snapshots(profile_id.clone());
+            Self::keep_snapshots(profile_id.clone(), pid);
         }
         tokio::spawn(async move {
             let gone = async {
@@ -275,14 +332,14 @@ impl Tracker {
                     "stopped from the app (the Stop button, an automation run or the API)".to_string()
                 }
             };
-            Self::after_exit(profile_id, temporary, started_at, how).await;
+            Self::after_exit(profile_id, pid, temporary, started_at, how).await;
         });
         true
     }
 
     /// Everything that follows a browser's exit: the profile is no longer running, its close is
     /// saved to the team, a temporary one is deleted.
-    async fn after_exit(profile_id: String, temporary: bool, started_at: Instant, how: String) {
+    async fn after_exit(profile_id: String, pid: u32, temporary: bool, started_at: Instant, how: String) {
         {
             // From here until the close has been saved, the profile counts as "being saved".
             closing_begin(&profile_id);
@@ -290,6 +347,34 @@ impl Tracker {
                 g.remove(&profile_id);
             }
             crate::proxy_relay::stop(&profile_id);
+            // Helper processes the browser left behind (a hung renderer, the GPU process) keep
+            // their memory commit for good: on a 16 GB machine opening and closing ten profiles
+            // all day, Windows ran out of commit with RAM free and tabs died with code 39. Given a
+            // moment to end by themselves, they are ended — the browser's children first, then
+            // (rare, costs a process scan) anything still holding the profile's folder.
+            {
+                let udd = crate::profile::user_data_dir(&profile_id).ok();
+                let id2 = profile_id.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(1500));
+                    let mut n = end_children(pid);
+                    if let Some(udd) = udd {
+                        for _ in 0..14 {
+                            if !Self::user_data_in_use(&udd) {
+                                break;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(250));
+                        }
+                        if Self::user_data_in_use(&udd) {
+                            n += crate::orphans::end_helpers_of(&udd);
+                        }
+                    }
+                    if n > 0 {
+                        crate::cloud_sync::log_line(&format!("close {id2}: ended {n} helper process(es) its browser left running"));
+                    }
+                })
+                .await;
+            }
             // The cookie file as the browser left it: with the line written at launch, this
             // places a vanished login — gone before the browser started, or while it ran.
             if !temporary {
@@ -369,6 +454,11 @@ impl Tracker {
             .lock()
             .map(|g| g.contains_key(profile_id))
             .unwrap_or(false)
+    }
+
+    /// The pid of the browser tracked for this profile.
+    pub fn pid_of(&self, profile_id: &str) -> Option<u32> {
+        self.inner.lock().ok()?.get(profile_id).map(|e| e.pid)
     }
 
     pub fn cdp(&self, profile_id: &str) -> Option<CdpInfo> {

@@ -78,6 +78,20 @@ pub async fn adopt_leftovers() -> usize {
     adopted
 }
 
+/// Ends every engine process still running on the profile in `udd` once its browser has gone —
+/// renderers and the GPU process left behind keep their memory commit for good. Returns how many.
+pub fn end_helpers_of(udd: &Path) -> usize {
+    let Ok(bin) = crate::launch::resolve_binary() else { return 0 };
+    let mut n = 0;
+    for p in list_engine_processes(&bin) {
+        if user_data_dir_of(&p.cmdline).is_some_and(|d| same_dir(&d, udd)) {
+            crate::process::end_process(p.pid, true);
+            n += 1;
+        }
+    }
+    n
+}
+
 /// Whether any process runs from the engine right now — a browser of a profile, this app's or one
 /// left by an earlier run. Its files cannot be replaced then (and moving the folder would make it
 /// start new tabs from another version), so an engine update waits.
