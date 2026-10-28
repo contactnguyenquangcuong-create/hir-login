@@ -663,9 +663,25 @@ pub async fn admin_call(method: &str, path: &str, body: Option<serde_json::Value
     let Some((_cfg, base, token)) = active_config()? else { anyhow::bail!("sync is not enabled") };
     let c = client();
     let url = format!("{base}{path}");
-    let mut req = match method { "PUT" => c.put(url), "POST" => c.post(url), _ => c.get(url) }.bearer_auth(&token);
-    if let Some(b) = body { req = req.json(&b); }
-    let resp = req.send().await.context("contact sync server")?;
+    // A machine that hosts the team's server and syncs to itself calls its own server, which is
+    // started a moment after the app opens: a call in that moment is refused ("os error 10061")
+    // for no reason that waiting does not cure.
+    let hosts_itself = crate::settings::load()
+        .map(|s| s.server_host.enabled && s.sync.token.as_deref().is_some_and(|t| !t.is_empty()) && s.sync.token == s.server_host.token)
+        .unwrap_or(false);
+    let mut waited = 0u32;
+    let resp = loop {
+        let mut req = match method { "PUT" => c.put(&url), "POST" => c.post(&url), _ => c.get(&url) }.bearer_auth(&token);
+        if let Some(b) = &body { req = req.json(b); }
+        match req.send().await {
+            Ok(r) => break r,
+            Err(e) if hosts_itself && e.is_connect() && waited < 15 => {
+                waited += 1;
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+            Err(e) => return Err(anyhow::Error::new(e).context("contact sync server")),
+        }
+    };
     if resp.status().as_u16() == 401 { kicked_out(); anyhow::bail!("sync server rejected the request: 401"); }
     if resp.status().as_u16() == 403 {
         let reason = resp.json::<serde_json::Value>().await.ok()

@@ -4417,8 +4417,12 @@ pub fn run() {
                         // be made because the target machine actively refused it (os error 10061)" — until
                         // someone switched "Làm máy chủ" off and on again.
                         tauri::async_runtime::spawn(async move {
-                            tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                             let mut failures = 0u32;
+                            // The first start follows the app's own launch: nothing has just stopped the
+                            // server, so there is nothing to look twice at (the other machines, and this
+                            // one's own screens, were refused for the seconds that took).
+                            let mut first = true;
                             loop {
                                 let hosting = settings::load().map(|s| s.server_host.enabled).unwrap_or(false);
                                 if !hosting {
@@ -4426,12 +4430,15 @@ pub fn run() {
                                 }
                                 if team_server::is_running() {
                                     failures = 0;
+                                    first = false;
                                     tokio::time::sleep(std::time::Duration::from_secs(20)).await;
                                     continue;
                                 }
                                 // Stopping the server from the app clears the switch just after it
                                 // stops it: look twice before starting it again.
-                                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                if !std::mem::take(&mut first) {
+                                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                }
                                 if !settings::load().map(|s| s.server_host.enabled).unwrap_or(false) || team_server::is_running() {
                                     continue;
                                 }
