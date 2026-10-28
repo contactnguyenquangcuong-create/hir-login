@@ -144,6 +144,16 @@ pub struct AclStore {
     pub trashed: BTreeMap<String, TrashedFolder>,
 }
 
+/// Writes `data` and has it on the disk before returning. A plain `fs::write` followed by a rename
+/// left, when the PC stopped just after (power cut, freeze), a file of the right size filled with
+/// zeros — the members file and its backup both, written together — and the team's members were lost.
+fn write_durable(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    f.write_all(data)?;
+    f.sync_all()
+}
+
 pub fn hash_token(token: &str) -> String {
     Sha256::digest(token.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -174,6 +184,10 @@ impl AclStore {
                 match std::fs::read_to_string(dir.join(name)) {
                     Ok(t) => match serde_json::from_str(&t) {
                         Ok(acl) => return Ok(Some(acl)),
+                        Err(e) if !t.is_empty() && t.bytes().all(|b| b == 0) => {
+                            // The size was written but not the data: the PC stopped in the middle of a save.
+                            last = format!("{name}: the file is filled with zeros (the PC stopped while it was being written), {e}")
+                        }
                         Err(e) => last = format!("{name}: {e}"), // half-written: try again
                     },
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound && attempt >= 2 => return Ok(None),
@@ -204,11 +218,11 @@ impl AclStore {
         }
         if let Ok(t) = std::fs::read_to_string(&path) {
             if serde_json::from_str::<AclStore>(&t).is_ok() {
-                let _ = std::fs::write(dir.join("members.json.bak"), t);
+                let _ = write_durable(&dir.join("members.json.bak"), t.as_bytes());
             }
         }
         let tmp = dir.join("members.json.tmp");
-        std::fs::write(&tmp, serde_json::to_string_pretty(self).unwrap_or_default())?;
+        write_durable(&tmp, serde_json::to_string_pretty(self).unwrap_or_default().as_bytes())?;
         crate::winfs::rename_replace(&tmp, &path)
     }
 
