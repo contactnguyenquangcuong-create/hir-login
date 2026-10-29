@@ -74,13 +74,19 @@ fn load_json(path: &PathBuf, fallback: Value) -> Value {
         .unwrap_or(fallback)
 }
 
+/// Writes `data` and has it on the disk before returning. (A file opened only for reading cannot be
+/// flushed on Windows: the fsync this used to do never happened, and a PC that stopped right after
+/// left the file the right size and filled with zeros.)
+fn write_durable(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path)?;
+    f.write_all(data)?;
+    f.sync_all()
+}
+
 fn save_json_atomic(path: &PathBuf, val: &Value) -> Result<()> {
     let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, serde_json::to_string_pretty(val)?)?;
-    // best-effort fsync
-    if let Ok(f) = std::fs::File::open(&tmp) {
-        let _ = f.sync_all();
-    }
+    write_durable(&tmp, serde_json::to_string_pretty(val)?.as_bytes())?;
     // retry rename like profile.rs does
     for _ in 0..4 {
         if crate::winfs::rename_replace(&tmp, path).is_ok() {
@@ -90,6 +96,141 @@ fn save_json_atomic(path: &PathBuf, val: &Value) -> Result<()> {
     }
     crate::winfs::rename_replace(&tmp, path).context("atomic write failed")?;
     Ok(())
+}
+
+/// Held around every read-change-write of locks.json, meta.json and a bundle. Two requests at the
+/// same instant each read the file, each changed their own copy and wrote it back: two people
+/// opening the same profile together could both be given its lock, and of two uploads one
+/// profile's entry in meta.json was lost. Never held across an `.await`.
+fn store_lock() -> std::sync::MutexGuard<'static, ()> {
+    static L: OnceLock<Mutex<()>> = OnceLock::new();
+    L.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Whether the server holds any bundle at all.
+fn holds_bundles() -> bool {
+    std::fs::read_dir(match bundles_dir() { Ok(d) => d, Err(_) => return false })
+        .map(|d| d.flatten().any(|e| e.file_name().to_string_lossy().ends_with(".zip")))
+        .unwrap_or(false)
+}
+
+/// What one of the meta files holds: `Ok(None)` when it is not there, Err when it is there and
+/// cannot be read (read again a few times first: on Windows a file being replaced is unreadable
+/// for an instant).
+fn read_meta_file(path: &std::path::Path) -> Result<Option<serde_json::Map<String, Value>>, String> {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let mut last = String::new();
+    for attempt in 0..6 {
+        if attempt > 0 {
+            std::thread::sleep(Duration::from_millis(40));
+        }
+        match std::fs::read(path) {
+            Ok(b) => match serde_json::from_slice::<Value>(&b) {
+                Ok(Value::Object(m)) => return Ok(Some(m)),
+                Ok(_) => last = format!("{name}: not an object"),
+                Err(_) if b.iter().all(|&x| x == 0) => last = format!("{name}: the file is empty or filled with zeros"),
+                Err(e) => last = format!("{name}: {e}"),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && attempt >= 2 => return Ok(None),
+            Err(e) => last = format!("{name}: {e}"),
+        }
+    }
+    Err(last)
+}
+
+/// The profiles the server holds (meta.json, or its backup when it cannot be read). Err when
+/// neither can be read, or both are gone while bundles are there: answering then as if the server
+/// held no profile told every member "no such profile", each machine moved its copies of the
+/// team's profiles to the trash, and the next upload wrote a meta.json with that one profile in it.
+fn load_meta_checked() -> Result<serde_json::Map<String, Value>, String> {
+    let path = meta_path().map_err(|e| e.to_string())?;
+    let main = match read_meta_file(&path) {
+        Ok(Some(m)) => return Ok(m),
+        other => other,
+    };
+    match (main, read_meta_file(&path.with_extension("json.bak"))) {
+        (_, Ok(Some(m))) => Ok(m),
+        (Err(e), _) | (_, Err(e)) => Err(e),
+        _ if holds_bundles() => Err("meta.json is missing on a server that holds bundles".into()),
+        _ => Ok(serde_json::Map::new()), // a new server
+    }
+}
+
+/// Writes meta.json, and once it is in place the same into meta.json.bak: a copy one save behind
+/// would be missing the last profile uploaded, and its members would be told it does not exist.
+fn save_meta(meta: &serde_json::Map<String, Value>) -> Result<()> {
+    let path = meta_path()?;
+    let v = Value::Object(meta.clone());
+    save_json_atomic(&path, &v)?;
+    let _ = save_json_atomic(&path.with_extension("json.bak"), &v);
+    Ok(())
+}
+
+/// When meta.json and its backup are both lost for good (filled with zeros, empty or missing) while
+/// bundles are there: sets them aside as `<name>.damaged-<ms>` and builds meta.json again from
+/// what each bundle says of itself (folder, signatures, size; its file time is its version).
+/// Tombstones of deleted profiles are gone with the old file. Call with `store_lock` held.
+fn rebuild_meta_if_lost() -> bool {
+    let Ok(path) = meta_path() else { return false };
+    let files = [path.clone(), path.with_extension("json.bak")];
+    let mut lost = Vec::new();
+    for f in &files {
+        match std::fs::read(f) {
+            Ok(b) if b.iter().all(|&x| x == 0) => lost.push(f.clone()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return false, // real data, or locked: it may still be read
+        }
+    }
+    let Ok(dir) = bundles_dir() else { return false };
+    let mut meta = serde_json::Map::new();
+    for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(id) = name.strip_suffix(".zip").filter(|id| safe_id(id)) else { continue };
+        let Ok(file) = std::fs::File::open(e.path()) else { continue };
+        let Some((profile, proxy)) = read_bundle_meta_from(file) else { continue };
+        let md = e.metadata().ok();
+        let ms = md.as_ref().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_millis() as u64).unwrap_or_else(now_ms);
+        meta.insert(id.to_string(), json!({
+            "updatedAt": iso_ms(ms), "verMs": ms, "updatedBy": "", "sizeBytes": md.map(|m| m.len()).unwrap_or(0),
+            "folder": team_acl::folder_of(&profile),
+            "sig": team_acl::protected_signature(&profile, &proxy),
+            "sig_np": team_acl::protected_signature_without_proxy(&profile),
+        }));
+    }
+    if meta.is_empty() {
+        return false; // no bundle: a new server, nothing to rebuild
+    }
+    let stamp = now_ms();
+    for f in &lost {
+        let aside = format!("{}.damaged-{stamp}", f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default());
+        if std::fs::rename(f, f.with_file_name(aside)).is_err() {
+            return false;
+        }
+    }
+    eprintln!("[team-server] meta.json and its backup were lost: rebuilt from {} bundles", meta.len());
+    save_json_atomic(&path, &Value::Object(meta)).is_ok()
+}
+
+/// Every route but `/health`: while the server cannot tell which profiles it holds, it says
+/// "try again later" (503) rather than "no such profile", which a machine acts on by trashing
+/// its copy. A meta.json lost for good is rebuilt from the bundles on the spot.
+async fn require_meta(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    if req.uri().path() != "/health" && load_meta_checked().is_err() {
+        let still = {
+            let _g = store_lock();
+            rebuild_meta_if_lost();
+            load_meta_checked().err()
+        };
+        if let Some(why) = still {
+            eprintln!("[team-server] profiles cannot be read ({why}): answering 503");
+            return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"ok":false,"error":"the team's profile list cannot be read right now, try again later"}))).into_response();
+        }
+    }
+    next.run(req).await
+}
+
+fn service_unavailable(why: &str) -> Response {
+    (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"ok":false,"error":why}))).into_response()
 }
 
 fn is_expired(lock: &Value) -> bool {
@@ -307,8 +448,10 @@ fn save_acl(acl: &AclStore) -> Result<()> {
     Ok(())
 }
 
+/// The profiles the server holds. Empty only when it cannot read them — and then `require_meta`
+/// has already answered 503 before any handler asks.
 fn meta_map() -> serde_json::Map<String, Value> {
-    load_json(&meta_path().unwrap_or_default(), json!({})).as_object().cloned().unwrap_or_default()
+    load_meta_checked().unwrap_or_default()
 }
 
 /// `who`'s level on a profile, from the folder recorded when it was uploaded.
@@ -334,8 +477,12 @@ fn audit(who: &Identity, action: &str, target: &str, ok: bool, note: &str) {
 
 /// profile.json and proxy.json out of an uploaded bundle.
 fn read_bundle_meta(bytes: &[u8]) -> Option<(Value, Value)> {
+    read_bundle_meta_from(std::io::Cursor::new(bytes))
+}
+
+fn read_bundle_meta_from<R: std::io::Read + std::io::Seek>(r: R) -> Option<(Value, Value)> {
     use std::io::Read;
-    let mut z = zip::ZipArchive::new(std::io::Cursor::new(bytes)).ok()?;
+    let mut z = zip::ZipArchive::new(r).ok()?;
     let mut read = |name: &str| -> Value {
         z.by_name(name)
             .ok()
@@ -392,9 +539,8 @@ async fn list_profiles(
 ) -> Response {
     let Some(who) = authenticate(&headers, &state.token) else { return unauthorized() };
     let locks: Value = load_json(&locks_path().unwrap_or_default(), json!({}));
-    let meta: Value = load_json(&meta_path().unwrap_or_default(), json!({}));
     let locks_map = locks.as_object().cloned().unwrap_or_default();
-    let meta_map = meta.as_object().cloned().unwrap_or_default();
+    let meta_map = meta_map();
     let mut ids: std::collections::HashSet<String> = std::collections::HashSet::new();
     for k in locks_map.keys() { ids.insert(k.clone()); }
     for k in meta_map.keys() { ids.insert(k.clone()); }
@@ -444,7 +590,11 @@ async fn lock_profile(
     }
     let holder = holder.chars().take(200).collect::<String>();
     let locks_path = match locks_path() { Ok(p) => p, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok":false,"error":e.to_string()}))).into_response() };
+    let _g = store_lock();
     let mut locks = load_json(&locks_path, json!({}));
+    if !locks.is_object() {
+        locks = json!({});
+    }
     let map = locks.as_object_mut().unwrap();
     if let Some(existing) = map.get(&id).cloned() {
         if !is_expired(&existing) && existing.get("holder").and_then(|h| h.as_str()) != Some(&holder) {
@@ -503,6 +653,7 @@ async fn unlock_profile(
     let holder = v.get("holder").and_then(|x| x.as_str()).unwrap_or("").to_string();
     let force = v.get("force").and_then(|x| x.as_bool()).unwrap_or(false);
     let locks_path = match locks_path() { Ok(p) => p, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok":false,"error":e.to_string()}))).into_response() };
+    let _g = store_lock();
     let mut locks = load_json(&locks_path, json!({}));
     if let Some(map) = locks.as_object_mut() {
         if let Some(existing) = map.get(&id).cloned() {
@@ -660,37 +811,80 @@ async fn put_bundle(
         let _ = save_acl(&acl);
     }
     let locks_path = match locks_path() { Ok(p) => p, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok":false,"error":e.to_string()}))).into_response() };
-    let mut locks = load_json(&locks_path, json!({}));
-    let existing = locks.get(&id).cloned().unwrap_or(Value::Null);
-    if existing.is_null() || is_expired(&existing) || existing.get("holder").and_then(|h| h.as_str()) != Some(holder.as_str()) {
-        return (StatusCode::FORBIDDEN, Json(json!({"ok":false,"error":"you do not hold the lock for this profile"}))).into_response();
+    let holds_lock = |locks: &Value| {
+        let l = locks.get(&id).cloned().unwrap_or(Value::Null);
+        !l.is_null() && !is_expired(&l) && l.get("holder").and_then(|h| h.as_str()) == Some(holder.as_str())
+    };
+    let not_holder = || (StatusCode::FORBIDDEN, Json(json!({"ok":false,"error":"you do not hold the lock for this profile"}))).into_response();
+    // Asked first so a refused upload is not written to disk; asked again below, under the lock.
+    if !holds_lock(&load_json(&locks_path, json!({}))) {
+        return not_holder();
     }
     let dir = match bundles_dir() { Ok(d) => d, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok":false,"error":e.to_string()}))).into_response() };
     let file_path = dir.join(format!("{id}.zip"));
-    if let Err(e) = tokio::fs::write(&file_path, &body).await {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok":false,"error":e.to_string()}))).into_response();
+    // Written beside it, then put in its place: writing over the bundle itself left, when the
+    // server stopped half-way (or a download was reading it meanwhile), a broken bundle and no
+    // good one — the profile's sessions were gone from the team.
+    let tmp = dir.join(format!("{id}.zip.tmp-{}", uuid::Uuid::new_v4().simple()));
+    let written = {
+        let (tmp, body) = (tmp.clone(), body.clone());
+        tokio::task::spawn_blocking(move || write_durable(&tmp, &body)).await
+    };
+    if let Err(e) = written.map_err(|e| e.to_string()).and_then(|r| r.map_err(|e| e.to_string())) {
+        let _ = std::fs::remove_file(&tmp);
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok":false,"error":e}))).into_response();
     }
-    // update meta
-    let meta_path = match meta_path() { Ok(p) => p, Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok":false,"error":e.to_string()}))).into_response() };
-    let mut meta = load_json(&meta_path, json!({}));
-    let meta_map = meta.as_object_mut().unwrap();
-    // ISO 8601 UTC, to the millisecond and strictly after this profile's previous version.
-    let prev_ms = meta_map.get(&id).and_then(|m| m.get("verMs")).and_then(|v| v.as_u64()).unwrap_or(0);
-    let (now_iso, ver_ms) = next_version(prev_ms);
-    meta_map.insert(id.clone(), json!({"updatedAt": now_iso, "verMs": ver_ms, "updatedBy": holder, "sizeBytes": body.len(), "folder": new_folder, "sig": new_sig, "sig_np": new_sig_np}));
-    let _ = save_json_atomic(&meta_path, &meta);
-    // refresh lock TTL
-    if let Some(map) = locks.as_object_mut() {
-        let saving = existing.get("phase").and_then(|p| p.as_str()) == Some("saving");
-        let mut record = json!({"holder": holder, "by": existing.get("by").cloned().unwrap_or(Value::Null), "byId": existing.get("byId").cloned().unwrap_or(Value::Null), "acquiredAt": existing.get("acquiredAt").cloned().unwrap_or(json!(now_ms())), "expiresAt": now_ms() + if saving { saving_ttl_ms() } else { lock_ttl_ms() }});
-        if saving {
-            record["phase"] = json!("saving");
+    let done: Result<(), Response> = (|| {
+        let _g = store_lock();
+        let mut locks = load_json(&locks_path, json!({}));
+        let Some(existing) = locks.get(&id).cloned().filter(|_| holds_lock(&locks)) else { return Err(not_holder()) };
+        let mut meta = load_meta_checked().map_err(|e| service_unavailable(&format!("the team's profile list cannot be read right now ({e})")))?;
+        rename_into_place(&tmp, &file_path).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok":false,"error":e.to_string()}))).into_response())?;
+        // ISO 8601 UTC, to the millisecond and strictly after this profile's previous version.
+        let prev_ms = meta.get(&id).and_then(|m| m.get("verMs")).and_then(|v| v.as_u64()).unwrap_or(0);
+        let (now_iso, ver_ms) = next_version(prev_ms);
+        meta.insert(id.clone(), json!({"updatedAt": now_iso, "verMs": ver_ms, "updatedBy": holder, "sizeBytes": body.len(), "folder": new_folder, "sig": new_sig, "sig_np": new_sig_np}));
+        let _ = save_meta(&meta);
+        // refresh lock TTL
+        if let Some(map) = locks.as_object_mut() {
+            let saving = existing.get("phase").and_then(|p| p.as_str()) == Some("saving");
+            let mut record = json!({"holder": holder, "by": existing.get("by").cloned().unwrap_or(Value::Null), "byId": existing.get("byId").cloned().unwrap_or(Value::Null), "acquiredAt": existing.get("acquiredAt").cloned().unwrap_or(json!(now_ms())), "expiresAt": now_ms() + if saving { saving_ttl_ms() } else { lock_ttl_ms() }});
+            if saving {
+                record["phase"] = json!("saving");
+            }
+            map.insert(id.clone(), record);
+            let _ = save_json_atomic(&locks_path, &locks);
         }
-        map.insert(id.clone(), record);
-        let _ = save_json_atomic(&locks_path, &locks);
+        Ok(())
+    })();
+    if let Err(r) = done {
+        let _ = std::fs::remove_file(&tmp);
+        return r;
     }
     publish_event(&id);
     Json(json!({"ok": true, "sizeBytes": body.len()})).into_response()
+}
+
+/// Puts a fully written file in place of `to`. On Windows a file someone is reading at that moment
+/// can refuse to be replaced for an instant: tried again a few times.
+fn rename_into_place(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    for _ in 0..10 {
+        if crate::winfs::rename_replace(from, to).is_ok() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    crate::winfs::rename_replace(from, to)
+}
+
+/// Bundles half-written when the server last stopped.
+fn remove_partial_bundles() {
+    let Ok(dir) = bundles_dir() else { return };
+    for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        if e.file_name().to_string_lossy().contains(".zip.tmp-") {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 /// A profile deleted on some machine: drop its bundle and lock and leave a
@@ -723,30 +917,34 @@ async fn delete_profile(
         .ok()
         .and_then(|v| v.get("holder").and_then(|h| h.as_str().map(|s| s.to_string())))
         .unwrap_or_default();
-    if let Ok(dir) = bundles_dir() {
-        let _ = std::fs::remove_file(dir.join(format!("{id}.zip")));
-    }
-    if let Ok(lp) = locks_path() {
-        let mut locks = load_json(&lp, json!({}));
-        if let Some(m) = locks.as_object_mut() {
-            m.remove(&id);
+    {
+        let _g = store_lock();
+        // The tombstone is what tells the other machines; without a readable list to put it in,
+        // nothing is deleted.
+        let mut meta = match load_meta_checked() {
+            Ok(m) => m,
+            Err(e) => return service_unavailable(&format!("the team's profile list cannot be read right now ({e})")),
+        };
+        if let Ok(dir) = bundles_dir() {
+            let _ = std::fs::remove_file(dir.join(format!("{id}.zip")));
         }
-        let _ = save_json_atomic(&lp, &locks);
-    }
-    if let Ok(mp) = meta_path() {
-        let mut meta = load_json(&mp, json!({}));
-        if let Some(m) = meta.as_object_mut() {
-            let prev_ms = m.get(&id).and_then(|e| e.get("verMs")).and_then(|v| v.as_u64()).unwrap_or(0);
-            let (stamp, ver_ms) = next_version(prev_ms);
-            m.insert(id.clone(), json!({
-                "deleted": true,
-                "folder": folder,
-                "updatedAt": stamp,
-                "verMs": ver_ms,
-                "updatedBy": by,
-            }));
+        if let Ok(lp) = locks_path() {
+            let mut locks = load_json(&lp, json!({}));
+            if let Some(m) = locks.as_object_mut() {
+                m.remove(&id);
+            }
+            let _ = save_json_atomic(&lp, &locks);
         }
-        let _ = save_json_atomic(&mp, &meta);
+        let prev_ms = meta.get(&id).and_then(|e| e.get("verMs")).and_then(|v| v.as_u64()).unwrap_or(0);
+        let (stamp, ver_ms) = next_version(prev_ms);
+        meta.insert(id.clone(), json!({
+            "deleted": true,
+            "folder": folder,
+            "updatedAt": stamp,
+            "verMs": ver_ms,
+            "updatedBy": by,
+        }));
+        let _ = save_meta(&meta);
     }
     publish_event(&id);
     Json(json!({"ok": true})).into_response()
@@ -1183,8 +1381,12 @@ async fn admin_audit(
 /// older copy back over the newer. Returns the stamp and its value in milliseconds.
 fn next_version(prev_ms: u64) -> (String, u64) {
     let ms = now_ms().max(prev_ms + 1);
+    (iso_ms(ms), ms)
+}
+
+fn iso_ms(ms: u64) -> String {
     let iso = time_format(ms / 1000);
-    (format!("{}.{:03}Z", iso.trim_end_matches('Z'), ms % 1000), ms)
+    format!("{}.{:03}Z", iso.trim_end_matches('Z'), ms % 1000)
 }
 
 fn time_format(secs: u64) -> String {
@@ -1290,7 +1492,9 @@ pub async fn start(port: u16, token: String) -> Result<u16> {
         .route("/admin/audit", get(admin_audit))
         .route("/library/:kind", get(library_list))
         .route("/library/:kind/:id", get(library_get).merge(big_upload(library_put, &state)))
+        .layer(axum::middleware::from_fn(require_meta))
         .with_state(state.clone());
+    remove_partial_bundles();
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await
         .with_context(|| format!("không bind được port {port}"))?;
@@ -1894,6 +2098,177 @@ mod permission_tests {
         };
         assert_eq!(list["members"].as_array().map(|a| a.len()), Some(2), "{list}");
         assert!(std::fs::read_dir(&srv).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with("members.json.damaged-")));
+
+        let _ = stop();
+        crate::store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    async fn fresh_server(tmp: &std::path::Path) -> String {
+        crate::store::set_data_root(Some(tmp.to_path_buf()));
+        let port = start(0, "admin-token-123456".to_string()).await.expect("start");
+        format!("http://127.0.0.1:{port}")
+    }
+
+    /// Two people asking for the same profile at the same instant: each request read locks.json,
+    /// found it free and wrote itself in, and both were told they had it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn only_one_of_many_simultaneous_lock_requests_gets_the_profile() {
+        let _g = crate::cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-acl-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let base = fresh_server(&tmp).await;
+        let admin = "admin-token-123456";
+        let c = reqwest::Client::new();
+
+        for round in 0..5 {
+            let id = format!("p{round}");
+            let tries = (0..24).map(|n| {
+                let (c, url) = (c.clone(), format!("{base}/profiles/{id}/lock"));
+                tokio::spawn(async move { c.post(url).bearer_auth(admin).json(&json!({"holder": format!("machine-{n}")})).send().await.unwrap().status().as_u16() })
+            });
+            let codes: Vec<u16> = futures_util::future::join_all(tries).await.into_iter().map(|r| r.unwrap()).collect();
+            assert_eq!(codes.iter().filter(|&&s| s == 200).count(), 1, "round {round}: {codes:?}");
+            assert!(codes.iter().all(|&s| s == 200 || s == 409), "{codes:?}");
+        }
+
+        let _ = stop();
+        crate::store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Many profiles closed at once on different machines: each upload read meta.json, added its
+    /// own entry and wrote it back, and the entries of the others were lost.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn simultaneous_uploads_all_end_up_in_the_profile_list() {
+        let _g = crate::cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-acl-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let base = fresh_server(&tmp).await;
+        let admin = "admin-token-123456";
+        let c = reqwest::Client::new();
+
+        let ids: Vec<String> = (0..16).map(|n| format!("u{n}")).collect();
+        for id in &ids {
+            assert_eq!(status(&c, admin, "POST", format!("{base}/profiles/{id}/lock"), None, id).await, 200);
+        }
+        let ups = ids.iter().map(|id| {
+            let (c, url, id) = (c.clone(), format!("{base}/profiles/{id}/bundle"), id.clone());
+            tokio::spawn(async move { status(&c, admin, "PUT", url, Some(bundle("A", &id)), &id).await })
+        });
+        let codes: Vec<u16> = futures_util::future::join_all(ups).await.into_iter().map(|r| r.unwrap()).collect();
+        assert!(codes.iter().all(|&s| s == 200), "{codes:?}");
+        let list: Value = c.get(format!("{base}/profiles")).bearer_auth(admin).send().await.unwrap().json().await.unwrap();
+        let mut got: Vec<String> = list["profiles"].as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap().to_string()).collect();
+        got.sort();
+        let mut want = ids.clone();
+        want.sort();
+        assert_eq!(got, want);
+        assert!(meta_map().values().all(|m| m.get("sig").is_some()), "every upload recorded in full");
+
+        let _ = stop();
+        crate::store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// An upload replaces the bundle as a whole, also while another machine is downloading it,
+    /// and a half-written one left by a stopped server is cleared at the next start.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_bundle_is_replaced_whole_and_half_written_ones_are_cleared() {
+        let _g = crate::cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-acl-{}", uuid::Uuid::new_v4()));
+        let bundles = tmp.join("team-sync").join("bundles");
+        std::fs::create_dir_all(&bundles).unwrap();
+        std::fs::write(bundles.join("p.zip.tmp-0123"), b"half").unwrap();
+        let base = fresh_server(&tmp).await;
+        assert!(!bundles.join("p.zip.tmp-0123").exists(), "cleared at start");
+        let admin = "admin-token-123456";
+        let c = reqwest::Client::new();
+
+        assert_eq!(status(&c, admin, "POST", format!("{base}/profiles/p/lock"), None, "m").await, 200);
+        let first = bundle("A", "first");
+        assert_eq!(status(&c, admin, "PUT", format!("{base}/profiles/p/bundle"), Some(first.clone()), "m").await, 200);
+        // Someone is reading it (a download in progress) when the next version comes up.
+        let reader = std::fs::File::open(bundles.join("p.zip")).unwrap();
+        let second = bundle("A", "second-version-longer");
+        assert_eq!(status(&c, admin, "PUT", format!("{base}/profiles/p/bundle"), Some(second.clone()), "m").await, 200);
+        drop(reader);
+        let got = c.get(format!("{base}/profiles/p/bundle")).bearer_auth(admin).send().await.unwrap().bytes().await.unwrap();
+        assert_eq!(got.as_ref(), second.as_slice());
+        let left: Vec<String> = std::fs::read_dir(&bundles).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(left, vec!["p.zip".to_string()], "no temporary file left behind");
+        // A refused upload writes nothing.
+        assert_eq!(status(&c, admin, "PUT", format!("{base}/profiles/p/bundle"), Some(first), "someone-else").await, 403);
+        assert_eq!(std::fs::read(bundles.join("p.zip")).unwrap(), second);
+
+        let _ = stop();
+        crate::store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// meta.json damaged: the server answered as if it held no profile, so each member was told
+    /// "no such profile" (and trashed their copy), and the next upload wrote a list with only that
+    /// profile in it. Now it falls back on the backup, rebuilds the list from the bundles when both
+    /// are lost for good, and otherwise answers "try again later" and changes nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_damaged_profile_list_is_never_taken_for_an_empty_one() {
+        let _g = crate::cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-acl-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let base = fresh_server(&tmp).await;
+        let admin = "admin-token-123456";
+        let c = reqwest::Client::new();
+        let srv = tmp.join("team-sync");
+
+        let (_, r) = put_json(&c, admin, format!("{base}/admin/members"), json!({"name": "u", "role": "member"})).await;
+        let (u_tok, u_id) = (r["token"].as_str().unwrap().to_string(), r["id"].as_str().unwrap().to_string());
+        assert_eq!(put_json(&c, admin, format!("{base}/admin/folders"), json!({"name": "A"})).await.0, 200);
+        assert_eq!(put_json(&c, admin, format!("{base}/admin/folders/A/access"), json!({"memberId": u_id, "level": "use"})).await.0, 200);
+        for id in ["p1", "p2", "p3"] {
+            assert_eq!(status(&c, admin, "POST", format!("{base}/profiles/{id}/lock"), None, "m").await, 200);
+            assert_eq!(status(&c, admin, "PUT", format!("{base}/profiles/{id}/bundle"), Some(bundle("A", id)), "m").await, 200);
+            assert_eq!(status(&c, admin, "POST", format!("{base}/profiles/{id}/unlock"), None, "m").await, 200);
+        }
+        let count = |c: reqwest::Client, tok: String| {
+            let url = format!("{base}/profiles");
+            async move {
+                let r = c.get(url).bearer_auth(tok).send().await.unwrap();
+                let code = r.status().as_u16();
+                (code, r.json::<Value>().await.ok().and_then(|v| v["profiles"].as_array().map(|a| a.len())))
+            }
+        };
+        assert_eq!(count(c.clone(), u_tok.clone()).await, (200, Some(3)));
+        let good = std::fs::read(srv.join("meta.json")).unwrap();
+
+        // 1. Main damaged, backup good: answered from the backup.
+        std::fs::write(srv.join("meta.json"), vec![0u8; good.len()]).unwrap();
+        assert_eq!(count(c.clone(), u_tok.clone()).await, (200, Some(3)));
+        assert_eq!(status(&c, &u_tok, "POST", format!("{base}/profiles/p1/lock"), None, "u").await, 200, "the member still reaches the profile");
+        assert_eq!(status(&c, &u_tok, "POST", format!("{base}/profiles/p1/unlock"), None, "u").await, 200);
+
+        // 2. Real data that does not read, no backup: 503, never 404, and nothing written.
+        std::fs::write(srv.join("meta.json"), &good[..good.len() / 2]).unwrap();
+        std::fs::remove_file(srv.join("meta.json.bak")).unwrap();
+        assert_eq!(count(c.clone(), u_tok.clone()).await.0, 503);
+        assert_eq!(status(&c, &u_tok, "POST", format!("{base}/profiles/p1/lock"), None, "u").await, 503, "not 404: the member keeps their copy");
+        assert_eq!(status(&c, admin, "POST", format!("{base}/profiles/p9/lock"), None, "m").await, 503);
+        assert_eq!(status(&c, admin, "POST", format!("{base}/profiles/p2/delete"), None, "m").await, 503);
+        assert_eq!(std::fs::read(srv.join("meta.json")).unwrap(), &good[..good.len() / 2], "left as it was");
+        assert!(srv.join("bundles").join("p2.zip").exists(), "nothing deleted");
+
+        // 3. Both lost for good (zeros): rebuilt from the bundles, with folders, so rights hold.
+        std::fs::write(srv.join("meta.json"), vec![0u8; good.len()]).unwrap();
+        std::fs::write(srv.join("meta.json.bak"), vec![0u8; 100]).unwrap();
+        assert_eq!(count(c.clone(), u_tok.clone()).await, (200, Some(3)));
+        assert_eq!(meta_map()["p2"]["folder"], "A");
+        assert!(std::fs::read_dir(&srv).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with("meta.json.damaged-")));
+        assert_eq!(status(&c, &u_tok, "POST", format!("{base}/profiles/p3/lock"), None, "u").await, 200);
+        assert_eq!(status(&c, &u_tok, "POST", format!("{base}/profiles/p3/unlock"), None, "u").await, 200);
+
+        // 4. Gone altogether while the bundles are there: rebuilt as well.
+        std::fs::remove_file(srv.join("meta.json")).unwrap();
+        let _ = std::fs::remove_file(srv.join("meta.json.bak"));
+        assert_eq!(count(c.clone(), u_tok.clone()).await, (200, Some(3)));
 
         let _ = stop();
         crate::store::set_data_root(None);
