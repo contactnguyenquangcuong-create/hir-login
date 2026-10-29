@@ -253,6 +253,9 @@ fn unauthorized() -> Response {
         eprintln!("[team-server] members cannot be read ({why}): answering 503, not 401");
         return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"ok":false,"error":"team members cannot be read right now, try again later"}))).into_response();
     }
+    if members_lost_recently() {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"ok":false,"error":"the team server lost its members list (the file was damaged): ask the admin for a new key"}))).into_response();
+    }
     (StatusCode::UNAUTHORIZED, Json(json!({"ok":false,"error":"unauthorized"}))).into_response()
 }
 
@@ -267,6 +270,17 @@ fn members_unreadable() -> Option<String> {
     let holds_profiles = std::fs::read_dir(bundles_dir().ok()?).map(|mut d| d.next().is_some()).unwrap_or(false);
     // (A team run on the admin token alone has no member to tell apart, so nobody loses by it.)
     (!had_members && holds_profiles).then(|| "members.json is missing on a server that holds the team's profiles".to_string())
+}
+
+/// How long after the members were lost an unknown token is still not told 401: the machines that
+/// were members then would take it for being removed and delete the team's profiles.
+const MEMBERS_LOST_GRACE: Duration = Duration::from_secs(30 * 24 * 3600);
+
+fn members_lost_recently() -> bool {
+    let Ok(dir) = server_data_dir() else { return false };
+    AclStore::members_lost_at(&dir)
+        .and_then(|t| SystemTime::now().duration_since(t).ok())
+        .is_some_and(|age| age < MEMBERS_LOST_GRACE)
 }
 
 fn forbidden(reason: &str) -> Response {
@@ -1838,6 +1852,48 @@ mod permission_tests {
         assert_eq!(status(&c, &a_tok, "GET", format!("{base}/admin/members"), None, "").await, 200);
         // The server token (a superior) rotating it FOR them still works fine.
         assert_eq!(put_json(&c, admin, format!("{base}/admin/members"), json!({"id": a_id, "rotate": true})).await.0, 200);
+
+        let _ = stop();
+        crate::store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A PC that stopped mid-save left members.json and its backup filled with zeros. Every member
+    /// added after that was refused with a 500 ("the file on disk cannot be read"), for good. Now
+    /// the admin can add members again, and the machines that were members before still are not
+    /// told 401 (they would delete the team's profiles): they are told to ask for a new key.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_members_file_filled_with_zeros_does_not_block_adding_members_for_good() {
+        let _g = crate::cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-acl-{}", uuid::Uuid::new_v4()));
+        let srv = tmp.join("team-sync");
+        std::fs::create_dir_all(srv.join("bundles")).unwrap();
+        std::fs::write(srv.join("members.json"), vec![0u8; 900]).unwrap();
+        std::fs::write(srv.join("members.json.bak"), vec![0u8; 700]).unwrap();
+        crate::store::set_data_root(Some(tmp.clone()));
+        let admin = "admin-token-123456";
+        let port = start(0, admin.to_string()).await.expect("start");
+        let base = format!("http://127.0.0.1:{port}");
+        let c = reqwest::Client::new();
+
+        let old_member = "hm_a_machine_that_was_a_member_before";
+        assert_eq!(status(&c, old_member, "GET", format!("{base}/me"), None, "").await, 503, "unreadable: not told 401");
+
+        let (code, r) = put_json(&c, admin, format!("{base}/admin/members"), json!({"name": "New", "role": "member"})).await;
+        assert_eq!(code, 200, "{r}");
+        let new_tok = r["token"].as_str().unwrap().to_string();
+        assert_eq!(status(&c, &new_tok, "GET", format!("{base}/me"), None, "").await, 200);
+        assert_eq!(put_json(&c, admin, format!("{base}/admin/members"), json!({"name": "Second", "role": "manager"})).await.0, 200, "and the next one too");
+
+        let resp = c.get(format!("{base}/me")).bearer_auth(old_member).send().await.unwrap();
+        assert_eq!(resp.status().as_u16(), 503, "a machine that was a member is not told it was removed");
+        assert!(resp.text().await.unwrap().contains("new key"));
+        let (_, list) = {
+            let r = c.get(format!("{base}/admin/members")).bearer_auth(admin).send().await.unwrap();
+            (r.status().as_u16(), r.json::<Value>().await.unwrap())
+        };
+        assert_eq!(list["members"].as_array().map(|a| a.len()), Some(2), "{list}");
+        assert!(std::fs::read_dir(&srv).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with("members.json.damaged-")));
 
         let _ = stop();
         crate::store::set_data_root(None);

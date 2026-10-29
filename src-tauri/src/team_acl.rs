@@ -211,10 +211,16 @@ impl AclStore {
     /// Writes the store, keeping the previous good file as `members.json.bak`. Refuses when the file
     /// on disk cannot be read: writing then would replace every member with what this one request
     /// saw (nobody).
+    /// A file and its backup that are both lost for good (each filled with zeros, empty or missing)
+    /// are set aside instead: refusing then would refuse every save from now on, and nobody could be
+    /// added again — the members they held are gone either way.
     pub fn save(&self, dir: &Path) -> std::io::Result<()> {
         let path = dir.join("members.json");
         if let Err(e) = Self::load_checked(dir) {
-            return Err(std::io::Error::other(format!("members not saved: the file on disk cannot be read ({e})")));
+            if !Self::set_aside_if_lost(dir) {
+                return Err(std::io::Error::other(format!("members not saved: the file on disk cannot be read ({e})")));
+            }
+            eprintln!("[team-server] members.json and its backup were lost ({e}): set aside, starting a new members list");
         }
         if let Ok(t) = std::fs::read_to_string(&path) {
             if serde_json::from_str::<AclStore>(&t).is_ok() {
@@ -224,6 +230,38 @@ impl AclStore {
         let tmp = dir.join("members.json.tmp");
         write_durable(&tmp, serde_json::to_string_pretty(self).unwrap_or_default().as_bytes())?;
         crate::winfs::rename_replace(&tmp, &path)
+    }
+
+    /// When neither the members file nor its backup holds anything (filled with zeros or empty, or
+    /// missing — not both missing), renames them to `<name>.damaged-<ms>` and says true. A file that
+    /// is locked, or half-written with real data in it, is left alone: it may still be read.
+    fn set_aside_if_lost(dir: &Path) -> bool {
+        let names = ["members.json", "members.json.bak"];
+        let mut found = Vec::new();
+        for name in names {
+            match std::fs::read(dir.join(name)) {
+                Ok(b) if b.iter().all(|&x| x == 0) => found.push(name),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                _ => return false,
+            }
+        }
+        if found.is_empty() {
+            return false;
+        }
+        let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
+        found.iter().all(|name| std::fs::rename(dir.join(name), dir.join(format!("{name}.damaged-{ms}"))).is_ok())
+    }
+
+    /// When the members were last lost and set aside (`set_aside_if_lost`), if ever. The machines
+    /// that were members then hold tokens the server no longer knows, and must not be told they
+    /// were removed from the team.
+    pub fn members_lost_at(dir: &Path) -> Option<std::time::SystemTime> {
+        std::fs::read_dir(dir)
+            .ok()?
+            .flatten()
+            .filter_map(|e| e.file_name().to_str()?.split_once(".damaged-")?.1.parse::<u64>().ok())
+            .max()
+            .map(|ms| std::time::UNIX_EPOCH + std::time::Duration::from_millis(ms))
     }
 
     /// The member whose token this is, unless they were switched off.
@@ -550,6 +588,30 @@ mod tests {
         assert!(!acl.may_delete_folder(&home, "HuyFb"));
         assert!(acl.may_delete_folder(&home, "Team") && acl.may_delete_folder(&home, "HomeOwn"));
         assert!(acl.may_delete_folder(&owner, "HuyFb"));
+    }
+
+    /// The members file and its backup both filled with zeros by a PC that stopped mid-save: every
+    /// save used to be refused from then on, and nobody could be added to the team again.
+    #[test]
+    fn a_members_file_lost_for_good_is_set_aside_and_saving_works_again() {
+        let dir = std::env::temp_dir().join(format!("hir-acl-lost-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (s, _, _) = store();
+
+        // Real data half-written is not lost: still refused.
+        std::fs::write(dir.join("members.json"), b"{\"members\":[").unwrap();
+        assert!(s.save(&dir).is_err());
+        assert!(AclStore::members_lost_at(&dir).is_none());
+
+        std::fs::write(dir.join("members.json"), vec![0u8; 512]).unwrap();
+        std::fs::write(dir.join("members.json.bak"), vec![0u8; 300]).unwrap();
+        assert!(AclStore::load_checked(&dir).is_err());
+        s.save(&dir).expect("saved over the lost file");
+        assert_eq!(AclStore::load_checked(&dir).unwrap().members.len(), 2);
+        assert!(AclStore::members_lost_at(&dir).is_some());
+        let aside = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().contains(".damaged-")).count();
+        assert_eq!(aside, 2, "both damaged files kept aside");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
 }
