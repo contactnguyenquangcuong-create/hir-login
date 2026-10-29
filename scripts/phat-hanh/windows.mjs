@@ -72,6 +72,12 @@ await put('tai:windows', fileUrl, 'text/plain');
 const live = await (await fetch(`${base}/windows/x86_64/latest.json?t=${Date.now()}`)).json();
 if (live.version !== version || live.signature !== sig) throw new Error('latest.json trên mạng chưa khớp — thử lại sau ít phút');
 
+// Retention rule shared by every app: the Cloudflare store keeps only the 2 newest versions.
+try {
+  const { execFileSync } = await import('child_process');
+  execFileSync(process.execPath, ['D:\\AI\\Extension\\don-kho-cu.js', '--xoa', 'hirlogin'], { stdio: 'inherit' });
+} catch (e) { console.log('Dọn bản cũ không được (không ảnh hưởng bản vừa phát hành): ' + e.message); }
+
 // 5) Keep a copy, tag the release.
 fs.copyFileSync(exe, path.join(GOI, name));
 if (!tagged) sh('git', ['tag', tag]);
