@@ -30,8 +30,6 @@
     tongQuan: '<rect x="3" y="3" width="7" height="8" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="15" width="7" height="6" rx="1.5"/>',
     thietBi: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
     nhanSu: '<circle cx="9" cy="8" r="3.5"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6M16 4.6a3.5 3.5 0 0 1 0 6.8M18 14.4c1.8.8 3 2.6 3 4.6"/>',
-    profile: '<circle cx="12" cy="12" r="9"/><path d="M3.6 9h16.8M3.6 15h16.8M12 3c2.3 2.5 3.5 5.5 3.5 9s-1.2 6.500-3.5 9c-2.300-2.500-3.500-5.500-3.500-9s1.200-6.500 3.500-9z"/>',
-    nhom: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2.500h8a2 2 0 0 1 2 2V18a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
     lichSu: '<path d="M3.500 12a8.500 8.500 0 1 0 2.600-6.100L3.500 8.500M3.500 4v4.500H8M12 7.500V12l3 2"/>',
     baoCao: '<path d="M4 20V10M10 20V4M16 20v-7M21 20H3"/>',
     key: '<circle cx="8" cy="15" r="4.500"/><path d="M11.500 11.500 20 3M16 7l3 3M13.500 9.500l2 2"/>',
@@ -69,6 +67,7 @@
     return `${Math.floor(g / 86400)} ngày trước`;
   }
   function thoiLuong(ms) {
+    if (!(ms > 0)) return '0 giờ';
     const p = Math.max(0, Math.round(ms / 60000));
     if (p < 1) return '< 1 phút';
     if (p < 60) return `${p} phút`;
@@ -150,8 +149,58 @@
     const nut = muc.map(([v, t]) => h('button', { lop: v === chon ? 'bat' : '', type: 'button', 'data-v': v, bam: () => { nut.forEach((x) => x.classList.toggle('bat', x.dataset.v === v)); doi(v); } }, t));
     return h('div', { lop: 'tab-nho', role: 'tablist' }, nut);
   }
-  function chonO(muc, doi, nhan) {
-    return h('select', { lop: 'o', 'aria-label': nhan, onchange: (e) => doi(e.target.value) }, muc.map(([v, t]) => h('option', { value: v }, t)));
+  // Bộ lọc ngày dùng chung cho Báo cáo và Lịch sử: đổi ở trang này, sang trang kia vẫn giữ.
+  // Mọi ngày tính theo giờ Việt Nam, gửi lên server dạng YYYY-MM-DD.
+  const KHOANG_NHANH = [['hom_nay', 'Hôm nay'], ['hom_qua', 'Hôm qua'], ['7n', '7 ngày'], ['30n', '30 ngày'], ['90n', '90 ngày'], ['thang_nay', 'Tháng này'], ['thang_truoc', 'Tháng trước'], ['tuy_chon', 'Tuỳ chọn']];
+  const khoangChon = { loai: '7n', tu: '', den: '' };
+  const isoNgay = (ms) => new Date(ms).toISOString().slice(0, 10);
+  const homNayVN = () => Math.floor((Date.now() + 7 * 3600000) / 86400000) * 86400000;
+  function tinhKhoang(loai) {
+    const nay = homNayVN(), d = new Date(nay), y = d.getUTCFullYear(), m = d.getUTCMonth();
+    const lui = (n) => [isoNgay(nay - (n - 1) * 86400000), isoNgay(nay)];
+    if (loai === 'hom_nay') return lui(1);
+    if (loai === 'hom_qua') return [isoNgay(nay - 86400000), isoNgay(nay - 86400000)];
+    if (loai === '30n') return lui(30);
+    if (loai === '90n') return lui(90);
+    if (loai === 'thang_nay') return [isoNgay(Date.UTC(y, m, 1)), isoNgay(nay)];
+    if (loai === 'thang_truoc') return [isoNgay(Date.UTC(y, m - 1, 1)), isoNgay(Date.UTC(y, m, 0))];
+    return lui(7);
+  }
+  function khoangHien() {
+    const [tu, den] = khoangChon.loai === 'tuy_chon' ? [khoangChon.tu, khoangChon.den] : tinhKhoang(khoangChon.loai);
+    return { tu, den };
+  }
+  const ngayDoc = (iso) => iso.split('-').reverse().join('/');
+  function boLocNgay(doi) {
+    const dau = khoangHien();
+    const chu = h('span', { lop: 'khoang-chu' });
+    function veChu() {
+      const k = khoangHien();
+      const n = Math.round((Date.parse(k.den) - Date.parse(k.tu)) / 86400000) + 1;
+      chu.textContent = k.tu === k.den ? ngayDoc(k.tu) : `${ngayDoc(k.tu)} – ${ngayDoc(k.den)} · ${so(n)} ngày`;
+    }
+    function doiTuy() {
+      if (!oTu.value || !oDen.value) return;
+      const n = (Date.parse(oDen.value) - Date.parse(oTu.value)) / 86400000;
+      if (n < 0) return bao('Ngày bắt đầu phải trước ngày kết thúc', true);
+      if (n >= 366) return bao('Chọn tối đa một năm', true);
+      Object.assign(khoangChon, { loai: 'tuy_chon', tu: oTu.value, den: oDen.value });
+      veChu();
+      doi();
+    }
+    const oTu = h('input', { lop: 'o o-ngay', type: 'date', max: isoNgay(homNayVN()), 'aria-label': 'Từ ngày', giaTri: dau.tu, onchange: doiTuy });
+    const oDen = h('input', { lop: 'o o-ngay', type: 'date', max: isoNgay(homNayVN()), 'aria-label': 'Đến ngày', giaTri: dau.den, onchange: doiTuy });
+    const tuy = h('span', { lop: 'chon-ngay' + (khoangChon.loai === 'tuy_chon' ? '' : ' hidden') }, oTu, h('span', { lop: 'mo' }, 'đến'), oDen);
+    veChu();
+    const tab = tabNho(KHOANG_NHANH, khoangChon.loai, (v) => {
+      tuy.classList.toggle('hidden', v !== 'tuy_chon');
+      if (v === 'tuy_chon') { const k = khoangHien(); oTu.value = k.tu; oDen.value = k.den; Object.assign(khoangChon, { loai: v, tu: k.tu, den: k.den }); veChu(); return; }
+      khoangChon.loai = v;
+      const k = khoangHien(); oTu.value = k.tu; oDen.value = k.den;
+      veChu();
+      doi();
+    });
+    return h('div', { lop: 'loc' }, tab, tuy, chu);
   }
   function phanTrang(trang, moi, tong, doi) {
     const het = Math.max(1, Math.ceil(tong / moi));
@@ -332,21 +381,21 @@
     return h('div', { lop: 'khoi-chong' }, thanh, h('ul', { lop: 'chu-thich' }, muc.map((m) => h('li', null, h('i', { lop: 'o-mau ' + m.mau }), h('span', { lop: 'ten-ct' }, m.ten), h('b', null, m.chu), h('span', { lop: 'mo so-mono' }, phanTram(m.gia))))));
   }
   const chongTheoNen = (ds) => thanhChong(['shopee', 'facebook', 'tiktok', 'google', 'khac'].map((n) => { const r = ds.find((x) => x.nen_tang === n) || { ms: 0 }; return { ten: TEN_NEN[n], gia: r.ms, chu: thoiLuong(r.ms), mau: MAU_NEN[n] }; }).filter((m) => m.gia > 0), 'Giờ dùng theo nền tảng');
-  // Bản đồ nhiệt 7 ngày × 24 giờ: một màu, đậm dần theo số giờ dùng.
+  // Bản đồ nhiệt thứ × giờ, cộng dồn trong khoảng đã chọn: một màu, đậm dần theo số giờ dùng.
+  const TEN_THU = ['Thứ 2', 'Thứ 3', 'Thứ 4', 'Thứ 5', 'Thứ 6', 'Thứ 7', 'CN'];
   function banDoGio(g) {
     const lon = Math.max(0, ...g.o.flat());
-    if (!lon) return trong('Chưa có số liệu', 'Có sau khi cộng sự mở profile.');
+    if (!lon) return trong('Chưa có số liệu', 'Không có lượt dùng nào trong khoảng này.');
     const bac = (ms) => (!ms ? 0 : Math.min(5, Math.ceil((ms / lon) * 5)));
-    const thu = (i) => new Date(g.tu + i * 86400000).toLocaleDateString('vi-VN', { weekday: 'short', timeZone: VN });
     const ve = khungVe(7 * 24 + 26, (W, H) => {
-      const le = 74, tren = 20, cW = (W - le) / 24, cH = 24;
-      const s = v('svg', { width: W, height: H, class: 'bieu-do', role: 'img', 'aria-label': 'Giờ dùng profile theo ngày và giờ, 7 ngày qua' });
+      const le = 44, tren = 20, cW = (W - le) / 24, cH = 24;
+      const s = v('svg', { width: W, height: H, class: 'bieu-do', role: 'img', 'aria-label': 'Giờ dùng profile theo thứ trong tuần và giờ trong ngày' });
       for (let i = 0; i < 24; i += 3) { const t = v('text', { x: le + i * cW + cW / 2, y: 12, 'text-anchor': 'middle' }); t.textContent = `${i}h`; s.append(t); }
       g.o.forEach((hang, d) => {
-        const t = v('text', { x: 0, y: tren + d * cH + 16 }); t.textContent = `${thu(d)} ${ngayNgan(g.tu + d * 86400000)}`; s.append(t);
+        const t = v('text', { x: 0, y: tren + d * cH + 16 }); t.textContent = TEN_THU[d]; s.append(t);
         hang.forEach((ms, i) => {
           const o = v('rect', { x: le + i * cW + 1, y: tren + d * cH + 1, width: Math.max(1, cW - 2), height: cH - 2, rx: 3, class: 'o-nhiet b' + bac(ms) });
-          o.addEventListener('pointermove', (e) => hienMeo(e.clientX, e.clientY, `${thu(d)} ${ngayNgan(g.tu + d * 86400000)}, ${i}h–${i + 1}h`, [{ gia: ms ? thoiLuong(ms) : 'Không dùng', nhan: ms ? 'giờ dùng profile' : '' }]));
+          o.addEventListener('pointermove', (e) => hienMeo(e.clientX, e.clientY, `${TEN_THU[d]}, ${i}h–${i + 1}h`, [{ gia: ms ? thoiLuong(ms) : 'Không dùng', nhan: ms ? 'giờ dùng profile' : '' }]));
           o.addEventListener('pointerleave', anMeo);
           s.append(o);
         });
@@ -362,10 +411,15 @@
   function trangTongQuan(goc) {
     const dai = h('div', { lop: 'dai-so' });
     const dangMo = h('div'), tuong = h('div'), hoatDong = h('div'), chuY = h('div');
-    const bdXuHuong = h('div'), bdNen = h('div'), bdMay = h('div');
+    const bdXuHuong = h('div'), bdNen = h('div'), bdMay = h('div'), phuSong = h('div');
+    // Số máy đã kích hoạt key, lấy từ kho key: hỏi một lần khi mở trang, không theo nhịp làm mới.
+    let daKichHoat = null;
+    key({ viec: 'danhSach' }).then((r) => { daKichHoat = r.hang.reduce((n, k) => n + (k.kich_hoat || []).length, 0); veMoi(); }).catch(() => {});
+    let veMoi = () => {};
     const demMo = h('span', { lop: 'nhan cam' }, '0'), demMay = h('span', { lop: 'mo' });
     const capNhat = h('span', { lop: 'nhan' }, h('span', { lop: 'cham song' }), 'Đang nhận dữ liệu');
     goc.append(dauTrang('Tổng quan', 'Toàn bộ máy cài Hir-Login của công ty, gộp về một chỗ.', [capNhat, h('button', { lop: 'nut chinh-nut', bam: () => moTaoKey(() => { dieuHuong('key'); }) }, bieu('cong'), 'Tạo key')]),
+      phuSong,
       dai,
       h('div', { lop: 'luoi-2 co-duoi' },
         h('section', { lop: 'khoi' }, h('div', { lop: 'dau-khoi' }, h('h2', null, 'Giờ dùng profile, 14 ngày qua')), h('div', { lop: 'than-khoi' }, bdXuHuong)),
@@ -374,7 +428,7 @@
           h('section', { lop: 'khoi' }, h('div', { lop: 'dau-khoi' }, h('h2', null, 'Tình trạng thiết bị')), h('div', { lop: 'than-khoi' }, bdMay)))),
       h('div', { lop: 'luoi-2' },
         h('div', { lop: 'cot' },
-          h('section', { lop: 'khoi' }, h('div', { lop: 'dau-khoi' }, h('h2', null, 'Đang sử dụng', demMo), h('button', { lop: 'lien-ket', bam: () => dieuHuong('profile') }, 'Mọi profile →')), dangMo),
+          h('section', { lop: 'khoi' }, h('div', { lop: 'dau-khoi' }, h('h2', null, 'Đang sử dụng', demMo)), dangMo),
           h('section', { lop: 'khoi' }, h('div', { lop: 'dau-khoi' }, h('h2', null, 'Thiết bị', demMay), h('button', { lop: 'lien-ket', bam: () => dieuHuong('thietBi') }, 'Chi tiết →')), tuong)),
         h('div', { lop: 'cot' },
           chuY,
@@ -389,6 +443,13 @@
       async nap() {
         const [q, tb] = await Promise.all([doc('tongQuan'), doc('thietBi')]);
         const s = q.so;
+        // Máy cài bản cũ chưa gửi báo cáo: nói rõ, để số 0 không bị hiểu là không có ai dùng.
+        veMoi = () => {
+          const baoCao = tb.hang.filter((m) => m.key.startsWith('HLG-')).length;
+          xoa(phuSong);
+          if (daKichHoat != null && baoCao < daKichHoat) phuSong.append(h('div', { lop: 'bao-phu' }, h('b', null, `Mới có ${so(baoCao)} trên ${so(daKichHoat)} máy đã kích hoạt key gửi báo cáo.`), ' Các số bên dưới chỉ tính những máy này. Máy khác sẽ xuất hiện sau khi cập nhật Hir-Login lên bản 0.2.43 trở lên.'));
+        };
+        veMoi();
         xoa(dai).append(
           oSo('Tổng profile', so(s.tong_profile), soSanh(s.tong_profile, s.tong_profile_truoc, 'tổng trên các máy')),
           oSo('Đang sử dụng', so(s.dang_su_dung), s.tong_profile ? `${(Math.round((s.dang_su_dung / s.tong_profile) * 1000) / 10).toLocaleString('vi-VN')}% tổng profile` : 'không có profile', true),
@@ -501,40 +562,6 @@
     return { nap };
   }
 
-  // ----- Profile -----
-  function trangProfile(goc) {
-    const than = h('div', { lop: 'khoi' });
-    const loc = { tim: '', nen_tang: '', trang_thai: '', nhom: '', trang: 1 };
-    const tabHolder = h('span');
-    const chonNhom = h('select', { lop: 'o', 'aria-label': 'Folder', onchange: (e) => { loc.nhom = e.target.value; loc.trang = 1; nap(); } }, h('option', { value: '' }, 'Mọi folder'));
-    goc.append(dauTrang('Profile', 'Các profile đã được mở. Dữ liệu trong profile không được đưa lên đây.'),
-      h('div', { lop: 'loc' }, oTim((v) => { loc.tim = v; loc.trang = 1; nap(); }, 'Tìm tên, folder…'), tabHolder,
-        tabNho([['', 'Tất cả'], ['dang_dung', 'Đang mở'], ['khong_mo', 'Không mở']], '', (v) => { loc.trang_thai = v; loc.trang = 1; nap(); }), chonNhom),
-      than);
-    let daDungTab = false;
-    async function nap() {
-      const d = await doc('profiles', loc);
-      if (!daDungTab) {
-        daDungTab = true;
-        const tong = Object.values(d.theo_nen).reduce((a, b) => a + b, 0);
-        const muc = [['', `Tất cả ${so(tong)}`]].concat(['shopee', 'facebook', 'tiktok', 'google', 'khac'].filter((n) => d.theo_nen[n]).map((n) => [n, `${TEN_NEN[n]} ${so(d.theo_nen[n])}`]));
-        xoa(tabHolder).append(tabNho(muc, '', (v) => { loc.nen_tang = v; loc.trang = 1; nap(); }));
-        d.nhom.forEach((n) => chonNhom.append(h('option', { value: n }, n)));
-      }
-      them(xoa(than), d.hang.length
-        ? [bang(['Profile', 'Nền tảng', 'Trạng thái', 'Người dùng', 'Thiết bị', 'Mở lần cuối', { t: 'Lượt', lop: 'phai' }], d.hang, (p) => [
-          profileChip(p.ten, p.thu_muc, p.nen_tang),
-          h('span', { lop: 'phu' }, TEN_NEN[p.nen_tang]),
-          p.dang_dung ? nhanTrang('Đang mở', 'cam') : nhanTrang('Không mở'),
-          p.dang_dung ? h('span', null, p.dang_dung.nhan_su, h('span', { lop: 'mo' }, ` · ${thoiLuong(Date.now() - p.dang_dung.tu_luc)}`)) : h('span', { lop: 'phu' }, p.cuoi_nguoi),
-          h('span', { lop: 'phu' }, p.dang_dung ? p.dang_dung.ten_may : p.cuoi_may),
-          h('span', { lop: 'phu' }, luc(p.cuoi)),
-          h('td', { lop: 'phai so-mono' }, so(p.luot)),
-        ], (p) => moChiTietProfile(p.id, p.ten)), phanTrang(d.trang, d.moi, d.tong, (t) => { loc.trang = t; nap(); })]
-        : trong('Chưa có profile nào được mở', 'Profile xuất hiện ở đây sau lần mở đầu tiên.'));
-    }
-    return { nap };
-  }
   async function moChiTietProfile(id, ten) {
     const d = await doc('chiTietProfile', { id });
     moNgan(ten || 'Profile', id, [
@@ -542,44 +569,31 @@
     ]);
   }
 
-  // ----- Nhóm -----
-  function trangNhom(goc) {
-    const nhom = h('div', { lop: 'khoi' }), mayChu = h('div', { lop: 'khoi' });
-    goc.append(dauTrang('Nhóm', 'Folder có profile được mở, và các máy chủ team của công ty.'), h('div', { lop: 'luoi-2' },
-      h('section', { lop: 'khoi' }, h('div', { lop: 'dau-khoi' }, h('h2', null, 'Folder')), nhom),
-      h('section', { lop: 'khoi' }, h('div', { lop: 'dau-khoi' }, h('h2', null, 'Máy chủ team')), mayChu)));
-    return {
-      async nap() {
-        const d = await doc('nhom');
-        xoa(nhom).append(d.hang.length ? bang(['Folder', { t: 'Profile đã mở', lop: 'phai' }, { t: 'Đang mở', lop: 'phai' }, { t: 'Người', lop: 'phai' }, { t: 'Máy', lop: 'phai' }], d.hang, (r) => [
-          h('span', { lop: 'dong-chinh' }, r.thu_muc || 'Không folder'), h('td', { lop: 'phai so-mono' }, so(r.so_profile)), h('td', { lop: 'phai so-mono' }, r.dang_dung ? nhanTrang(r.dang_dung, 'cam') : '0'), h('td', { lop: 'phai so-mono' }, so(r.so_nguoi)), h('td', { lop: 'phai so-mono' }, so(r.so_may)),
-        ]) : trong('Chưa có folder', 'Có sau lần mở profile đầu tiên.'));
-        xoa(mayChu).append(d.may_chu.length ? bang(['Máy chủ', { t: 'Máy bật', lop: 'phai' }], d.may_chu, (r) => [h('span', { lop: 'mono cat' }, r.may_chu || 'Không nối máy chủ'), h('td', { lop: 'phai so-mono' }, `${r.truc_tuyen}/${r.so_may}`)]) : trong('Chưa có', ''));
-      },
-    };
-  }
-
   // ----- Lịch sử -----
   function trangLichSu(goc) {
     const than = h('div', { lop: 'khoi' });
-    const loc = { ngay: 7, viec: '', tim: '', trang: 1 };
+    const loc = { viec: '', tim: '', trang: 1 };
+    let luot = 0;
     const chonViec = h('select', { lop: 'o', 'aria-label': 'Hành động', onchange: (e) => { loc.viec = e.target.value; loc.trang = 1; nap(); } }, h('option', { value: '' }, 'Mọi hành động'));
     let biet = new Set();
     goc.append(dauTrang('Lịch sử sử dụng', 'Ai mở profile nào, lúc nào, trên máy nào.', h('button', { lop: 'nut', bam: xuat }, bieu('tai'), 'Xuất Excel')),
-      h('div', { lop: 'loc' }, oTim((v) => { loc.tim = v; loc.trang = 1; nap(); }, 'Tìm người, profile, máy…'),
-        tabNho([[1, 'Hôm nay'], [7, '7 ngày'], [30, '30 ngày'], [90, '90 ngày']], 7, (v) => { loc.ngay = v; loc.trang = 1; nap(); }), chonViec), than);
+      boLocNgay(() => { loc.trang = 1; than.classList.add('dang-tai'); nap().catch((e) => bao(e.message, true)); }),
+      h('div', { lop: 'loc' }, oTim((v) => { loc.tim = v; loc.trang = 1; nap(); }, 'Tìm người, profile, máy…'), chonViec), than);
     async function nap() {
-      const d = await doc('lichSu', loc);
+      const me = ++luot;
+      const d = await doc('lichSu', { ...loc, ...khoangHien() });
+      if (me !== luot) return;
+      than.classList.remove('dang-tai');
       d.viec.forEach((v) => { if (!biet.has(v)) { biet.add(v); chonViec.append(h('option', { value: v }, v)); } });
       them(xoa(than), d.hang.length
         ? [bang(['Thời gian', 'Cộng sự', 'Hành động', 'Đối tượng', 'Máy'], d.hang, (n) => [
           h('span', { lop: 'so-mono phu' }, ngayGio(n.luc)), h('span', { lop: 'dong-chinh' }, n.nhan_su || 'Hệ thống'), n.viec,
           h('span', { lop: 'cat phu', title: n.doi_tuong }, n.doi_tuong || '—'), h('span', { lop: 'phu' }, n.ten_may || '—'),
         ]), phanTrang(d.trang, d.moi, d.tong, (t) => { loc.trang = t; nap(); })]
-        : trong('Không có dòng nào', 'Thử đổi khoảng thời gian.'));
+        : trong('Không có dòng nào', 'Thử chọn khoảng ngày khác.'));
     }
     async function xuat() {
-      const d = await doc('lichSu', { ...loc, trang: 1, moi: 5000 });
+      const d = await doc('lichSu', { ...loc, ...khoangHien(), trang: 1, moi: 5000 });
       const o = (s) => `"${String(s == null ? '' : s).replace(/"/g, '""')}"`;
       const dong = [['Thời gian', 'Cộng sự', 'Hành động', 'Đối tượng', 'Folder', 'Máy'].map(o).join(',')].concat(d.hang.map((n) => [ngayDu(n.luc) + ' ' + gio(n.luc), n.nhan_su, n.viec, n.doi_tuong, n.chi_tiet, n.ten_may].map((x) => o(/^[=+\-@]/.test(String(x)) ? "'" + x : x)).join(',')));
       const a = h('a', { href: URL.createObjectURL(new Blob(['﻿' + dong.join('\r\n')], { type: 'text/csv;charset=utf-8' })), download: `lich-su-hirlogin-${Date.now()}.csv` });
@@ -592,26 +606,31 @@
   // ----- Báo cáo -----
   function trangBaoCao(goc) {
     const than = h('div', { lop: 'cot' });
-    let ngay = 7;
-    goc.append(dauTrang('Báo cáo', 'Thời gian dùng profile, tính từ các phiên mở và đóng.', tabNho([[7, '7 ngày'], [30, '30 ngày'], [90, '90 ngày']], 7, (v) => { ngay = v; nap(); })), than);
+    let luot0 = 0;
+    goc.append(dauTrang('Báo cáo', 'Thời gian dùng profile, tính từ các phiên mở và đóng.'),
+      boLocNgay(() => { than.classList.add('dang-tai'); nap().catch((e) => bao(e.message, true)); }), than);
     async function nap() {
-      const d = await doc('baoCaoSo', { ngay });
+      const me = ++luot0;
+      const d = await doc('baoCaoSo', khoangHien());
+      if (me !== luot0) return;
+      than.classList.remove('dang-tai');
       const tong = d.theo_ngay.reduce((a, x) => a + x.ms, 0), luot = d.theo_ngay.reduce((a, x) => a + x.luot, 0);
       const lon = Math.max(1, ...d.theo_nguoi.map((n) => n.ms));
       xoa(than).append(
-        h('div', { lop: 'dai-so' }, [['Tổng giờ dùng', thoiLuong(tong), `${ngay} ngày qua`], ['Lượt mở', so(luot), 'tổng cộng'], ['Cộng sự có dùng', so(d.theo_nguoi.length), 'có ít nhất 1 lượt'], ['Profile có dùng', so(d.so_profile), 'có ít nhất 1 lượt'], ['TB mỗi ngày', thoiLuong(tong / ngay), 'giờ dùng']].map(([a, b, c]) => h('div', { lop: 'o-so' }, h('div', { lop: 'nhan-so' }, a), h('div', { lop: 'so' }, b), h('div', { lop: 'ghi' }, c)))),
+        d.tu < Date.now() - d.giu_ngay * 86400000 ? h('div', { lop: 'ghi-khoang' }, `Lịch sử chỉ giữ ${d.giu_ngay} ngày nên phần cũ hơn không có số liệu. Đổi được trong Cài đặt.`) : '',
+        h('div', { lop: 'dai-so' }, [['Tổng giờ dùng', thoiLuong(tong), `trong ${so(d.so_ngay)} ngày`], ['Lượt mở', so(luot), 'tổng cộng'], ['Cộng sự có dùng', so(d.theo_nguoi.length), 'có ít nhất 1 lượt'], ['Profile có dùng', so(d.so_profile), 'có ít nhất 1 lượt'], ['TB mỗi ngày', thoiLuong(tong / d.so_ngay), 'giờ dùng']].map(([a, b, c]) => h('div', { lop: 'o-so' }, h('div', { lop: 'nhan-so' }, a), h('div', { lop: 'so' }, b), h('div', { lop: 'ghi' }, c)))),
         h('section', { lop: 'khoi' }, h('div', { lop: 'dau-khoi' }, h('h2', null, 'Giờ dùng profile theo ngày')), h('div', { lop: 'than-khoi' },
-          cotTheoNgay(d.theo_ngay, 'Giờ dùng profile theo ngày', (x) => soGio(x.ms), nhanGio, (x) => [{ gia: thoiLuong(x.ms), nhan: 'giờ dùng' }, { gia: so(x.luot), nhan: 'lượt mở' }, { gia: so(x.nguoi), nhan: 'cộng sự' }]),
+          !tong ? trong('Chưa có số liệu', 'Không có lượt dùng nào trong khoảng này.') : cotTheoNgay(d.theo_ngay, 'Giờ dùng profile theo ngày', (x) => soGio(x.ms), nhanGio, (x) => [{ gia: thoiLuong(x.ms), nhan: 'giờ dùng' }, { gia: so(x.luot), nhan: 'lượt mở' }, { gia: so(x.nguoi), nhan: 'cộng sự' }]),
           xemBang(['Ngày', { t: 'Giờ dùng', lop: 'phai' }, { t: 'Lượt', lop: 'phai' }, { t: 'Cộng sự', lop: 'phai' }, { t: 'Profile', lop: 'phai' }], [...d.theo_ngay].reverse(), (x) => [ngayDu(x.ngay), h('td', { lop: 'phai so-mono' }, thoiLuong(x.ms)), h('td', { lop: 'phai so-mono' }, so(x.luot)), h('td', { lop: 'phai so-mono' }, so(x.nguoi)), h('td', { lop: 'phai so-mono' }, so(x.profile))]))),
         h('div', { lop: 'luoi-2' },
-          h('section', { lop: 'khoi' }, h('div', { lop: 'dau-khoi' }, h('h2', null, 'Giờ nào dùng nhiều, 7 ngày qua')), h('div', { lop: 'than-khoi' }, banDoGio(d.theo_gio))),
+          h('section', { lop: 'khoi' }, h('div', { lop: 'dau-khoi' }, h('h2', null, 'Giờ nào dùng nhiều, theo thứ trong tuần')), h('div', { lop: 'than-khoi' }, banDoGio(d.theo_gio))),
           h('section', { lop: 'khoi' }, h('div', { lop: 'dau-khoi' }, h('h2', null, 'Theo nền tảng')), h('div', { lop: 'than-khoi' }, chongTheoNen(d.theo_nen)))),
         h('section', { lop: 'khoi' }, h('div', { lop: 'dau-khoi' }, h('h2', null, 'Cao nhất mỗi ngày: máy bật và profile mở cùng lúc')), h('div', { lop: 'than-khoi' },
           d.dinh.length >= 2
             ? [h('ul', { lop: 'chu-thich ngang' }, h('li', null, h('i', { lop: 'o-mau mau-1' }), h('span', { lop: 'ten-ct' }, 'Profile mở cùng lúc')), h('li', null, h('i', { lop: 'o-mau mau-2' }), h('span', { lop: 'ten-ct' }, 'Máy bật'))),
               duongTheoNgay(d.dinh, [{ ten: 'profile mở cùng lúc', gia: (x) => x.dang_mo, mau: 'mau-1', dinhDang: so }, { ten: 'máy bật', gia: (x) => x.may_bat, mau: 'mau-2', dinhDang: so }], 'Số máy bật và số profile mở cùng lúc cao nhất mỗi ngày', nhanSoGon),
               xemBang(['Ngày', { t: 'Profile mở', lop: 'phai' }, { t: 'Máy bật', lop: 'phai' }], [...d.dinh].reverse(), (x) => [ngayDu(x.ngay), h('td', { lop: 'phai so-mono' }, so(x.dang_mo)), h('td', { lop: 'phai so-mono' }, so(x.may_bat))])]
-            : trong('Đang thu thập', 'Số này được ghi từng ngày, biểu đồ có từ ngày thứ hai.'))),
+            : trong('Chưa đủ số liệu', 'Cần ít nhất hai ngày có số liệu trong khoảng này.'))),
         h('div', { lop: 'luoi-2' },
           h('section', { lop: 'khoi' }, h('div', { lop: 'dau-khoi' }, h('h2', null, 'Theo cộng sự')), d.theo_nguoi.length ? bang(['Cộng sự', { t: 'Lượt', lop: 'phai' }, { t: 'Profile', lop: 'phai' }, { t: 'Giờ dùng', lop: 'phai' }], d.theo_nguoi, (n) => {
             const thanh = h('i'); thanh.style.width = `${Math.round((n.ms / lon) * 100)}%`;
@@ -619,7 +638,7 @@
           }) : trong('Chưa có số liệu', '')),
           h('section', { lop: 'khoi' }, h('div', { lop: 'dau-khoi' }, h('h2', null, 'Profile dùng nhiều')), d.theo_profile.length ? bang(['Profile', { t: 'Giờ dùng', lop: 'phai' }], d.theo_profile, (p) => [profileChip(p.ten, `${p.so_nguoi} người · ${p.luot} lượt`, p.nen_tang), h('td', { lop: 'phai so-mono' }, thoiLuong(p.ms))]) : trong('Chưa có số liệu', ''))));
     }
-    return { nap };
+    return { nap, thua: true };
   }
 
   // ----- Key -----
@@ -756,8 +775,8 @@
 
   // ---- Khung ứng dụng ----
   const NAV = [
-    ['Giám sát', [['tongQuan', 'Tổng quan', trangTongQuan], ['thietBi', 'Thiết bị', trangThietBi], ['nhanSu', 'Cộng sự', trangNhanSu], ['profile', 'Profile', trangProfile]]],
-    ['Dữ liệu', [['nhom', 'Nhóm', trangNhom], ['lichSu', 'Lịch sử', trangLichSu], ['baoCao', 'Báo cáo', trangBaoCao]]],
+    ['Giám sát', [['tongQuan', 'Tổng quan', trangTongQuan], ['thietBi', 'Thiết bị', trangThietBi], ['nhanSu', 'Cộng sự', trangNhanSu]]],
+    ['Dữ liệu', [['lichSu', 'Lịch sử', trangLichSu], ['baoCao', 'Báo cáo', trangBaoCao]]],
     ['Hệ thống', [['key', 'Key', trangKey], ['caiDat', 'Cài đặt', trangCaiDat]]],
   ];
   let trangHien = null, hen = null;

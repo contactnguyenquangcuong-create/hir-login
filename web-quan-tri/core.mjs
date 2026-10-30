@@ -226,37 +226,57 @@ function banMoi(sql) {
 
 // ---- Số liệu cho biểu đồ ----
 const MS_PHIEN = 'sum(min(coalesce(ket_thuc, ?), ?) - max(bat_dau, ?))';
+const TRONG_KHOANG = 'bat_dau < ? and coalesce(ket_thuc, ?) > ?';
+const VN_MS = 7 * 3600000;
+const KHOANG_TOI_DA = 366;
 
-function theoNgay(sql, ngay, bay) {
-  const tu = dauNgay(bay) - (ngay - 1) * NGAY;
+const ngayVN = (s) => {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(s || ''));
+  return m ? Date.UTC(+m[1], +m[2] - 1, +m[3]) - VN_MS : null;
+};
+
+// Khoảng ngày (giờ Việt Nam) trình duyệt gửi lên: tu, den dạng YYYY-MM-DD, tính cả ngày den. Trả { tu, den, so_ngay },
+// den là mốc NGAY SAU ngày cuối. Sai dạng thì lấy 7 ngày gần nhất; không vượt quá hôm nay và quá một năm.
+export function khoang(a, bay) {
+  const homNay = dauNgay(bay);
+  let tu = ngayVN(a.tu), den = ngayVN(a.den);
+  if (tu == null || den == null || den < tu) {
+    den = homNay;
+    tu = homNay - (Math.min(Math.max(1, Number(a.ngay) || 7), KHOANG_TOI_DA) - 1) * NGAY;
+  }
+  den = Math.min(den + NGAY, homNay + NGAY);
+  tu = Math.max(tu, den - KHOANG_TOI_DA * NGAY);
+  if (tu >= den) tu = den - NGAY;
+  return { tu, den, so_ngay: Math.round((den - tu) / NGAY) };
+}
+
+function theoNgay(sql, tu, den, bay) {
   const ds = [];
-  for (let i = 0; i < ngay; i++) {
-    const d = tu + i * NGAY, c = Math.min(d + NGAY, bay);
+  for (let d = tu; d < den; d += NGAY) {
+    const c = Math.min(d + NGAY, bay);
     const r = sql(`select count(distinct key) nguoi, count(distinct profile_id) profile, ${MS_PHIEN} ms from phien where bat_dau < ? and coalesce(ket_thuc, ?) > ?`, c, c, d, c, bay, d)[0];
     ds.push({ ngay: d, nguoi: r.nguoi, profile: r.profile, ms: r.ms || 0, luot: sql('select count(*) n from phien where bat_dau >= ? and bat_dau < ?', d, d + NGAY)[0].n });
   }
   return ds;
 }
 
-const theoNen = (sql, tu, bay) => sql(`select nen_tang, count(*) luot, ${MS_PHIEN} ms from phien where coalesce(ket_thuc, ?) > ? group by nen_tang`, bay, bay, tu, bay, tu).map((r) => ({ ...r, ms: r.ms || 0 }));
+const theoNen = (sql, tu, den, bay) => sql(`select nen_tang, count(*) luot, ${MS_PHIEN} ms from phien where ${TRONG_KHOANG} group by nen_tang`, bay, Math.min(den, bay), tu, den, bay, tu).map((r) => ({ ...r, ms: r.ms || 0 }));
 
-// Ma trận 7 ngày × 24 giờ (giờ Việt Nam): mili-giây dùng profile trong từng ô.
-function oTheoGio(sql, bay) {
-  const homNay = dauNgay(bay);
-  const tu = homNay - 6 * NGAY;
+// Ma trận thứ × giờ (giờ Việt Nam, hàng 0 là thứ 2): mili-giây dùng profile, cộng dồn trong khoảng đã chọn.
+function oTheoGio(sql, tu, den, bay) {
   const o = Array.from({ length: 7 }, () => new Array(24).fill(0));
-  for (const r of sql('select bat_dau, coalesce(ket_thuc, ?) kt from phien where coalesce(ket_thuc, ?) > ? and bat_dau < ? limit 50000', bay, bay, tu, bay)) {
+  const cuoi = Math.min(den, bay);
+  for (const r of sql(`select bat_dau, coalesce(ket_thuc, ?) kt from phien where ${TRONG_KHOANG} limit 50000`, bay, den, bay, tu)) {
     let t = Math.max(r.bat_dau, tu);
-    const het = Math.min(r.kt, bay);
+    const het = Math.min(r.kt, cuoi);
     while (t < het) {
-      const lech = t - tu, d = Math.floor(lech / NGAY), g = Math.floor((lech % NGAY) / 3600000);
-      const cuoiGio = tu + d * NGAY + (g + 1) * 3600000;
-      const den = Math.min(het, cuoiGio);
-      if (d >= 0 && d < 7) o[d][g] += den - t;
-      t = den;
+      const vn = t + VN_MS, d = Math.floor(vn / NGAY), trongNgay = vn - d * NGAY;
+      const sau = Math.min(het, t - (trongNgay % 3600000) + 3600000);
+      o[(d + 3) % 7][Math.floor(trongNgay / 3600000)] += sau - t; // 1/1/1970 là thứ 5
+      t = sau;
     }
   }
-  return { tu, o };
+  return { o };
 }
 
 export function canhBao(sql, bay) {
@@ -293,8 +313,8 @@ export const DOC = {
       },
       dang_dung: dangDung,
       hoat_dong: sql('select * from nhat_ky order by luc desc, id desc limit 12'),
-      xu_huong: theoNgay(sql, 14, bay),
-      theo_nen: theoNen(sql, thang, bay),
+      xu_huong: theoNgay(sql, dauNgay(bay) - 13 * NGAY, dauNgay(bay) + NGAY, bay),
+      theo_nen: theoNen(sql, thang, dauNgay(bay) + NGAY, bay),
       may_tt: {
         dang_mo: dem('select count(distinct d.ma_may) n from dang_mo d join may m on m.ma_may = d.ma_may where m.truc_tuyen = 1'),
         bat: dem('select count(*) n from may where truc_tuyen = 1'),
@@ -302,29 +322,6 @@ export const DOC = {
       },
       canh_bao: cb,
     };
-  },
-
-  // Trang Profile lấy từ lịch sử mở: máy không gửi danh sách profile.
-  profiles(sql, a) {
-    const dk = [], ts = [];
-    if (a.tim) { dk.push("(p.ten like ? escape '\\' or p.thu_muc like ? escape '\\')"); const s = '%' + String(a.tim).replace(/[\\%_]/g, (c) => '\\' + c) + '%'; ts.push(s, s); }
-    if (a.nen_tang) { dk.push('p.nen_tang = ?'); ts.push(a.nen_tang); }
-    if (a.nhom) { dk.push('p.thu_muc = ?'); ts.push(a.nhom); }
-    if (a.trang_thai === 'dang_dung') dk.push('exists (select 1 from dang_mo d where d.id = p.profile_id)');
-    if (a.trang_thai === 'khong_mo') dk.push('not exists (select 1 from dang_mo d where d.id = p.profile_id)');
-    const where = dk.length ? 'where ' + dk.join(' and ') : '';
-    const trang = Math.max(1, Number(a.trang) || 1), moi = Math.min(100, Number(a.moi) || 30);
-    const tong = sql(`select count(distinct p.profile_id) n from phien p ${where}`, ...ts)[0].n;
-    const hang = sql(`select p.profile_id id, max(p.ten) ten, max(p.thu_muc) thu_muc, max(p.nen_tang) nen_tang, count(*) luot, max(p.bat_dau) cuoi from phien p ${where} group by p.profile_id order by cuoi desc limit ? offset ?`, ...ts, moi, (trang - 1) * moi);
-    const out = hang.map((p) => {
-      const d = sql('select d.tu_luc, m.nhan_su, m.ten_may from dang_mo d join may m on m.ma_may = d.ma_may where d.id = ? order by d.tu_luc desc limit 1', p.id)[0];
-      const c = sql('select nhan_su, ten_may from phien where profile_id = ? order by bat_dau desc limit 1', p.id)[0];
-      return { ...p, dang_dung: d || null, cuoi_nguoi: c ? c.nhan_su : '', cuoi_may: c ? c.ten_may : '' };
-    });
-    const theoNen = {};
-    for (const r of sql('select nen_tang, count(distinct profile_id) n from phien group by nen_tang')) theoNen[r.nen_tang] = r.n;
-    const nhom = sql("select distinct thu_muc from phien where thu_muc <> '' order by thu_muc limit 300").map((r) => r.thu_muc);
-    return { tong, trang, moi, hang: out, theo_nen: theoNen, nhom };
   },
 
   chiTietProfile(sql, a) {
@@ -369,16 +366,9 @@ export const DOC = {
     };
   },
 
-  nhom(sql) {
-    const mo = new Map(sql("select thu_muc, count(distinct id) n from dang_mo group by thu_muc").map((r) => [r.thu_muc, r.n]));
-    const hang = sql('select thu_muc, count(distinct profile_id) so_profile, count(distinct ma_may) so_may, count(distinct key) so_nguoi, count(*) luot from phien group by thu_muc order by luot desc limit 300')
-      .map((r) => ({ ...r, dang_dung: mo.get(r.thu_muc) || 0 }));
-    const may_chu = sql(`select may_chu, count(*) so_may, sum(truc_tuyen) truc_tuyen, sum(tong_profile) tong_profile from may group by may_chu order by so_may desc`);
-    return { hang, may_chu };
-  },
-
   lichSu(sql, a, bay) {
-    const dk = ['luc >= ?'], ts = [bay - Math.min(Number(a.ngay) || 7, 366) * NGAY];
+    const k = khoang(a, bay);
+    const dk = ['luc >= ?', 'luc < ?'], ts = [k.tu, k.den];
     if (a.viec) { dk.push('viec = ?'); ts.push(a.viec); }
     if (a.tim) { dk.push("(nhan_su like ? escape '\\' or doi_tuong like ? escape '\\' or ten_may like ? escape '\\')"); const s = '%' + String(a.tim).replace(/[\\%_]/g, (c) => '\\' + c) + '%'; ts.push(s, s, s); }
     const trang = Math.max(1, Number(a.trang) || 1), moi = Math.min(Number(a.moi) || 50, 5000);
@@ -391,17 +381,17 @@ export const DOC = {
   },
 
   baoCaoSo(sql, a, bay) {
-    const ngay = Math.min(Number(a.ngay) || 7, 90);
-    const tu = dauNgay(bay) - (ngay - 1) * NGAY;
-    const ms = MS_PHIEN;
+    const { tu, den, so_ngay } = khoang(a, bay);
+    const ms = [bay, Math.min(den, bay), tu], dk = [den, bay, tu];
     return {
-      ngay, tu, theo_ngay: theoNgay(sql, ngay, bay),
-      so_profile: sql('select count(distinct profile_id) n from phien where coalesce(ket_thuc, ?) > ?', bay, tu)[0].n,
-      theo_nen: theoNen(sql, tu, bay),
-      theo_gio: oTheoGio(sql, bay),
-      dinh: sql('select * from dinh_ngay where ngay >= ? order by ngay', tu),
-      theo_nguoi: sql(`select nhan_su, key, count(*) luot, count(distinct profile_id) so_profile, ${ms} ms from phien where coalesce(ket_thuc, ?) > ? group by key order by ms desc limit 200`, bay, bay, tu, bay, tu),
-      theo_profile: sql(`select max(ten) ten, max(thu_muc) thu_muc, max(nen_tang) nen_tang, count(*) luot, count(distinct key) so_nguoi, ${ms} ms from phien where coalesce(ket_thuc, ?) > ? group by profile_id order by ms desc limit 20`, bay, bay, tu, bay, tu),
+      tu, den, so_ngay, giu_ngay: cauHinh(sql).giu_ngay,
+      theo_ngay: theoNgay(sql, tu, den, bay),
+      so_profile: sql(`select count(distinct profile_id) n from phien where ${TRONG_KHOANG}`, ...dk)[0].n,
+      theo_nen: theoNen(sql, tu, den, bay),
+      theo_gio: oTheoGio(sql, tu, den, bay),
+      dinh: sql('select * from dinh_ngay where ngay >= ? and ngay < ? order by ngay', tu, den),
+      theo_nguoi: sql(`select nhan_su, key, count(*) luot, count(distinct profile_id) so_profile, ${MS_PHIEN} ms from phien where ${TRONG_KHOANG} group by key order by ms desc limit 200`, ...ms, ...dk),
+      theo_profile: sql(`select max(ten) ten, max(thu_muc) thu_muc, max(nen_tang) nen_tang, count(*) luot, count(distinct key) so_nguoi, ${MS_PHIEN} ms from phien where ${TRONG_KHOANG} group by profile_id order by ms desc limit 20`, ...ms, ...dk),
     };
   },
 

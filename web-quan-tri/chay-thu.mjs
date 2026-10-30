@@ -73,7 +73,7 @@ async function mau({ env, sql, HIR_KEY }) {
   NGUOI.forEach(([ho, may], i) => {
     HIR_KEY.the.set(k(i), { key: k(i), ghi_chu: `Team ${thuMuc[i % 5]}`, het_han: i === 2 ? new Date(Date.now() + 3 * 86400000).toISOString() : i === 6 ? new Date(Date.now() - 86400000).toISOString() : null, so_may: 2, khoa: i === 7, tao_luc: new Date().toISOString(), ho_ten: ho, gmail: '', zalo: `09${i}1234567`, kich_hoat: [{ ma_may: `may-may-may-may-${i}`, ten_may: may, lan_dau: new Date().toISOString(), lan_cuoi: new Date().toISOString() }] });
   });
-  HIR_KEY.the.set('HLG-MOIT-ABCD-0000', { key: 'HLG-MOIT-ABCD-0000', ghi_chu: 'Chưa phát', het_han: null, so_may: 1, khoa: false, tao_luc: new Date().toISOString(), ho_ten: '', gmail: '', zalo: '', kich_hoat: [] });
+  HIR_KEY.the.set('HLG-MOIT-ABCD-0000', { key: 'HLG-MOIT-ABCD-0000', ghi_chu: 'Chưa phát', het_han: null, so_may: 3, khoa: false, tao_luc: new Date().toISOString(), ho_ten: '', gmail: '', zalo: '', kich_hoat: ['A', 'B', 'C'].map((x) => ({ ma_may: `chua-bao-cao-may-${x}`, ten_may: `MAY-CU-${x}`, lan_dau: new Date().toISOString(), lan_cuoi: new Date().toISOString() })) });
   const kho = env.KHO();
   for (let i = 0; i < NGUOI.length; i++) {
     const mo = i < 5 ? profiles.slice(i * 3, i * 3 + (i % 3) + 1).map((p, j) => ({ ...p, giay: 600 + i * 1700 + j * 900 })) : [];

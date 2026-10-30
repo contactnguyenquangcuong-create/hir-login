@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { dungMoiTruong } from './chay-thu.mjs';
 import { xuLy } from './dinh-tuyen.mjs';
-import { donDep, nenTang } from './core.mjs';
+import { donDep, nenTang, khoang } from './core.mjs';
 
 const GOC = 'https://hirlogin-web.example.workers.dev';
 const KEY = 'HLG-AAAA-BBBB-CCCC', MAY = 'may-may-may-may-01';
@@ -37,28 +37,23 @@ test('máy lạ, key sai, mã máy không khớp đều không báo cáo đượ
   assert.equal(nguoi[0].nhan_su, 'Trần Khoa', 'tên lấy từ key, không tin máy gửi');
 });
 
-test('chỉ quản lý: không nhận danh sách profile, trang Profile lấy từ lịch sử mở', async () => {
+test('chỉ quản lý: không nhận danh sách profile', async () => {
   const m = await dung();
   m.HIR_KEY.the.get(KEY).kich_hoat.push({ ma_may: 'may-may-may-may-02', ten_may: 'PC-02', lan_dau: '', lan_cuoi: '' });
   const r = await m.baoCao({ tong_profile: 40, profiles: [{ id: 'la', ten: 'KHONG-DUOC-LUU', thu_muc: 'x' }], dang_mo: [{ id: 'p1', ten: 'FB-001', thu_muc: 'Ads', giay: 60 }] });
   assert.equal(r.ma, 200);
   assert.equal(r.j.can_ds, undefined, 'máy không còn bị đòi danh sách');
-  assert.equal(JSON.stringify(m.env.KHO().doc('profiles', {})).includes('KHONG-DUOC-LUU'), false, 'có gửi cũng không lưu');
+  assert.equal(m.sql('select count(*) n from phien')[0].n, 1, 'chỉ profile đang mở mới có phiên');
+  assert.equal(JSON.stringify(m.env.KHO().doc('tongQuan')).includes('KHONG-DUOC-LUU'), false, 'có gửi cũng không lưu');
   const bangs = m.sql("select name from sqlite_master where type = 'table'").map((x) => x.name);
   assert.equal(bangs.includes('profile'), false, 'không có bảng danh sách profile');
   await m.baoCao({ ma_may: 'may-may-may-may-02', ten_may: 'PC-02', tong_profile: 2, dang_mo: [{ id: 'p1', ten: 'FB-001', thu_muc: 'Ads', giay: 5 }] });
   const q = m.env.KHO().doc('tongQuan');
   assert.equal(q.so.tong_profile, 42, 'tổng là số máy tự báo');
   assert.equal(q.so.dang_su_dung, 1, 'một profile mở trên hai máy chỉ tính một');
-  const p = m.env.KHO().doc('profiles', {});
-  assert.equal(p.tong, 1);
-  assert.equal(p.hang[0].nen_tang, 'facebook');
-  assert.equal(p.hang[0].luot, 2);
-  assert.equal(p.hang[0].dang_dung.nhan_su, 'Trần Khoa');
-  assert.equal(m.env.KHO().doc('profiles', { trang_thai: 'khong_mo' }).tong, 0);
-  assert.equal(m.env.KHO().doc('profiles', { nen_tang: 'shopee' }).tong, 0);
-  assert.equal(m.env.KHO().doc('chiTietProfile', { id: 'p1' }).lich_su.length, 2);
-  assert.equal(m.env.KHO().doc('nhom').hang[0].thu_muc, 'Ads');
+  assert.equal(m.env.KHO().doc('chiTietProfile', { id: 'p1' }).lich_su.length, 2, 'bấm vào profile đang mở vẫn xem được lịch sử');
+  assert.equal(m.env.KHO().doc('profiles', {}).loi, 'Không có hàm', 'trang Profile đã bỏ');
+  assert.equal(m.env.KHO().doc('nhom', {}).loi, 'Không có hàm', 'trang Nhóm đã bỏ');
 });
 
 test('5 chỉ số tổng quan: có số tháng trước để so sánh', async () => {
@@ -262,6 +257,49 @@ test('số liệu biểu đồ: theo ngày, nền tảng, ô giờ, đỉnh', as
   assert.equal(dinh[0].dang_mo, 2, 'giữ số cao nhất trong ngày, không bị số sau đè xuống');
   assert.equal(dinh[0].may_bat, 1);
   assert.deepEqual(m.env.KHO().doc('tongQuan').may_tt, { dang_mo: 1, bat: 1, tat: 0 });
+});
+
+test('khoảng ngày: tính theo giờ Việt Nam, sai dạng hay quá hạn đều về chỗ hợp lý', () => {
+  const bay = Date.UTC(2026, 9, 30, 5); // 12:00 ngày 30/10 giờ Việt Nam
+  const vn = (y, m, d) => Date.UTC(y, m - 1, d) - 7 * 3600000;
+  assert.deepEqual(khoang({ tu: '2026-10-26', den: '2026-10-28' }, bay), { tu: vn(2026, 10, 26), den: vn(2026, 10, 29), so_ngay: 3 });
+  assert.deepEqual(khoang({ tu: '2026-10-30', den: '2026-10-30' }, bay), { tu: vn(2026, 10, 30), den: vn(2026, 10, 31), so_ngay: 1 });
+  assert.equal(khoang({}, bay).so_ngay, 7, 'không chọn gì: 7 ngày');
+  assert.equal(khoang({ tu: 'abc', den: '2026-10-28' }, bay).so_ngay, 7, 'sai dạng: 7 ngày');
+  assert.equal(khoang({ tu: '2026-10-28', den: '2026-10-26' }, bay).so_ngay, 7, 'ngược: 7 ngày');
+  assert.equal(khoang({ tu: '2026-10-20', den: '2030-01-01' }, bay).den, vn(2026, 10, 31), 'không vượt hôm nay');
+  assert.deepEqual(khoang({ tu: '2030-01-01', den: '2030-01-02' }, bay), { tu: vn(2026, 10, 30), den: vn(2026, 10, 31), so_ngay: 1 }, 'toàn tương lai: chỉ hôm nay');
+  assert.equal(khoang({ tu: '2020-01-01', den: '2026-10-30' }, bay).so_ngay, 366, 'tối đa một năm');
+  assert.equal(khoang({ ngay: 30 }, bay).so_ngay, 30);
+});
+
+test('báo cáo và lịch sử chỉ tính đúng trong khoảng đã chọn', async () => {
+  const m = await dung();
+  const vn = (d, g, p) => Date.UTC(2026, 9, d, g, p || 0) - 7 * 3600000;
+  const phien = (id, nen, bd, kt) => m.sql("insert into phien(ma_may, key, nhan_su, profile_id, ten, nen_tang, bat_dau, ket_thuc) values ('x', 'k', 'An', ?, ?, ?, ?, ?)", id, id, nen, bd, kt);
+  phien('trong', 'facebook', vn(26, 9, 30), vn(26, 11)); // thứ 2, 9:30-11:00
+  phien('vat-qua', 'shopee', vn(25, 23), vn(26, 1)); // chủ nhật 23:00 sang thứ 2 01:00: chỉ tính 1 giờ
+  phien('ngoai', 'tiktok', vn(20, 9), vn(20, 10));
+  const r = m.env.KHO().doc('baoCaoSo', { tu: '2026-10-26', den: '2026-10-26' });
+  assert.equal(r.so_ngay, 1);
+  assert.equal(r.theo_ngay.length, 1);
+  assert.equal(r.theo_ngay[0].ms, 2.5 * 3600000, 'cắt phần trước nửa đêm');
+  assert.equal(r.so_profile, 2);
+  assert.deepEqual(r.theo_nen.map((x) => x.nen_tang).sort(), ['facebook', 'shopee'], 'phiên ngoài khoảng không tính');
+  assert.equal(r.theo_nen.find((x) => x.nen_tang === 'shopee').ms, 3600000);
+  assert.equal(r.theo_nguoi[0].ms, 2.5 * 3600000);
+  assert.equal(r.theo_gio.o[0][9], 30 * 60000, 'thứ 2 lúc 9 giờ: 30 phút');
+  assert.equal(r.theo_gio.o[0][10], 3600000, 'thứ 2 lúc 10 giờ');
+  assert.equal(r.theo_gio.o[0][0], 3600000, 'thứ 2 lúc 0 giờ');
+  assert.equal(r.theo_gio.o[6][23], 0, 'chủ nhật nằm ngoài khoảng');
+  assert.equal(r.theo_gio.o.flat().reduce((a, b) => a + b, 0), 2.5 * 3600000);
+  const ca = m.env.KHO().doc('baoCaoSo', { tu: '2026-10-20', den: '2026-10-26' });
+  assert.equal(ca.theo_gio.o[6][23], 3600000, 'mở rộng khoảng thì có chủ nhật');
+  // Ngày trong tương lai không tính thêm thời gian của phiên đang mở.
+  const luc = (d, g) => m.sql("insert into nhat_ky(luc, viec) values (?, 'Mở profile')", vn(d, g));
+  luc(26, 0); luc(26, 23); luc(27, 0); luc(25, 23);
+  const ls = m.env.KHO().doc('lichSu', { tu: '2026-10-26', den: '2026-10-26' });
+  assert.equal(ls.tong, 2, 'gồm cả đầu ngày và cuối ngày, không lấn sang ngày bên cạnh');
 });
 
 test('đoán nền tảng', () => {
