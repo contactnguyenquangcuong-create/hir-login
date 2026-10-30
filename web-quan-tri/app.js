@@ -94,6 +94,12 @@
   const ghi = (ten, b) => api('/api/qt/' + ten, b);
   const key = (b) => ghi('key', b);
 
+  function taiFile(ten, noiDung) {
+    const a = h('a', { href: URL.createObjectURL(new Blob(['\ufeff' + noiDung], { type: 'text/csv;charset=utf-8' })), download: ten });
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  }
+  const oCsv = (s) => { const t = String(s == null ? '' : s); return `"${(/^[=+\-@]/.test(t) ? "'" + t : t).replace(/"/g, '""')}"`; };
   function bao(chu, loi) {
     const t = h('div', { lop: 'tb' + (loi ? ' loi' : '') }, chu);
     document.getElementById('thong-bao').append(t);
@@ -106,13 +112,14 @@
   // ---- Lớp nổi: ngăn kéo và hộp thoại ----
   const lop = () => document.getElementById('lop-noi');
   let dongLop = null;
+  let lopKhoa = false;
   function moLop(the) {
     const l = xoa(lop());
-    const dong = () => { xoa(l); dongLop = null; document.removeEventListener('keydown', phim); };
-    function phim(e) { if (e.key === 'Escape') dong(); }
+    const dong = () => { xoa(l); dongLop = null; lopKhoa = false; document.removeEventListener('keydown', phim); };
+    function phim(e) { if (e.key === 'Escape' && !lopKhoa) dong(); }
     document.addEventListener('keydown', phim);
     dongLop = dong;
-    l.append(h('div', { lop: 'man', bam: dong }), the);
+    l.append(h('div', { lop: 'man', bam: () => { if (!lopKhoa) dong(); } }), the);
     return dong;
   }
   function moNgan(tieuDe, phuDe, than) {
@@ -414,7 +421,7 @@
     const bdXuHuong = h('div'), bdNen = h('div'), bdMay = h('div'), phuSong = h('div');
     // Số máy đã kích hoạt key, lấy từ kho key: hỏi một lần khi mở trang, không theo nhịp làm mới.
     let daKichHoat = null;
-    key({ viec: 'danhSach' }).then((r) => { daKichHoat = r.hang.reduce((n, k) => n + (k.kich_hoat || []).length, 0); veMoi(); }).catch(() => {});
+    layHetKey().then((ds) => { daKichHoat = ds.reduce((n, k) => n + (k.kich_hoat || []).length, 0); veMoi(); }).catch(() => {});
     let veMoi = () => {};
     const demMo = h('span', { lop: 'nhan cam' }, '0'), demMay = h('span', { lop: 'mo' });
     const capNhat = h('span', { lop: 'nhan' }, h('span', { lop: 'cham song' }), 'Đang nhận dữ liệu');
@@ -666,6 +673,104 @@
       truong('Số lượng key', soLuong), loi,
       h('div', { lop: 'chan-hop' }, h('button', { lop: 'nut', bam: () => dongLop && dongLop() }, 'Huỷ'), tao)]);
   }
+  // Danh sách key HLG: lấy từng trang nhỏ cho tới hết (kho key không trả cả nghìn key một lần), nhớ 5 phút.
+  let khoKey = { luc: 0, ds: null, dang: null };
+  function layHetKey(epLay) {
+    if (!epLay && khoKey.ds && Date.now() - khoKey.luc < 300000) return Promise.resolve(khoKey.ds);
+    if (khoKey.dang) return khoKey.dang;
+    khoKey.dang = (async () => {
+      const gom = new Map();
+      for (let off = 0; off < 20000; off += 90) {
+        const r = await key({ viec: 'danhSach', off, limit: 90 });
+        r.hang.forEach((x) => gom.set(x.key, x));
+        if (r.het) break;
+      }
+      khoKey.ds = [...gom.values()];
+      khoKey.luc = Date.now();
+      return khoKey.ds;
+    })().finally(() => { khoKey.dang = null; });
+    return khoKey.dang;
+  }
+  const luuKey = (ds) => { khoKey.ds = ds; khoKey.luc = Date.now(); return ds; };
+
+  // ----- Tạo key số lượng lớn: mỗi key dùng cho 1 máy -----
+  const LO_KEY = 25, KEY_TOI_DA = 5000;
+  function moTaoLo(sauKhiXong) {
+    const chonTool = h('select', { lop: 'o', 'aria-label': 'Tool' }, h('option', { value: 'HLG' }, 'Hir-Login (HLG)'));
+    key({ viec: 'sanPham' }).then((r) => { xoa(chonTool).append(...r.hang.map((s) => h('option', { value: s.tien }, `${s.ten} (${s.tien})`))); chonTool.value = 'HLG'; capNhat(); }).catch(() => {});
+    const soLuong = h('input', { lop: 'o', type: 'number', inputmode: 'numeric', min: 1, max: KEY_TOI_DA, giaTri: 50, 'aria-label': 'Số lượng key', oninput: () => capNhat() });
+    const nhanh = h('div', { lop: 'nhanh' }, [10, 50, 100, 200, 500, 1000].map((n) => h('button', { lop: 'nut nho', type: 'button', bam: () => { soLuong.value = n; capNhat(); } }, String(n))));
+    const ghiChu = h('input', { lop: 'o', maxlength: 100, placeholder: 'Ví dụ: Team Shopee' });
+    const danhSo = h('input', { type: 'checkbox', checked: true, id: 'danh-so', onchange: () => capNhat() });
+    const soNgay = h('input', { lop: 'o', type: 'number', min: 0, max: 3650, giaTri: 30, oninput: () => capNhat() });
+    const tomTat = h('div', { lop: 'tom-tat' }), loi = h('div', { lop: 'loi-hop' });
+    const soDuoc = () => { const n = Math.floor(Number(soLuong.value)); return n >= 1 && n <= KEY_TOI_DA ? n : 0; };
+    function capNhat() {
+      const n = soDuoc(), ten = chonTool.selectedOptions[0] ? chonTool.selectedOptions[0].textContent : '';
+      tao.disabled = !n;
+      tao.textContent = n ? `Tạo ${so(n)} key` : 'Tạo key';
+      tomTat.textContent = n ? `${so(n)} key ${ten}, mỗi key dùng cho 1 máy, ${Number(soNgay.value) > 0 ? `hạn ${so(Number(soNgay.value))} ngày kể từ lúc tạo` : 'không giới hạn thời gian'}.` : `Gõ số lượng từ 1 đến ${so(KEY_TOI_DA)}.`;
+    }
+    const tao = h('button', { lop: 'nut chinh-nut', bam: () => chay() }, 'Tạo key');
+    chonTool.addEventListener('change', capNhat);
+    capNhat();
+    moHop([h('h3', null, 'Tạo key số lượng lớn'), h('p', null, 'Mỗi key dùng cho 1 máy. Gõ số lượng để tạo ít hay nhiều tuỳ ý.'),
+      truong('Tool', chonTool),
+      truong('Số lượng key', [soLuong, nhanh], `Tối đa ${so(KEY_TOI_DA)} key mỗi lần.`),
+      truong('Ghi chú', ghiChu, 'Ghi vào mọi key trong đợt này, để tra sau.'),
+      h('label', { lop: 'tich', for: 'danh-so' }, danhSo, 'Đánh số thứ tự sau ghi chú (001, 002, 003…)'),
+      truong('Số ngày dùng', soNgay, '0 = vĩnh viễn. Tính từ lúc tạo.'),
+      tomTat, loi,
+      h('div', { lop: 'chan-hop' }, h('button', { lop: 'nut', bam: () => dongLop && dongLop() }, 'Huỷ'), tao)]);
+
+    async function chay() {
+      const n = soDuoc();
+      if (!n) return;
+      const tien = chonTool.value, ten = chonTool.selectedOptions[0].textContent, rong = Math.max(3, String(n).length);
+      const mo = { ghiChu: ghiChu.value.trim(), soNgay: Number(soNgay.value), danhSo: danhSo.checked };
+      const hang = [];
+      let loiLo = '', dung = false;
+      const thanh = h('i'), chu = h('div', { lop: 'tien-do-chu' }, '0 / ' + so(n));
+      const nutDung = h('button', { lop: 'nut', bam: () => { dung = true; nutDung.disabled = true; nutDung.textContent = 'Đang dừng…'; } }, 'Dừng');
+      const hop = h('div', { lop: 'hop', role: 'dialog', 'aria-modal': 'true' },
+        h('h3', null, `Đang tạo ${so(n)} key ${ten}`), h('p', null, 'Giữ trang này mở cho tới khi xong. Key đã tạo vẫn được giữ nếu bạn dừng giữa chừng.'),
+        h('div', { lop: 'tien-do' }, thanh), chu, h('div', { lop: 'chan-hop' }, nutDung));
+      if (dongLop) dongLop();
+      moLop(hop);
+      lopKhoa = true;
+      const truocKhiDong = (e) => { e.preventDefault(); e.returnValue = ''; };
+      window.addEventListener('beforeunload', truocKhiDong);
+      for (let i = 0; i < n && !dung; i += LO_KEY) {
+        if (!document.body.contains(hop)) { dung = true; break; } // trang bị chuyển đi: dừng, giữ những key đã tạo
+        try {
+          const r = await key({ viec: 'taoLo', tien, so_luong: Math.min(LO_KEY, n - i), ghi_chu: mo.ghiChu, danh_so_tu: mo.danhSo ? i + 1 : null, rong, so_ngay: mo.soNgay });
+          hang.push(...r.hang);
+          if (r.loi) { loiLo = r.loi; break; }
+        } catch (e) { loiLo = e.message; break; }
+        thanh.style.width = `${Math.round((hang.length / n) * 100)}%`;
+        chu.textContent = `${so(hang.length)} / ${so(n)}`;
+      }
+      window.removeEventListener('beforeunload', truocKhiDong);
+      lopKhoa = false;
+      const tenFile = `key-${tien.toLowerCase()}-${hang.length}-${isoNgay(Date.now())}.csv`;
+      const csv = () => [['Key', 'Tool', 'Ghi chú', 'Hạn dùng'].map(oCsv).join(',')].concat(hang.map((x) => [x.key, ten, x.ghi_chu, x.het_han ? ngayDu(Date.parse(x.het_han)) : 'Vĩnh viễn'].map(oCsv).join(','))).join('\r\n');
+      if (sauKhiXong) sauKhiXong();
+      if (!document.body.contains(hop)) {
+        if (hang.length) { taiFile(tenFile, csv()); bao(`Đã tạo ${so(hang.length)} key ${ten}, file đã tải về máy`); }
+        return;
+      }
+      const hien = hang.slice(0, 200);
+      them(xoa(hop), [
+        h('h3', null, hang.length === n ? `Đã tạo ${so(n)} key ${ten}` : `Đã tạo ${so(hang.length)} / ${so(n)} key ${ten}`),
+        loiLo ? h('p', { lop: 'loi-hop' }, `Dừng vì lỗi: ${loiLo}. Những key đã tạo vẫn dùng được.`) : dung ? h('p', null, 'Đã dừng theo yêu cầu. Những key đã tạo vẫn dùng được.') : h('p', null, 'Tải file về để gửi cho từng người.'),
+        tien === 'HLG' ? null : h('p', { lop: 'chu-y' }, `Key ${ten} không hiện ở trang Key (trang này chỉ quản lý Hir-Login). Hãy tải file về lưu lại.`),
+        hang.length ? h('div', { lop: 'ket-qua-key mono' }, hien.map((x) => h('div', null, x.key)), hang.length > hien.length ? h('div', { lop: 'mo' }, `… và ${so(hang.length - hien.length)} key nữa, có trong file.`) : null) : null,
+        h('div', { lop: 'chan-hop' },
+          hang.length ? h('button', { lop: 'nut', bam: () => chep(hang.map((x) => x.key).join('\n')) }, bieu('sao'), 'Chép tất cả') : null,
+          hang.length ? h('button', { lop: 'nut', bam: () => taiFile(tenFile, csv()) }, bieu('tai'), 'Tải file') : null,
+          h('button', { lop: 'nut chinh-nut', bam: () => dongLop && dongLop() }, 'Xong'))]);
+    }
+  }
   function tinhTrangKey(k) {
     if (k.khoa) return ['khoa', 'Bị khoá', 'loi'];
     if (k.het_han) {
@@ -678,13 +783,14 @@
   function trangKey(goc) {
     const than = h('div', { lop: 'khoi' }), dai = h('div', { lop: 'dai-so' }), bdKey = h('section', { lop: 'khoi co-duoi than-khoi' });
     let tim = '', loai = '', ds = [];
-    goc.append(dauTrang('Quản lý key', 'Chỉ hiện và chỉ sửa được key HLG- của Hir-Login.', h('button', { lop: 'nut chinh-nut', bam: () => moTaoKey(nap) }, bieu('cong'), 'Tạo key')),
+    goc.append(dauTrang('Quản lý key', 'Danh sách và sửa key Hir-Login (HLG-). Tạo số lượng lớn được cho mọi tool dùng chung kho key.', [h('button', { lop: 'nut', bam: () => moTaoLo(nap) }, bieu('cong'), 'Tạo số lượng lớn'), h('button', { lop: 'nut chinh-nut', bam: () => moTaoKey(nap) }, bieu('cong'), 'Tạo key')]),
       dai, bdKey, h('div', { lop: 'loc' }, oTim((v) => { tim = v; ve(); }, 'Tìm key, tên, Zalo, ghi chú…'), tabNho([['', 'Tất cả'], ['dung', 'Đang dùng'], ['sap', 'Sắp hết hạn'], ['het', 'Hết hạn'], ['khoa', 'Bị khoá']], '', (v) => { loai = v; ve(); })), than);
     function ve() {
       const s = tim.toLowerCase();
       const hang = ds.filter((k) => (!s || `${k.key} ${k.ho_ten} ${k.zalo} ${k.gmail} ${k.ghi_chu} ${(k.kich_hoat || []).map((m) => m.ten_may).join(' ')}`.toLowerCase().includes(s)) && (!loai || tinhTrangKey(k)[0] === loai)).slice(0, 300);
-      xoa(than).append(hang.length
-        ? bang(['Key', 'Người dùng', 'Ghi chú', 'Hạn dùng', { t: 'Máy', lop: 'phai' }, 'Trạng thái', ''], hang, (k) => {
+      const tong = ds.filter((k) => (!s || `${k.key} ${k.ho_ten} ${k.zalo} ${k.gmail} ${k.ghi_chu} ${(k.kich_hoat || []).map((m) => m.ten_may).join(' ')}`.toLowerCase().includes(s)) && (!loai || tinhTrangKey(k)[0] === loai)).length;
+      them(xoa(than), hang.length
+        ? [bang(['Key', 'Người dùng', 'Ghi chú', 'Hạn dùng', { t: 'Máy', lop: 'phai' }, 'Trạng thái', ''], hang, (k) => {
           const [, chu, mau] = tinhTrangKey(k);
           return [
             h('span', { lop: 'mono' }, k.key),
@@ -695,7 +801,7 @@
             nhanTrang(chu, mau),
             h('td', { lop: 'phai' }, h('button', { lop: 'nut icon', 'aria-label': 'Chép key', title: 'Chép key', bam: (e) => { e.stopPropagation(); chep(k.key); } }, bieu('sao'))),
           ];
-        }, moKey)
+        }, moKey), tong > hang.length ? h('div', { lop: 'chan-bang' }, h('span', null, `Hiển thị ${so(hang.length)} trong ${so(tong)} key. Dùng ô tìm kiếm hoặc bộ lọc để thu hẹp.`)) : null]
         : trong('Không có key nào', tim || loai ? 'Thử bỏ bớt điều kiện lọc.' : 'Bấm Tạo key để bắt đầu.'));
     }
     function moKey(k) {
@@ -706,7 +812,7 @@
       const soMay = h('input', { lop: 'o', type: 'number', min: 1, max: 50, giaTri: k.so_may });
       const giaHan = h('input', { lop: 'o', type: 'number', min: 0, max: 3650, placeholder: 'Để trống: giữ nguyên' });
       const lam = async (viec, tb, them) => {
-        try { const r = await key({ viec, key: k.key, ...(them || {}) }); bao(tb); await nap(); if (dongLop) dongLop(); if (r.the) moKey(r.the); }
+        try { const r = await key({ viec, key: k.key, ...(them || {}) }); bao(tb); if (r.the) ds = luuKey(ds.map((x) => (x.key === r.the.key ? r.the : x))); veTatCa(); if (dongLop) dongLop(); if (r.the) moKey(r.the); }
         catch (e) { bao(e.message, true); }
       };
       moNgan(k.key, tinhTrangKey(k)[1], [
@@ -726,11 +832,15 @@
         h('div', { lop: 'muc-ngan' }, h('h4', null, `Máy đã kích hoạt (${(k.kich_hoat || []).length}/${k.so_may})`),
           (k.kich_hoat || []).length ? k.kich_hoat.map((m) => h('div', { lop: 'dong-gon' }, h('span', { lop: 'cat' }, m.ten_may || m.ma_may.slice(0, 12)), h('span', { lop: 'mo' }, truoc(Date.parse(m.lan_cuoi))))) : h('div', { lop: 'mo' }, 'Chưa có máy nào'),
           (k.kich_hoat || []).length ? h('button', { lop: 'nut nho', bam: async () => { if (await xacNhan('Gỡ mọi máy khỏi key?', 'Key sẽ nhận máy mới ở lần kích hoạt tiếp theo. Máy cũ phải kích hoạt lại.', 'Gỡ máy', true)) lam('goMay', 'Đã gỡ máy'); } }, 'Gỡ mọi máy') : null),
-        h('button', { lop: 'nut nguy', bam: async () => { if (await xacNhan('Xoá hẳn key này?', `${k.key} sẽ biến mất khỏi kho key, không khôi phục được. Máy đang dùng sẽ bị chặn.`, 'Xoá key', true)) { try { await key({ viec: 'xoa', key: k.key }); bao('Đã xoá key'); await nap(); } catch (e) { bao(e.message, true); } } } }, 'Xoá key'),
+        h('button', { lop: 'nut nguy', bam: async () => { if (await xacNhan('Xoá hẳn key này?', `${k.key} sẽ biến mất khỏi kho key, không khôi phục được. Máy đang dùng sẽ bị chặn.`, 'Xoá key', true)) { try { await key({ viec: 'xoa', key: k.key }); bao('Đã xoá key'); ds = luuKey(ds.filter((x) => x.key !== k.key)); veTatCa(); if (dongLop) dongLop(); } catch (e) { bao(e.message, true); } } } }, 'Xoá key'),
       ]);
     }
     async function nap() {
-      ds = (await key({ viec: 'danhSach' })).hang;
+      than.classList.add('dang-tai');
+      try { ds = await layHetKey(true); } finally { than.classList.remove('dang-tai'); }
+      veTatCa();
+    }
+    function veTatCa() {
       const dem = { dung: 0, sap: 0, het: 0, khoa: 0 };
       ds.forEach((k) => { dem[tinhTrangKey(k)[0]]++; });
       const daDung = ds.filter((k) => (k.kich_hoat || []).length).length;

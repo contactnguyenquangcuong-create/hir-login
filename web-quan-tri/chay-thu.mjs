@@ -14,10 +14,12 @@ const QUI = path.dirname(fileURLToPath(import.meta.url));
 // Thẻ key giả trả lời như Worker `hir-key` (POST /admin/{hàm}).
 export function khoKeyGia() {
   const the = new Map();
+  const kho = { sanPham: [], trung: 0, hongSau: null, daTao: 0 };
   const goi = {
     layKey: ({ key }) => the.get(key) || null,
-    danhSach: ({ tien }) => [...the.values()].filter((k) => k.key.startsWith(tien + '-')),
-    taoKey: (a) => { const k = { key: a.key, ghi_chu: a.ghi_chu || '', het_han: a.het_han || null, so_may: a.so_may || 1, khoa: false, tao_luc: new Date().toISOString(), ho_ten: '', gmail: '', zalo: '', kich_hoat: [] }; the.set(a.key, k); return k; },
+    danhSach: ({ tien, limit = 10, off = 0 }) => [...the.values()].filter((k) => k.key.startsWith(tien + '-')).slice(off, off + limit),
+    sanPham: () => kho.sanPham,
+    taoKey: (a) => { if (kho.trung > 0) { kho.trung--; throw new Error('Key đã tồn tại'); } if (kho.hongSau != null && kho.daTao >= kho.hongSau) throw new Error('Máy chủ key báo lỗi 500'); if (the.has(a.key)) throw new Error('Key đã tồn tại'); kho.daTao++; const k = { key: a.key, ghi_chu: a.ghi_chu || '', het_han: a.het_han || null, so_may: a.so_may || 1, khoa: false, tao_luc: new Date().toISOString(), ho_ten: '', gmail: '', zalo: '', kich_hoat: [] }; the.set(a.key, k); return k; },
     suaKey: ({ key, thay }) => { const k = the.get(key); if (!k) throw new Error('Không có key ' + key); Object.assign(k, thay); return k; },
     xoaKey: ({ key }) => { the.delete(key); return { ok: true }; },
     goMay: ({ key }) => { the.get(key).kich_hoat = []; return { ok: true }; },
@@ -25,8 +27,10 @@ export function khoKeyGia() {
   };
   return {
     the,
+    kho,
     goiCuoi: [],
     async fetch(url, init) {
+      if (kho.cham) await new Promise((x) => setTimeout(x, kho.cham)); // CHAY_THU_CHAM=ms: kho key trả lời chậm, để thử lúc đang tạo dở
       const ten = new URL(url).pathname.split('/').pop();
       this.goiCuoi.push(ten);
       if ((init.headers.authorization || '') !== 'Bearer token-key-thu') return new Response(JSON.stringify({ loi: 'Không có quyền' }), { status: 401 });
@@ -44,6 +48,7 @@ export async function dungMoiTruong() {
   };
   dung(sql);
   const HIR_KEY = khoKeyGia();
+  HIR_KEY.kho.cham = Number(process.env.CHAY_THU_CHAM) || 0;
   const env = { MAT_KHAU_BAM: await bam('thu-tren-may'), PHIEN_BI_MAT: 'bi-mat-thu', KEY_ADMIN_TOKEN: 'token-key-thu', HIR_KEY, TEN_MIEN: 'hirlogin.nguyenquangcuong.vn' };
   const hoiKey = async (key) => { const r = await HIR_KEY.fetch('https://hir-key/admin/layKey', { method: 'POST', headers: { authorization: 'Bearer token-key-thu' }, body: JSON.stringify({ key }) }); return r.json(); };
   env.KHO = () => ({
@@ -73,6 +78,8 @@ async function mau({ env, sql, HIR_KEY }) {
   NGUOI.forEach(([ho, may], i) => {
     HIR_KEY.the.set(k(i), { key: k(i), ghi_chu: `Team ${thuMuc[i % 5]}`, het_han: i === 2 ? new Date(Date.now() + 3 * 86400000).toISOString() : i === 6 ? new Date(Date.now() - 86400000).toISOString() : null, so_may: 2, khoa: i === 7, tao_luc: new Date().toISOString(), ho_ten: ho, gmail: '', zalo: `09${i}1234567`, kich_hoat: [{ ma_may: `may-may-may-may-${i}`, ten_may: may, lan_dau: new Date().toISOString(), lan_cuoi: new Date().toISOString() }] });
   });
+  // CHAY_THU_NHIEU_KEY=n: thêm n key đã kích hoạt, để thử khi danh sách dài hơn một trang.
+  for (let i = 0; i < (Number(process.env.CHAY_THU_NHIEU_KEY) || 0); i++) { const kk = `HLG-NH${String(i).padStart(2, '0')}-ABCD-${String(i).padStart(4, '0')}`; HIR_KEY.the.set(kk, { key: kk, ghi_chu: 'Nhiều key', het_han: null, so_may: 1, khoa: false, tao_luc: new Date().toISOString(), ho_ten: '', gmail: '', zalo: '', kich_hoat: [{ ma_may: `nhieu-key-may-${i}`, ten_may: `NK-${i}`, lan_dau: new Date().toISOString(), lan_cuoi: new Date().toISOString() }] }); }
   HIR_KEY.the.set('HLG-MOIT-ABCD-0000', { key: 'HLG-MOIT-ABCD-0000', ghi_chu: 'Chưa phát', het_han: null, so_may: 3, khoa: false, tao_luc: new Date().toISOString(), ho_ten: '', gmail: '', zalo: '', kich_hoat: ['A', 'B', 'C'].map((x) => ({ ma_may: `chua-bao-cao-may-${x}`, ten_may: `MAY-CU-${x}`, lan_dau: new Date().toISOString(), lan_cuoi: new Date().toISOString() })) });
   const kho = env.KHO();
   for (let i = 0; i < NGUOI.length; i++) {

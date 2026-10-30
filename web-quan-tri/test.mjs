@@ -302,6 +302,72 @@ test('báo cáo và lịch sử chỉ tính đúng trong khoảng đã chọn', 
   assert.equal(ls.tong, 2, 'gồm cả đầu ngày và cuối ngày, không lấn sang ngày bên cạnh');
 });
 
+test('tạo số lượng lớn: mỗi key 1 máy, đúng tool, đánh số, mỗi đợt có giới hạn', async () => {
+  const m = await dung();
+  const a = await m.dangNhap();
+  const tao = (b) => m.goi('/api/qt/key', { viec: 'taoLo', ...b }, a);
+  const dau = m.HIR_KEY.goiCuoi.length;
+  const r = await tao({ tien: 'hrs', so_luong: 12, ghi_chu: 'Team A', danh_so_tu: 1, rong: 3, so_ngay: 30, so_may: 9 });
+  assert.equal(r.ma, 200);
+  assert.equal(r.j.hang.length, 12);
+  assert.equal(r.j.loi, '');
+  assert.ok(r.j.hang.every((k) => /^HRS-[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/.test(k.key)), 'tiền tố của tool đã chọn, viết thường cũng được');
+  assert.ok([...m.HIR_KEY.the.values()].filter((k) => k.key.startsWith('HRS-')).every((k) => k.so_may === 1), 'luôn 1 máy dù máy khách gửi so_may khác');
+  assert.deepEqual(r.j.hang.map((k) => k.ghi_chu), Array.from({ length: 12 }, (_, i) => 'Team A ' + String(i + 1).padStart(3, '0')));
+  assert.ok(Math.abs(Date.parse(r.j.hang[0].het_han) - Date.now() - 30 * 86400000) < 60000);
+  assert.ok(m.HIR_KEY.goiCuoi.length - dau <= 25 + 6, 'ít cuộc gọi ra ngoài, nằm trong giới hạn của Worker');
+  // Nối tiếp đợt sau: số thứ tự đi tiếp, không đánh số thì giữ nguyên ghi chú.
+  assert.equal((await tao({ tien: 'HLG', so_luong: 3, ghi_chu: 'B', danh_so_tu: 13, rong: 3 })).j.hang[0].ghi_chu, 'B 013');
+  const khong = (await tao({ tien: 'HLG', so_luong: 2, ghi_chu: 'Chung', so_ngay: 0 })).j.hang;
+  assert.deepEqual(khong.map((k) => k.ghi_chu), ['Chung', 'Chung']);
+  assert.equal(khong[0].het_han, null);
+  // Quá 25 một đợt thì chỉ tạo 25: máy khách phải chia đợt.
+  assert.equal((await tao({ tien: 'HLG', so_luong: 500 })).j.hang.length, 25);
+  const ls = m.env.KHO().doc('lichSu', { ngay: 1 }).hang.filter((n) => n.viec === 'Tạo key số lượng lớn');
+  assert.ok(ls.length >= 4 && ls.some((n) => n.doi_tuong === '12 key HRS'), 'có nhật ký mỗi đợt');
+});
+
+test('tạo số lượng lớn: chỉ tool có trong kho, và trùng key hay lỗi giữa chừng không làm mất key đã tạo', async () => {
+  const m = await dung();
+  const a = await m.dangNhap();
+  const tao = (b) => m.goi('/api/qt/key', { viec: 'taoLo', ...b }, a);
+  for (const tien of ['ZZZ', '', 'HLG-', "HLG'; drop", 'hlgx', 'A']) assert.equal((await tao({ tien, so_luong: 1 })).ma, 400, JSON.stringify(tien));
+  assert.equal(m.HIR_KEY.the.size, 1, 'không tạo gì khi tool sai');
+  // Tool thêm bằng /themsp ở bot dùng được; mã lạ trong bảng bị bỏ qua.
+  m.HIR_KEY.kho.sanPham = [{ tien: 'ABC', ten: 'Tool mới' }, { tien: 'bad code', ten: 'x' }];
+  assert.equal((await tao({ tien: 'ABC', so_luong: 2 })).j.hang.length, 2);
+  assert.equal((await tao({ tien: 'bad code', so_luong: 1 })).ma, 400);
+  assert.deepEqual((await m.goi('/api/qt/key', { viec: 'sanPham' }, a)).j.hang.map((s) => s.tien), ['HLG', 'HIR', 'HRS', 'TPT', 'HSP', 'HFS', 'NWS', 'STO', 'ABC']);
+  // Trùng key: thử lại bằng key khác, đủ số lượng.
+  m.HIR_KEY.kho.trung = 3;
+  assert.equal((await tao({ tien: 'HLG', so_luong: 10 })).j.hang.length, 10);
+  // Kho key báo lỗi giữa chừng: trả những key đã tạo kèm lời báo lỗi, không ném lỗi.
+  m.HIR_KEY.kho.daTao = 0; m.HIR_KEY.kho.hongSau = 7;
+  const r = await tao({ tien: 'HLG', so_luong: 20 });
+  assert.equal(r.ma, 200);
+  assert.ok(r.j.hang.length >= 7 && r.j.hang.length < 20, String(r.j.hang.length));
+  assert.match(r.j.loi, /500/);
+  assert.ok(r.j.hang.every((k) => m.HIR_KEY.the.has(k.key)), 'mọi key trả về đều có thật trong kho');
+});
+
+test('danh sách key lấy từng trang nhỏ và không sót, không trùng', async () => {
+  const m = await dung();
+  const a = await m.dangNhap();
+  for (let i = 0; i < 8; i++) assert.equal((await m.goi('/api/qt/key', { viec: 'taoLo', tien: 'HLG', so_luong: 25 }, a)).j.hang.length, 25);
+  const layTrang = async (off, limit) => (await m.goi('/api/qt/key', { viec: 'danhSach', off, limit }, a)).j;
+  const gom = new Map();
+  let lan = 0;
+  for (let off = 0; off < 1000; off += 90, lan++) {
+    const r = await layTrang(off, 90);
+    assert.ok(r.hang.length <= 90);
+    r.hang.forEach((k) => gom.set(k.key, k));
+    if (r.het) break;
+  }
+  assert.equal(gom.size, 201, '200 key mới và 1 key có sẵn');
+  assert.equal(lan, 2, 'ba trang: 90, 90, 21');
+  assert.equal((await layTrang(0, 5000)).hang.length, 90, 'khách xin nhiều hơn thì vẫn chỉ 90 mỗi trang');
+});
+
 test('đoán nền tảng', () => {
   assert.equal(nenTang('GOOGLE-ADS-001', 'Marketing'), 'google');
   assert.equal(nenTang('FB-ADS-1', ''), 'facebook');
