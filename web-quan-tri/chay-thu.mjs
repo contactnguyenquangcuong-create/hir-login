@@ -100,7 +100,12 @@ async function mau({ env, sql, HIR_KEY }) {
   }
   // Tháng trước, để thấy phần so sánh.
   sql('insert or replace into so_lieu_ngay(ngay, tong_profile) values (?, ?)', bay - 40 * 86400000, 280);
-  for (let n = 1; n <= 14; n++) sql('insert or replace into dinh_ngay(ngay, may_bat, dang_mo) values (?, ?, ?)', Math.floor(bay / 86400000) * 86400000 - 7 * 3600000 - n * 86400000, 4 + ((n * 3) % 5), 6 + ((n * 7) % 9));
+  const WEB = ['shopee.vn', 'facebook.com', 'banhang.shopee.vn', 'tiktok.com', 'google.com', 'mail.google.com', 'business.facebook.com', 'youtube.com', 'lazada.vn', 'zalo.me', 'chatgpt.com', 'canva.com'];
+  const dNay = Math.floor((bay + 7 * 3600000) / 86400000) * 86400000 - 7 * 3600000;
+  for (let n = 0; n < 40; n++) for (let i = 0; i < NGUOI.length; i++) WEB.forEach((w, j) => {
+    if ((n + i * 3 + j * 5) % 3 === 0) return;
+    sql('insert or ignore into trang_web(ngay, ten_mien, ma_may, key, nhan_su, ten_may, luot) values (?,?,?,?,?,?,?)', dNay - n * 86400000, w, `may-may-may-may-${i}`, k(i), NGUOI[i][0], NGUOI[i][1], 1 + ((n * 7 + i * 11 + j * 13) % 40) * (WEB.length - j));
+  });
   // Hai máy đã tắt.
   sql('update may set lan_cuoi = ? where ma_may in (?,?)', bay - 3600000 * 5, 'may-may-may-may-6', 'may-may-may-may-7');
   donDep(sql, bay);

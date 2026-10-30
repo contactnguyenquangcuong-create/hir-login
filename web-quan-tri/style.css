@@ -183,6 +183,11 @@ td.phai, th.phai { text-align: right; }
 /* Biểu đồ cột */
 .cot > .dai-so { margin-bottom: 0; }
 .co-duoi { margin-bottom: 16px; }
+.day-web { flex: 1; min-width: 120px; }
+.ds-web { list-style: none; margin: 0; padding: 6px 0; }
+.ds-web li { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 7px 16px; }
+.ds-web .chip-profile { flex: 1; min-width: 0; }
+.ds-web b { font-weight: 500; }
 .nhanh { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
 .tich { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; font-size: 13px; color: var(--t-600); cursor: pointer; }
 .tich input { width: 16px; height: 16px; accent-color: var(--primary); }

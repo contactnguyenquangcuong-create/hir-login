@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { dungMoiTruong } from './chay-thu.mjs';
 import { xuLy } from './dinh-tuyen.mjs';
-import { donDep, nenTang, khoang } from './core.mjs';
+import { donDep, nenTang, khoang, dotGanNhat } from './core.mjs';
 
 const GOC = 'https://hirlogin-web.example.workers.dev';
 const KEY = 'HLG-AAAA-BBBB-CCCC', MAY = 'may-may-may-may-01';
@@ -247,15 +247,17 @@ test('số liệu biểu đồ: theo ngày, nền tảng, ô giờ, đỉnh', as
   const q = m.env.KHO().doc('tongQuan');
   assert.equal(q.xu_huong.length, 14);
   assert.equal(q.xu_huong.reduce((a, d) => a + d.ms, 0), 3 * 3600000);
-  // Máy và đỉnh trong ngày.
-  await m.baoCao({ dang_mo: [{ id: 'a', ten: 'A', thu_muc: '', giay: 1 }, { id: 'b', ten: 'B', thu_muc: '', giay: 1 }] });
-  donDep(m.sql, Date.now());
-  await m.baoCao({ dang_mo: [{ id: 'a', ten: 'A', thu_muc: '', giay: 1 }] });
-  donDep(m.sql, Date.now());
-  const dinh = m.env.KHO().doc('baoCaoSo', { ngay: 7 }).dinh;
-  assert.equal(dinh.length, 1);
-  assert.equal(dinh[0].dang_mo, 2, 'giữ số cao nhất trong ngày, không bị số sau đè xuống');
-  assert.equal(dinh[0].may_bat, 1);
+  // Mỗi ngày: số máy có dùng, số profile mở cùng lúc nhiều nhất, tính từ giờ mở và đóng thật.
+  const vn = (d, g) => Date.UTC(2026, 9, d, g) - 7 * 3600000;
+  const them = (may, id, a, b) => m.sql("insert into phien(ma_may, key, nhan_su, profile_id, ten, nen_tang, bat_dau, ket_thuc) values (?, 'k', 'An', ?, 'x', 'khac', ?, ?)", may, id, a, b);
+  them('m1', 'a', vn(20, 9), vn(20, 11));
+  them('m1', 'b', vn(20, 10), vn(20, 12));
+  them('m2', 'c', vn(20, 10), vn(20, 10) + 1000);
+  them('m2', 'd', vn(20, 12), vn(20, 13)); // nối đúng lúc b đóng: không tính là chồng
+  them('m1', 'e', vn(21, 23), vn(22, 1)); // qua nửa đêm: có ở cả hai ngày
+  const dinh = m.env.KHO().doc('baoCaoSo', { tu: '2026-10-20', den: '2026-10-22' }).dinh;
+  assert.deepEqual(dinh.map((d) => [d.may_bat, d.dang_mo]), [[2, 3], [1, 1], [1, 1]]);
+  await m.baoCao({ phien: [{ id: 'a', ten: 'A', thu_muc: '', bat_dau: Date.now() - 1000, ket_thuc: null }], tu_dong: [], dot: Date.now() });
   assert.deepEqual(m.env.KHO().doc('tongQuan').may_tt, { dang_mo: 1, bat: 1, tat: 0 });
 });
 
@@ -366,6 +368,198 @@ test('danh sách key lấy từng trang nhỏ và không sót, không trùng', a
   assert.equal(gom.size, 201, '200 key mới và 1 key có sẵn');
   assert.equal(lan, 2, 'ba trang: 90, 90, 21');
   assert.equal((await layTrang(0, 5000)).hang.length, 90, 'khách xin nhiều hơn thì vẫn chỉ 90 mỗi trang');
+});
+
+test('website: cộng dồn theo ngày và máy, lọc được, chỉ nhận tên miền', async () => {
+  const m = await dung();
+  m.HIR_KEY.the.get(KEY).kich_hoat.push({ ma_may: 'may-may-may-may-02', ten_may: 'PC-02', lan_dau: '', lan_cuoi: '' });
+  const hom = new Date(Date.now() + 7 * 3600000).toISOString().slice(0, 10);
+  const r = await m.baoCao({ trang_web: [{ ngay: hom, ten_mien: 'shopee.vn', luot: 5 }, { ngay: hom, ten_mien: 'facebook.com', luot: 2 }] });
+  assert.equal(r.ma, 200);
+  await m.baoCao({ trang_web: [{ ngay: hom, ten_mien: 'shopee.vn', luot: 8 }] });
+  await m.baoCao({ trang_web: [{ ngay: hom, ten_mien: 'shopee.vn', luot: 8 }] });
+  await m.baoCao({ ma_may: 'may-may-may-may-02', ten_may: 'PC-02', trang_web: [{ ngay: hom, ten_mien: 'shopee.vn', luot: 10 }] });
+  const doc = (a) => m.env.KHO().doc('website', { tu: hom, den: hom, ...a });
+  let w = doc({});
+  assert.equal(w.luot, 20);
+  assert.equal(w.so_web, 2);
+  assert.equal(w.so_may, 2);
+  assert.deepEqual(w.hang.map((x) => [x.ten_mien, x.luot, x.so_may]), [['shopee.vn', 18, 2], ['facebook.com', 2, 1]], 'nhiều nhất lên đầu; số là tổng của ngày nên gửi lại không đếm trùng');
+  assert.equal(doc({ ma_may: 'may-may-may-may-02' }).luot, 10, 'lọc theo máy');
+  assert.equal(doc({ key: KEY }).luot, 20, 'lọc theo cộng sự');
+  assert.equal(doc({ key: 'HLG-KHAC-KHAC-KHAC' }).luot, 0);
+  assert.equal(doc({ tim: 'face' }).hang.length, 1, 'tìm theo tên miền');
+  assert.equal(doc({ tim: '%' }).hang.length, 0, 'ký tự đặc biệt không thành mẫu');
+  assert.equal(w.theo_ngay.length, 1);
+  assert.equal(w.theo_ngay[0].luot, 20);
+  const ct = m.env.KHO().doc('chiTietWebsite', { ten_mien: 'shopee.vn', tu: hom, den: hom });
+  assert.deepEqual(ct.may.map((x) => [x.ten_may, x.luot]), [['PC-02', 10], ['PC-01', 8]]);
+  const q = m.env.KHO().doc('tongQuan');
+  assert.equal(q.top_web[0].ten_mien, 'shopee.vn');
+  assert.equal(q.top_web[0].luot, 18);
+  assert.equal(m.env.KHO().doc('chiTietMay', { ma_may: MAY }).top_web[0].luot, 8);
+  // Chỉ nhận đúng tên miền: thứ có đường dẫn hay từ khoá bị bỏ, báo cáo vẫn nhận phần còn lại.
+  const truoc = doc({}).luot;
+  const sai = ['https://shopee.vn/search?keyword=bi-mat', 'shopee.vn/search', 'a b.com', '<script>', '', 'x'.repeat(200), null, 123];
+  assert.equal((await m.baoCao({ trang_web: sai.map((ten_mien) => ({ ngay: hom, ten_mien, luot: 1 })).concat([{ ngay: hom, ten_mien: 'tot.vn', luot: 1 }]) })).ma, 200);
+  assert.equal(doc({}).luot, truoc + 1);
+  assert.equal(doc({ tim: 'tot.vn' }).luot, 1);
+  // Số lượt vô lý bị bỏ; ngày sai hay quá xa thì tính vào hôm nay; không phải mảng thì bỏ qua.
+  await m.baoCao({ trang_web: [{ ngay: hom, ten_mien: 'am.vn', luot: -5 }, { ngay: hom, ten_mien: 'lon.vn', luot: 1e9 }, { ngay: hom, ten_mien: 'chu.vn', luot: 'abc' }] });
+  assert.equal(doc({ tim: 'am.vn' }).luot + doc({ tim: 'lon.vn' }).luot + doc({ tim: 'chu.vn' }).luot, 0);
+  await m.baoCao({ trang_web: [{ ngay: '2099-01-01', ten_mien: 'tuong-lai.vn', luot: 1 }, { ngay: '2001-01-01', ten_mien: 'xua.vn', luot: 1 }, { ngay: 'abc', ten_mien: 'sai-ngay.vn', luot: 1 }] });
+  for (const x of ['tuong-lai.vn', 'sai-ngay.vn']) assert.equal(doc({ tim: x }).luot, 1, x);
+  assert.equal(doc({ tim: 'xua.vn' }).luot, 0, 'quá hạn giữ thì bỏ');
+  assert.equal(m.env.KHO().doc('website', { ngay: 366 }).hang.some((r) => r.ten_mien === 'xua.vn'), false);
+  assert.equal((await m.baoCao({ trang_web: 'khong-phai-mang' })).ma, 200);
+  assert.equal((await m.baoCao({ trang_web: [null, 5, 'x'] })).ma, 200);
+  // Máy bị từ chối thì không ghi được gì.
+  const dau = doc({}).luot;
+  assert.equal((await m.baoCao({ ma_may: 'may-la-chua-kich-hoat-1', trang_web: [{ ngay: hom, ten_mien: 'gia.vn', luot: 99 }] })).ma, 403);
+  assert.equal(doc({}).luot, dau);
+  // Hết hạn giữ thì xoá.
+  m.sql('update trang_web set ngay = ?', Date.now() - 200 * 86400000);
+  donDep(m.sql, Date.now());
+  assert.equal(m.sql('select count(*) n from trang_web')[0].n, 0);
+});
+
+test('tổng quan nhẹ: làm mới không quét bảng lớn, số đổi từng lúc vẫn đủ', async () => {
+  const m = await dung();
+  await m.baoCao({ tong_profile: 7, dang_mo: [{ id: 'p1', ten: 'A', thu_muc: '', giay: 1 }] });
+  const day = m.env.KHO().doc('tongQuan', {});
+  assert.ok(day.xu_huong && day.top_web && day.theo_nen);
+  assert.equal(day.so.luot, 1);
+  // Đếm số câu đụng tới bảng lớn.
+  const cau = [];
+  const goc = m.sql;
+  const nhe = (await import('./core.mjs')).DOC.tongQuan((q, ...p) => { cau.push(q); return goc(q, ...p); }, { nhe: 1 }, Date.now());
+  assert.equal(nhe.xu_huong, undefined);
+  assert.equal(nhe.top_web, undefined);
+  assert.equal(nhe.theo_nen, undefined);
+  assert.equal(nhe.so.dang_su_dung, 1);
+  assert.equal(nhe.so.truc_tuyen, 1);
+  assert.equal(nhe.so.tong_profile, 7);
+  assert.equal(nhe.dang_dung.length, 1);
+  assert.ok(nhe.may_tt);
+  assert.equal(cau.filter((q) => /from (phien|trang_web)/.test(q)).length, 0, 'không đụng phien và trang_web');
+});
+
+const tenPhien = (id, bat_dau, ket_thuc, them) => ({ id, ten: 'FB-' + id, thu_muc: 'Ads', bat_dau, ket_thuc: ket_thuc === undefined ? null : ket_thuc, ...them });
+
+test('báo cáo theo đợt: giờ mở và đóng là giờ thật, gửi lại bao nhiêu lần cũng không trùng', async () => {
+  const m = await dung();
+  const bay = Date.now();
+  const mo = bay - 5 * 3600000, dong = bay - 4 * 3600000;
+  const lan1 = { phien: [tenPhien('p1', mo, dong), tenPhien('p2', bay - 3600000)], tu_dong: [], tong_profile: 9, dot: dotGanNhat(bay) };
+  for (let i = 0; i < 3; i++) assert.equal((await m.baoCao(lan1)).ma, 200, 'gửi lại khi không nhận được trả lời');
+  assert.equal(m.sql('select count(*) n from phien')[0].n, 2);
+  const p1 = m.sql("select * from phien where profile_id = 'p1'")[0];
+  assert.equal(p1.bat_dau, mo);
+  assert.equal(p1.ket_thuc, dong);
+  const ls = m.env.KHO().doc('lichSu', { ngay: 1 }).hang;
+  assert.equal(ls.filter((n) => n.viec === 'Mở profile').length, 2, 'không ghi trùng lịch sử');
+  assert.equal(ls.filter((n) => n.viec === 'Đóng profile').length, 1);
+  assert.equal(ls.find((n) => n.viec === 'Đóng profile').luc, dong, 'lịch sử theo giờ thật, không phải giờ gửi');
+  let q = m.env.KHO().doc('tongQuan');
+  assert.equal(q.so.dang_su_dung, 1, 'p2 đang mở');
+  assert.equal(q.so.luot, 2);
+  assert.equal(q.dang_dung[0].tu_luc, bay - 3600000);
+  // Đợt sau: p2 đã đóng, p3 mở rồi đóng trong khoảng giữa.
+  await m.baoCao({ phien: [tenPhien('p2', bay - 3600000, bay - 1800000), tenPhien('p3', bay - 1700000, bay - 1600000)], tu_dong: [], dot: dotGanNhat(bay) });
+  q = m.env.KHO().doc('tongQuan');
+  assert.equal(q.so.dang_su_dung, 0);
+  assert.equal(q.so.luot, 3);
+  assert.equal(m.sql("select ket_thuc from phien where profile_id = 'p2'")[0].ket_thuc, bay - 1800000);
+  assert.equal(m.env.KHO().doc('baoCaoSo', { ngay: 1 }).theo_nen[0].ms > 0, true);
+});
+
+test('báo cáo theo đợt: mất điện thì phiên đóng ở giờ cuối còn sống, gửi bù ghi lịch sử một lần', async () => {
+  const m = await dung();
+  const bay = Date.now();
+  await m.baoCao({ phien: [tenPhien('p1', bay - 7200000)], tu_dong: [], dot: bay - 7200000 });
+  assert.equal(m.env.KHO().doc('tongQuan').so.dang_su_dung, 1);
+  const dot = dotGanNhat(bay);
+  const bu = { phien: [tenPhien('p1', bay - 7200000, bay - 7000000, { dot_ngot: true })], tu_dong: [], dot, gui_bu: true };
+  await m.baoCao(bu);
+  await m.baoCao(bu); // đợt gửi nhiều phần, hoặc gửi lại
+  const ls = m.env.KHO().doc('lichSu', { ngay: 1 }).hang;
+  assert.equal(ls.filter((n) => n.viec === 'Đóng profile (máy hoặc app tắt)').length, 1);
+  assert.equal(ls.filter((n) => n.viec === 'Gửi bù báo cáo').length, 1);
+  assert.match(ls.find((n) => n.viec === 'Gửi bù báo cáo').doi_tuong, /^Đợt (09|17)h ngày \d\d\/\d\d$/);
+  assert.equal(m.sql("select ket_thuc from phien where profile_id = 'p1'")[0].ket_thuc, bay - 7000000);
+  assert.equal(m.env.KHO().doc('tongQuan').so.dang_su_dung, 0);
+  assert.equal(m.sql('select gui_bu from may_dot')[0].gui_bu, 1);
+  // Đợt thường thì không ghi gì thêm.
+  await m.baoCao({ phien: [], tu_dong: [], dot, gui_bu: false });
+  assert.equal(m.env.KHO().doc('lichSu', { ngay: 1 }).hang.filter((n) => n.viec === 'Gửi bù báo cáo').length, 1);
+});
+
+test('báo cáo theo đợt: chữ và giờ sai bị bỏ, phần còn lại vẫn nhận', async () => {
+  const m = await dung();
+  const bay = Date.now();
+  const r = await m.baoCao({ phien: [null, 5, {}, { id: 'a' }, tenPhien('tuong-lai', bay + 7200000), tenPhien('nguoc', bay - 1000, bay - 5000), tenPhien('tot', bay - 5000, bay - 1000)], tu_dong: [null, { du_an: '' }, { du_an: 'X', bat_dau: 'abc' }], dot: 'abc' });
+  assert.equal(r.ma, 200);
+  assert.deepEqual(m.sql('select profile_id from phien').map((x) => x.profile_id), ['tot']);
+});
+
+test('báo cáo theo đợt: automation ghi một lần khi chạy, một lần khi xong', async () => {
+  const m = await dung();
+  const bay = Date.now();
+  const chay = { du_an: 'Đăng bài', bat_dau: bay - 60000, ket_thuc: null, luong: 3, dong_ok: 1, dong_loi: 0 };
+  for (let i = 0; i < 2; i++) await m.baoCao({ phien: [], tu_dong: [chay], dot: bay });
+  assert.equal(m.env.KHO().doc('tongQuan').so.tu_dong, 1);
+  for (let i = 0; i < 2; i++) await m.baoCao({ phien: [], tu_dong: [{ ...chay, ket_thuc: bay - 1000, dong_ok: 9, dong_loi: 2 }], dot: bay });
+  assert.equal(m.env.KHO().doc('tongQuan').so.tu_dong, 0);
+  const ls = m.env.KHO().doc('lichSu', { ngay: 1 }).hang;
+  assert.equal(ls.filter((n) => n.viec === 'Chạy automation').length, 1);
+  const xong = ls.filter((n) => n.viec === 'Kết thúc automation');
+  assert.equal(xong.length, 1);
+  assert.equal(xong[0].chi_tiet, '9 dòng xong, 2 dòng lỗi');
+});
+
+test('tình trạng máy theo đợt: lỡ đợt thì báo chưa gửi, gửi bù là hết; máy bản cũ vẫn như trước', async () => {
+  const m = await dung();
+  m.HIR_KEY.the.get(KEY).kich_hoat.push({ ma_may: 'may-cu-bao-3-phut-01', ten_may: 'PC-CU', lan_dau: '', lan_cuoi: '' });
+  const bay = Date.now();
+  await m.baoCao({ phien: [tenPhien('p1', bay - 60000)], tu_dong: [], dot: bay });
+  await m.baoCao({ ma_may: 'may-cu-bao-3-phut-01', ten_may: 'PC-CU', dang_mo: [{ id: 'c1', ten: 'C', thu_muc: '', giay: 5 }] });
+  const may = (id) => m.sql('select * from may where ma_may = ?', id)[0];
+  // Vừa gửi xong: chưa tới đợt mới thì vẫn là đã báo cáo, dù đã im vài tiếng (bản cũ im 3 nhịp là mất kết nối).
+  const qua = (giay) => m.sql('update may set lan_cuoi = ?', Date.now() - giay * 1000);
+  qua(300);
+  donDep(m.sql, Date.now());
+  assert.equal(may(MAY).truc_tuyen, 1);
+  // Trước đợt gần nhất: lỡ đợt này. Phiên chưa bị đóng: lần gửi bù sẽ mang giờ đóng thật về.
+  m.sql('update may set lan_cuoi = ? where ma_may = ?', dotGanNhat(Date.now() - 15 * 60000) - 60000, MAY);
+  m.sql("update may set lan_cuoi = ? where ma_may = 'may-cu-bao-3-phut-01'", Date.now() - 3600000);
+  donDep(m.sql, Date.now());
+  assert.equal(may(MAY).truc_tuyen, 0, 'chưa gửi đợt này');
+  assert.equal(m.sql('select ket_thuc from phien where profile_id = ?', 'p1')[0].ket_thuc, null);
+  assert.equal(m.env.KHO().doc('tongQuan').so.dang_su_dung, 0, 'không tính máy chưa báo cáo vào đang dùng');
+  assert.equal(may('may-cu-bao-3-phut-01').truc_tuyen, 0);
+  assert.notEqual(m.sql('select ket_thuc from phien where profile_id = ?', 'c1')[0].ket_thuc, null, 'bản cũ: server tự đóng');
+  await m.baoCao({ phien: [tenPhien('p1', bay - 60000, bay - 1000, { dot_ngot: true })], tu_dong: [], dot: dotGanNhat(Date.now()), gui_bu: true });
+  assert.equal(may(MAY).truc_tuyen, 1, 'gửi bù xong');
+  // Im rất lâu với phiên còn mở: đóng ở lần cuối, để không tính giờ dùng tới mãi.
+  await m.baoCao({ phien: [tenPhien('p9', bay - 1000)], tu_dong: [], dot: bay });
+  m.sql('update may set lan_cuoi = ? where ma_may = ?', Date.now() - 4 * 86400000, MAY);
+  donDep(m.sql, Date.now());
+  assert.notEqual(m.sql("select ket_thuc from phien where profile_id = 'p9'")[0].ket_thuc, null);
+});
+
+test('đợt gần nhất là 9h hoặc 17h giờ Việt Nam', () => {
+  const vn = (d, g, p) => Date.UTC(2026, 9, d, g, p || 0) - 7 * 3600000;
+  assert.equal(dotGanNhat(vn(30, 9)), vn(30, 9));
+  assert.equal(dotGanNhat(vn(30, 8, 59)), vn(29, 17));
+  assert.equal(dotGanNhat(vn(30, 16, 59)), vn(30, 9));
+  assert.equal(dotGanNhat(vn(30, 17)), vn(30, 17));
+  assert.equal(dotGanNhat(vn(30, 23, 59)), vn(30, 17));
+  assert.equal(dotGanNhat(vn(31, 0)), vn(30, 17));
+});
+
+test('website: chưa đăng nhập thì không xem được', async () => {
+  const m = await dung();
+  for (const d of ['website', 'chiTietWebsite']) assert.equal((await m.goi('/api/qt/' + d)).ma, 401, d);
 });
 
 test('đoán nền tảng', () => {
