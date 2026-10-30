@@ -1,0 +1,8 @@
+name = "hirlogin-ten-mien"
+main = "worker.js"
+compatibility_date = "2024-09-01"
+workers_dev = false
+routes = [{ pattern = "hirlogin.nguyenquangcuong.vn", custom_domain = true }]
+
+[vars]
+DICH = "https://hirlogin-web.hir-contact-vn.workers.dev"

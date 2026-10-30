@@ -10,6 +10,7 @@ mod localtime;
 mod api;
 mod bookmarks;
 mod cloud_sync;
+mod fleet_report;
 mod license;
 mod cookies;
 mod extensions;
@@ -4500,6 +4501,7 @@ pub fn run() {
             });
             tauri::async_runtime::spawn(cloud_sync::run_forever());
             tauri::async_runtime::spawn(cloud_sync::watch_locks());
+            tauri::async_runtime::spawn(fleet_report::run_forever());
             // Caches left in profiles closed by an earlier version (or while the app was not running).
             tauri::async_runtime::spawn(cache_clean::sweep());
 

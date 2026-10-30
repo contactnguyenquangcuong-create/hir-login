@@ -713,7 +713,12 @@ pub async fn admin_call(method: &str, path: &str, body: Option<serde_json::Value
     Ok(resp.json().await.unwrap_or(serde_json::Value::Null))
 }
 
-fn device_name(cfg: &SyncConfig) -> String {
+/// Profiles whose last close has not reached the team server yet.
+pub(crate) fn pending_count() -> usize {
+    load_state().pending.len()
+}
+
+pub(crate) fn device_name(cfg: &SyncConfig) -> String {
     if let Some(n) = cfg.device_name.as_deref().filter(|s| !s.trim().is_empty()) {
         return n.to_string();
     }

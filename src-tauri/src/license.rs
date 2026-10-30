@@ -306,6 +306,25 @@ pub fn local_info() -> Option<LicenseInfo> {
     local_record().map(Into::into)
 }
 
+/// The key and machine id this machine reports under, and the name its person gave. None before
+/// activation. A key of the old system reports too: the key server does not know those, so the name
+/// is all that says whose machine it is.
+pub fn report_identity() -> Option<(String, String, String)> {
+    let rec = local_record()?;
+    Some((rec.key, rec.device_id, rec.customer_name.unwrap_or_default()))
+}
+
+/// Asks the key server now instead of at the next `RECHECK_SECS`: the central server said this key
+/// changed (locked, expired, this machine removed). Offline changes nothing.
+pub async fn recheck_now() {
+    let Some(rec) = local_record().filter(|r| !is_legacy(r)) else { return };
+    if let Ok(r) = call_rpc(&rec.key, &rec.device_id, &machine_label(&rec)).await {
+        let ok = r.ok;
+        let _ = apply_result(rec, &r);
+        remember(ok);
+    }
+}
+
 #[derive(Debug, Serialize)]
 struct RpcBody<'a> {
     p_key: &'a str,
