@@ -397,7 +397,17 @@ test('website: cộng dồn theo ngày và máy, lọc được, chỉ nhận t�
   const q = m.env.KHO().doc('tongQuan');
   assert.equal(q.top_web[0].ten_mien, 'shopee.vn');
   assert.equal(q.top_web[0].luot, 18);
-  assert.equal(m.env.KHO().doc('chiTietMay', { ma_may: MAY }).top_web[0].luot, 8);
+  // Chia theo thiết bị: máy nhiều lượt lên đầu, mỗi máy kèm website vào nhiều nhất; lọc giống trang Website.
+  const theoMay = (a) => m.env.KHO().doc('websiteTheoMay', { tu: hom, den: hom, ...a });
+  assert.deepEqual(theoMay({}).hang.map((x) => [x.ten_may, x.luot, x.so_web, x.top.map((t) => t.ten_mien)]), [['PC-01', 10, 2, ['shopee.vn', 'facebook.com']], ['PC-02', 10, 1, ['shopee.vn']]]);
+  assert.deepEqual(theoMay({ tim: 'face' }).hang.map((x) => [x.ten_may, x.luot]), [['PC-01', 2]], 'tìm tên miền thì chỉ còn máy có vào');
+  assert.equal(theoMay({ ma_may: 'may-may-may-may-02' }).hang.length, 1);
+  assert.deepEqual(theoMay({ phang: 1 }).hang.map((x) => [x.ten_may, x.ten_mien, x.luot]), [['PC-01', 'shopee.vn', 8], ['PC-01', 'facebook.com', 2], ['PC-02', 'shopee.vn', 10]], 'xuất Excel: từng cặp máy và website');
+  const rieng = m.env.KHO().doc('bieuDoMay', { ma_may: MAY, tu: hom, den: hom });
+  assert.equal(rieng.luot_web, 10, 'chỉ tính máy này');
+  assert.deepEqual(rieng.web.map((x) => [x.ten_mien, x.luot]), [['shopee.vn', 8], ['facebook.com', 2]]);
+  assert.equal(rieng.web_theo_ngay.length, 1);
+  assert.equal(rieng.web_theo_ngay[0].luot, 10);
   // Chỉ nhận đúng tên miền: thứ có đường dẫn hay từ khoá bị bỏ, báo cáo vẫn nhận phần còn lại.
   const truoc = doc({}).luot;
   const sai = ['https://shopee.vn/search?keyword=bi-mat', 'shopee.vn/search', 'a b.com', '<script>', '', 'x'.repeat(200), null, 123];
@@ -555,6 +565,28 @@ test('đợt gần nhất là 9h hoặc 17h giờ Việt Nam', () => {
   assert.equal(dotGanNhat(vn(30, 17)), vn(30, 17));
   assert.equal(dotGanNhat(vn(30, 23, 59)), vn(30, 17));
   assert.equal(dotGanNhat(vn(31, 0)), vn(30, 17));
+});
+
+test('biểu đồ riêng máy: chia đúng theo ngày, giờ và nền tảng, không lẫn máy khác', async () => {
+  const m = await dung();
+  m.HIR_KEY.the.get(KEY).kich_hoat.push({ ma_may: 'may-may-may-may-02', ten_may: 'PC-02', lan_dau: '', lan_cuoi: '' });
+  const iso = (ms) => new Date(ms + 7 * 3600000).toISOString().slice(0, 10);
+  const nua = 1800000, dauHom = Math.floor((Date.now() + 7 * 3600000) / 86400000) * 86400000 - 7 * 3600000;
+  const q = dauHom - 86400000; // 0h hôm qua; phiên qua nửa đêm, nửa giờ mỗi bên
+  await m.baoCao({ phien: [{ id: 'p1', ten: 'Shopee A', thu_muc: '', bat_dau: q - nua, ket_thuc: q + nua }] });
+  await m.baoCao({ ma_may: 'may-may-may-may-02', ten_may: 'PC-02', phien: [{ id: 'p2', ten: 'Facebook B', thu_muc: '', bat_dau: q, ket_thuc: q + 3 * nua }] });
+  const r = (tu, den) => m.env.KHO().doc('bieuDoMay', { ma_may: MAY, tu: iso(tu), den: iso(den) });
+  const hai = r(q - 86400000, q);
+  assert.deepEqual(hai.theo_ngay.map((x) => [x.ms, x.luot]), [[nua, 1], [nua, 0]], 'nửa giờ mỗi ngày, lượt mở tính ở ngày mở');
+  assert.equal(hai.ms, 2 * nua);
+  assert.equal(hai.so_profile, 1);
+  assert.equal(hai.theo_gio.o.flat().reduce((a, b) => a + b, 0), 2 * nua);
+  assert.deepEqual(hai.theo_nen.map((x) => [x.nen_tang, x.ms]), [['shopee', 2 * nua]]);
+  const mot = r(q, q);
+  assert.equal(mot.ms, nua, 'chỉ phần nằm trong khoảng đã chọn');
+  assert.equal(mot.luot, 0, 'mở từ trước khoảng này');
+  assert.equal(r(dauHom + 86400000 * -5, dauHom - 86400000 * 3).ms, 0, 'ngoài khoảng thì không có gì');
+  assert.equal(m.env.KHO().doc('chiTietMay', { ma_may: MAY }).top_web, undefined);
 });
 
 test('website: chưa đăng nhập thì không xem được', async () => {

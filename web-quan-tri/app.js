@@ -123,8 +123,8 @@
     l.append(h('div', { lop: 'man', bam: () => { if (!lopKhoa) dong(); } }), the);
     return dong;
   }
-  function moNgan(tieuDe, phuDe, than) {
-    const n = h('aside', { lop: 'ngan', role: 'dialog', 'aria-label': tieuDe },
+  function moNgan(tieuDe, phuDe, than, lopThem) {
+    const n = h('aside', { lop: 'ngan' + (lopThem ? ' ' + lopThem : ''), role: 'dialog', 'aria-label': tieuDe },
       h('div', { lop: 'dau' }, h('div', { lop: '' }, h('h3', null, tieuDe), phuDe && h('div', { lop: 'dong-phu' }, phuDe)),
         h('button', { lop: 'nut icon', 'aria-label': 'Đóng', bam: () => dongLop && dongLop() }, bieu('dong'))),
       h('div', { lop: 'than' }, than));
@@ -540,6 +540,7 @@
     const coChon = dongLop;
     if (coChon) coChon();
     moNgan(m.ten_may || 'Máy', m.nhan_su, [
+      bieuDoRiengMay(maMay),
       h('div', { lop: 'muc-ngan' }, h('h4', null, 'Thông tin'), h('dl', { lop: 'cap' },
         h('dt', null, 'Tình trạng'), h('dd', null, m.truc_tuyen ? nhanTrang('Đã báo cáo đợt này', 'ok') : nhanTrang('Chưa gửi đợt này', 'chu-y')),
         h('dt', null, 'Báo cáo gần nhất'), h('dd', null, ngayGio(m.lan_cuoi)),
@@ -553,13 +554,44 @@
       h('div', { lop: 'muc-ngan' }, h('h4', null, `Đang mở (${d.dang_mo.length})`),
         d.dang_mo.length ? d.dang_mo.map((p) => h('div', { lop: 'dong-gon' }, h('span', { lop: 'cat' }, p.ten), h('span', { lop: 'mo so-mono' }, thoiLuong(Date.now() - p.tu_luc)))) : h('div', { lop: 'mo' }, 'Không mở profile nào')),
       m.tu_dong.length ? h('div', { lop: 'muc-ngan' }, h('h4', null, 'Automation đang chạy'), m.tu_dong.map((a) => h('div', { lop: 'dong-gon' }, h('span', { lop: 'cat' }, a.du_an), h('span', { lop: 'mo so-mono' }, `${a.dong_ok} xong · ${a.dong_loi} lỗi`)))) : null,
-      h('div', { lop: 'muc-ngan' }, h('h4', null, 'Website vào nhiều nhất, 30 ngày qua'), (d.top_web || []).length ? d.top_web.map((r) => h('div', { lop: 'dong-gon' }, h('span', { lop: 'cat' }, r.ten_mien), h('b', { lop: 'so-mono' }, `${so(r.luot)} lượt`))) : h('div', { lop: 'mo' }, 'Chưa có số liệu')),
       h('div', { lop: 'muc-ngan' }, h('h4', null, 'Hoạt động của máy'), dongThoiGian(d.hoat_dong)),
       h('button', { lop: 'nut nguy', bam: async () => {
         if (!(await xacNhan('Xoá máy khỏi danh sách?', `${m.ten_may}: lịch sử vẫn được giữ. Nếu máy còn dùng Hir-Login, nó sẽ tự xuất hiện lại ở lần báo cáo sau.`, 'Xoá máy', true))) return;
         await ghi('xoaMay', { ma_may: maMay }); bao('Đã xoá máy'); napLai();
       } }, 'Xoá khỏi danh sách'),
-    ]);
+    ], 'rong');
+  }
+
+  // Biểu đồ của riêng một máy. Khoảng ngày chọn ở đây không đổi bộ lọc của trang đang mở phía sau.
+  function bieuDoRiengMay(maMay) {
+    let chon = khoangChon.loai, luot = 0;
+    const khoangMay = () => { if (chon === 'tuy_chon') return khoangHien(); const [tu, den] = tinhKhoang(chon); return { tu, den }; };
+    const than = h('div', { lop: 'cot' });
+    const chu = h('span', { lop: 'khoang-chu' });
+    const moiKhoi = (tieuDe, noiDung) => h('section', { lop: 'khoi' }, h('div', { lop: 'dau-khoi' }, h('h2', null, tieuDe)), h('div', { lop: 'than-khoi' }, noiDung));
+    async function nap() {
+      const me = ++luot;
+      const d = await doc('bieuDoMay', { ma_may: maMay, ...khoangMay() });
+      if (me !== luot) return;
+      than.classList.remove('dang-tai');
+      const k = khoangMay();
+      chu.textContent = k.tu === k.den ? ngayDoc(k.tu) : `${ngayDoc(k.tu)} – ${ngayDoc(k.den)} · ${so(d.so_ngay)} ngày`;
+      const lon = Math.max(1, ...d.web.map((r) => r.luot));
+      const dongWeb = (r) => h('div', { lop: 'dong-web' }, chipWeb(r.ten_mien, (r.luot / lon) * 100), h('b', { lop: 'so-mono' }, `${so(r.luot)} lượt`));
+      const dsWeb = h('div', null, d.web.slice(0, 10).map(dongWeb));
+      them(xoa(than), [
+        h('div', { lop: 'dai-so' }, [['Giờ dùng', d.ms ? thoiLuong(d.ms) : '0', 'mở profile'], ['Lượt mở', so(d.luot), 'profile'], ['Profile', so(d.so_profile), 'khác nhau'], ['Lượt truy cập', so(d.luot_web), 'website'], ['Website', so(d.so_web), 'tên miền']].map(([x, y, z]) => h('div', { lop: 'o-so' }, h('div', { lop: 'nhan-so' }, x), h('div', { lop: 'so' }, y), h('div', { lop: 'ghi' }, z)))),
+        moiKhoi('Giờ dùng profile theo ngày', d.ms ? cotTheoNgay(d.theo_ngay, 'Giờ dùng profile theo ngày của máy này', (x) => soGio(x.ms), nhanGio, (x) => [{ gia: thoiLuong(x.ms), nhan: 'giờ dùng' }, { gia: so(x.luot), nhan: 'lượt mở' }]) : trong('Chưa có số liệu', 'Máy này không mở profile trong khoảng ngày đã chọn.')),
+        moiKhoi('Lượt truy cập website theo ngày', d.luot_web ? cotTheoNgay(d.web_theo_ngay, 'Lượt truy cập website theo ngày của máy này', (x) => x.luot, nhanSoGon, (x) => [{ gia: so(x.luot), nhan: 'lượt truy cập' }]) : trong('Chưa có số liệu', 'Có sau khi máy lên bản 0.2.44 và tới đợt báo cáo tiếp theo (9h hoặc 17h).')),
+        moiKhoi('Website vào nhiều nhất', d.web.length ? [dsWeb, d.so_web > 10 ? h('button', { lop: 'nut nho xem-het', bam: (e) => { them(xoa(dsWeb), d.web.map(dongWeb)); e.currentTarget.remove(); } }, d.so_web > d.web.length ? `Xem ${so(d.web.length)} website nhiều nhất` : `Xem tất cả ${so(d.so_web)} website`) : null] : trong('Chưa có số liệu', '')),
+        moiKhoi('Giờ nào dùng nhiều, theo thứ trong tuần', banDoGio(d.theo_gio)),
+        moiKhoi('Theo nền tảng', chongTheoNen(d.theo_nen)),
+      ]);
+    }
+    const muc = KHOANG_NHANH.filter(([v]) => v !== 'tuy_chon' || chon === 'tuy_chon');
+    const tab = tabNho(muc, chon, (v) => { chon = v; than.classList.add('dang-tai'); nap().catch((e) => bao(e.message, true)); });
+    nap().catch((e) => bao(e.message, true));
+    return h('div', { lop: 'muc-ngan' }, h('div', { lop: 'loc' }, tab, chu), than);
   }
 
   // ----- Cộng sự -----
@@ -595,22 +627,22 @@
 
   // ----- Website -----
   const dauWeb = (ten) => h('span', { lop: 'ky-hieu' }, String(ten || '?').charAt(0).toUpperCase());
-  function chipWeb(ten, phanTram) {
+  function chipWeb(ten, phanTram, phu) {
     const thanh = h('i');
     thanh.style.width = `${Math.max(1, Math.round(phanTram))}%`;
-    return h('div', { lop: 'chip-profile' }, dauWeb(ten), h('div', { lop: 'day-web' }, h('div', { lop: 'dong-chinh cat' }, ten), h('div', { lop: 'thanh' }, thanh)));
+    return h('div', { lop: 'chip-profile' }, dauWeb(ten), h('div', { lop: 'day-web' }, h('div', { lop: 'dong-chinh cat' }, ten), phu && h('div', { lop: 'dong-phu cat' }, phu), h('div', { lop: 'thanh' }, thanh)));
   }
   async function moChiTietWeb(ten) {
     const d = await doc('chiTietWebsite', { ten_mien: ten, ...khoangHien() });
     moNgan(ten, 'Trong khoảng ngày đang chọn', [
-      h('div', { lop: 'muc-ngan' }, h('h4', null, 'Theo máy'), d.may.length ? d.may.map((m) => h('div', { lop: 'dong-gon' }, h('span', { lop: 'cat' }, `${m.nhan_su} · ${m.ten_may}`), h('b', { lop: 'so-mono' }, `${so(m.luot)} lượt`))) : h('div', { lop: 'mo' }, 'Không có')),
+      h('div', { lop: 'muc-ngan' }, h('h4', null, 'Theo máy'), d.may.length ? d.may.map((m) => h('div', { lop: 'dong-gon bam', bam: () => moChiTietMay(m.ma_may) }, h('span', { lop: 'cat' }, `${m.nhan_su} · ${m.ten_may}`), h('b', { lop: 'so-mono' }, `${so(m.luot)} lượt`))) : h('div', { lop: 'mo' }, 'Không có')),
       h('div', { lop: 'muc-ngan' }, h('h4', null, 'Theo ngày'), d.theo_ngay.length ? d.theo_ngay.map((n) => h('div', { lop: 'dong-gon' }, h('span', null, ngayDu(n.ngay)), h('span', { lop: 'so-mono' }, `${so(n.luot)} lượt`))) : h('div', { lop: 'mo' }, 'Không có')),
     ]);
   }
   function trangWebsite(goc) {
     const than = h('div', { lop: 'cot' });
     const loc = { key: '', ma_may: '', tim: '', trang: 1 };
-    let luot0 = 0, daCo = false;
+    let luot0 = 0, daCo = false, xem = 'web';
     const chonNguoi = h('select', { lop: 'o', 'aria-label': 'Cộng sự', onchange: (e) => { loc.key = e.target.value; loc.trang = 1; napMoi(); } }, h('option', { value: '' }, 'Mọi cộng sự'));
     const chonMay = h('select', { lop: 'o', 'aria-label': 'Máy', onchange: (e) => { loc.ma_may = e.target.value; loc.trang = 1; napMoi(); } }, h('option', { value: '' }, 'Mọi máy'));
     const napMoi = () => { than.classList.add('dang-tai'); nap().catch((e) => bao(e.message, true)); };
@@ -623,7 +655,7 @@
     }
     async function nap() {
       const me = ++luot0;
-      const d = await doc('website', { ...loc, ...khoangHien() });
+      const [d, theoMay] = await Promise.all([doc('website', { ...loc, ...khoangHien() }), xem === 'may' ? doc('websiteTheoMay', { ...loc, ...khoangHien() }) : null]);
       if (me !== luot0) return;
       than.classList.remove('dang-tai');
       if (!daCo) {
@@ -634,6 +666,9 @@
         if (chonNguoi.value !== loc.key || chonMay.value !== loc.ma_may) { loc.key = chonNguoi.value; loc.ma_may = chonMay.value; return nap(); }
       }
       const lon = Math.max(1, ...d.hang.map((r) => r.luot));
+      const doiXem = tabNho([['web', 'Theo website'], ['may', 'Theo thiết bị']], xem, (v) => { xem = v; loc.trang = 1; napMoi(); });
+      const doiTrang = (t) => { loc.trang = t; nap().catch((e) => bao(e.message, true)); };
+      const lonMay = theoMay ? Math.max(1, ...theoMay.hang.map((m) => m.luot)) : 1;
       them(xoa(than), [
         d.tu < Date.now() - d.giu_ngay * 86400000 ? h('div', { lop: 'ghi-khoang' }, `Lịch sử chỉ giữ ${d.giu_ngay} ngày nên phần cũ hơn không có số liệu. Đổi được trong Cài đặt.`) : null,
         h('div', { lop: 'dai-so' }, [['Tổng lượt truy cập', so(d.luot), `trong ${so(d.so_ngay)} ngày`], ['Số website', so(d.so_web), 'tên miền khác nhau'], ['Cộng sự', so(d.so_nguoi), 'có truy cập'], ['Máy', so(d.so_may), 'có truy cập'], ['TB mỗi ngày', so(Math.round(d.luot / d.so_ngay)), 'lượt truy cập']].map(([x, y, z]) => h('div', { lop: 'o-so' }, h('div', { lop: 'nhan-so' }, x), h('div', { lop: 'so' }, y), h('div', { lop: 'ghi' }, z)))),
@@ -642,23 +677,39 @@
           : [
             h('section', { lop: 'khoi' }, h('div', { lop: 'dau-khoi' }, h('h2', null, 'Lượt truy cập theo ngày')), h('div', { lop: 'than-khoi' },
               cotTheoNgay(d.theo_ngay, 'Lượt truy cập website theo ngày', (x) => x.luot, nhanSoGon, (x) => [{ gia: so(x.luot), nhan: 'lượt truy cập' }]))),
-            h('section', { lop: 'khoi' }, h('div', { lop: 'dau-khoi' }, h('h2', null, 'Website vào nhiều nhất')),
-              bang(['Website', { t: 'Lượt', lop: 'phai' }, { t: 'Tỉ lệ', lop: 'phai' }, { t: 'Cộng sự', lop: 'phai' }, { t: 'Máy', lop: 'phai' }, 'Lần gần nhất'], d.hang, (r) => [
-                chipWeb(r.ten_mien, (r.luot / lon) * 100),
-                h('td', { lop: 'phai so-mono' }, so(r.luot)),
-                h('td', { lop: 'phai so-mono phu' }, d.luot ? `${Math.round((r.luot / d.luot) * 1000) / 10}%` : ''),
-                h('td', { lop: 'phai so-mono' }, so(r.so_nguoi)),
-                h('td', { lop: 'phai so-mono' }, so(r.so_may)),
-                h('span', { lop: 'phu so-mono' }, ngayDu(r.cuoi)),
-              ], (r) => moChiTietWeb(r.ten_mien)),
-              phanTrang(d.trang, d.moi, d.so_web, (t) => { loc.trang = t; nap().catch((e) => bao(e.message, true)); })),
+            xem === 'may'
+              ? h('section', { lop: 'khoi' }, h('div', { lop: 'dau-khoi' }, h('h2', null, 'Thiết bị vào website nhiều nhất'), doiXem),
+                bang(['Thiết bị', { t: 'Lượt', lop: 'phai' }, { t: 'Tỉ lệ', lop: 'phai' }, { t: 'Số website', lop: 'phai' }, 'Website vào nhiều nhất', 'Lần gần nhất'], theoMay.hang, (m) => [
+                  chipWeb(m.ten_may || 'Máy', (m.luot / lonMay) * 100, m.nhan_su),
+                  h('td', { lop: 'phai so-mono' }, so(m.luot)),
+                  h('td', { lop: 'phai so-mono phu' }, `${Math.round((m.luot / d.luot) * 1000) / 10}%`),
+                  h('td', { lop: 'phai so-mono' }, so(m.so_web)),
+                  h('div', { lop: 'top-web' }, m.top.map((t) => h('span', null, t.ten_mien, ' ', h('b', { lop: 'so-mono' }, so(t.luot))))),
+                  h('span', { lop: 'phu so-mono' }, ngayDu(m.cuoi)),
+                ], (m) => moChiTietMay(m.ma_may)),
+                phanTrang(theoMay.trang, theoMay.moi, d.so_may, doiTrang))
+              : h('section', { lop: 'khoi' }, h('div', { lop: 'dau-khoi' }, h('h2', null, 'Website vào nhiều nhất'), doiXem),
+                bang(['Website', { t: 'Lượt', lop: 'phai' }, { t: 'Tỉ lệ', lop: 'phai' }, { t: 'Cộng sự', lop: 'phai' }, { t: 'Máy', lop: 'phai' }, 'Lần gần nhất'], d.hang, (r) => [
+                  chipWeb(r.ten_mien, (r.luot / lon) * 100),
+                  h('td', { lop: 'phai so-mono' }, so(r.luot)),
+                  h('td', { lop: 'phai so-mono phu' }, d.luot ? `${Math.round((r.luot / d.luot) * 1000) / 10}%` : ''),
+                  h('td', { lop: 'phai so-mono' }, so(r.so_nguoi)),
+                  h('td', { lop: 'phai so-mono' }, so(r.so_may)),
+                  h('span', { lop: 'phu so-mono' }, ngayDu(r.cuoi)),
+                ], (r) => moChiTietWeb(r.ten_mien)),
+                phanTrang(d.trang, d.moi, d.so_web, doiTrang)),
           ],
       ]);
     }
     async function xuat() {
-      const d = await doc('website', { ...loc, ...khoangHien(), trang: 1, moi: 5000 });
-      const dong = [['Website', 'Lượt', 'Cộng sự', 'Máy', 'Lần gần nhất'].map(oCsv).join(',')].concat(d.hang.map((r) => [r.ten_mien, r.luot, r.so_nguoi, r.so_may, ngayDu(r.cuoi)].map(oCsv).join(',')));
       const k = khoangHien();
+      if (xem === 'may') {
+        const d = await doc('websiteTheoMay', { ...loc, ...k, phang: 1 });
+        const dong = [['Thiết bị', 'Cộng sự', 'Website', 'Lượt', 'Lần gần nhất'].map(oCsv).join(',')].concat(d.hang.map((r) => [r.ten_may, r.nhan_su, r.ten_mien, r.luot, ngayDu(r.cuoi)].map(oCsv).join(',')));
+        return taiFile(`website-theo-thiet-bi-hirlogin-${k.tu}-${k.den}.csv`, dong.join('\r\n'));
+      }
+      const d = await doc('website', { ...loc, ...k, trang: 1, moi: 5000 });
+      const dong = [['Website', 'Lượt', 'Cộng sự', 'Máy', 'Lần gần nhất'].map(oCsv).join(',')].concat(d.hang.map((r) => [r.ten_mien, r.luot, r.so_nguoi, r.so_may, ngayDu(r.cuoi)].map(oCsv).join(',')));
       taiFile(`website-hirlogin-${k.tu}-${k.den}.csv`, dong.join('\r\n'));
     }
     return { nap };

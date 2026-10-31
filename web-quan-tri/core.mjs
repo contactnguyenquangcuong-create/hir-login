@@ -381,19 +381,25 @@ function dinhTheoNgay(sql, tu, den, bay) {
 
 // Ma trận thứ × giờ (giờ Việt Nam, hàng 0 là thứ 2): mili-giây dùng profile, cộng dồn trong khoảng đã chọn.
 function oTheoGio(sql, tu, den, bay) {
-  const o = Array.from({ length: 7 }, () => new Array(24).fill(0));
+  const o = oGioTrong();
   const cuoi = Math.min(den, bay);
   for (const r of sql(`select bat_dau, coalesce(ket_thuc, ?) kt from phien where ${TRONG_KHOANG} limit 50000`, bay, den, bay, tu)) {
-    let t = Math.max(r.bat_dau, tu);
-    const het = Math.min(r.kt, cuoi);
-    while (t < het) {
-      const vn = t + VN_MS, d = Math.floor(vn / NGAY), trongNgay = vn - d * NGAY;
-      const sau = Math.min(het, t - (trongNgay % 3600000) + 3600000);
-      o[(d + 3) % 7][Math.floor(trongNgay / 3600000)] += sau - t; // 1/1/1970 là thứ 5
-      t = sau;
-    }
+    chiaTheoGio(Math.max(r.bat_dau, tu), Math.min(r.kt, cuoi), (t, sau, thu, gio) => { o[thu][gio] += sau - t; });
   }
   return { o };
+}
+
+const oGioTrong = () => Array.from({ length: 7 }, () => new Array(24).fill(0));
+
+// Cắt một khoảng thời gian thành từng đoạn trong một giờ (giờ Việt Nam), kèm thứ trong tuần (0 là thứ 2) và giờ.
+function chiaTheoGio(tu, het, lam) {
+  let t = tu;
+  while (t < het) {
+    const vn = t + VN_MS, d = Math.floor(vn / NGAY), trongNgay = vn - d * NGAY;
+    const sau = Math.min(het, t - (trongNgay % 3600000) + 3600000);
+    lam(t, sau, (d + 3) % 7, Math.floor(trongNgay / 3600000)); // 1/1/1970 là thứ 5
+    t = sau;
+  }
 }
 
 export function canhBao(sql, bay) {
@@ -403,6 +409,16 @@ export function canhBao(sql, bay) {
   for (const m of sql('select * from may where key_loi is not null')) ds.push({ loai: 'key', muc: 'loi', tieu_de: `${m.ten_may}: key ${m.key_loi === 'BI_KHOA' ? 'đã bị khoá' : 'đã hết hạn'}`, ai: m.nhan_su });
   if (moi) for (const m of sql('select * from may where truc_tuyen = 1')) if (m.phien_ban && soSanhPhienBan(m.phien_ban, moi) < 0) ds.push({ loai: 'phien_ban', muc: 'chu_y', tieu_de: `${m.ten_may} đang dùng bản cũ ${m.phien_ban} (mới nhất ${moi})`, ai: m.nhan_su });
   return ds;
+}
+
+// Điều kiện lọc chung của trang Website: khoảng ngày, cộng sự (key), máy và chữ trong tên miền.
+function locWeb(a, bay) {
+  const { tu, den, so_ngay } = khoang(a, bay);
+  const dk = ['ngay >= ?', 'ngay < ?'], ts = [tu, den];
+  if (a.key) { dk.push('key = ?'); ts.push(String(a.key)); }
+  if (a.ma_may) { dk.push('ma_may = ?'); ts.push(String(a.ma_may)); }
+  if (a.tim) { dk.push("ten_mien like ? escape '\\'"); ts.push('%' + String(a.tim).toLowerCase().replace(/[\\%_]/g, (x) => '\\' + x) + '%'); }
+  return { tu, den, so_ngay, w: dk.join(' and '), ts };
 }
 
 export const DOC = {
@@ -486,7 +502,6 @@ export const DOC = {
       may: mauMay(m),
       dang_mo: sql('select * from dang_mo where ma_may = ? order by tu_luc desc', m.ma_may),
       hoat_dong: sql('select * from nhat_ky where ma_may = ? order by luc desc, id desc limit 40', m.ma_may),
-      top_web: sql('select ten_mien, sum(luot) luot from trang_web where ma_may = ? and ngay >= ? group by ten_mien order by luot desc limit 10', m.ma_may, dauNgay(bay) - 29 * NGAY),
     };
   },
 
@@ -506,12 +521,7 @@ export const DOC = {
 
   // Website vào nhiều nhất trong khoảng ngày, lọc được theo cộng sự (key), máy và chữ trong tên miền.
   website(sql, a, bay) {
-    const { tu, den, so_ngay } = khoang(a, bay);
-    const dk = ['ngay >= ?', 'ngay < ?'], ts = [tu, den];
-    if (a.key) { dk.push('key = ?'); ts.push(String(a.key)); }
-    if (a.ma_may) { dk.push('ma_may = ?'); ts.push(String(a.ma_may)); }
-    if (a.tim) { dk.push("ten_mien like ? escape '\\'"); ts.push('%' + String(a.tim).toLowerCase().replace(/[\\%_]/g, (x) => '\\' + x) + '%'); }
-    const w = dk.join(' and ');
+    const { tu, den, so_ngay, w, ts } = locWeb(a, bay);
     const tong = sql(`select coalesce(sum(luot), 0) luot, count(distinct ten_mien) so_web, count(distinct key) so_nguoi, count(distinct ma_may) so_may from trang_web where ${w}`, ...ts)[0];
     const theoNgayMap = new Map(sql(`select ngay, sum(luot) luot from trang_web where ${w} group by ngay`, ...ts).map((r) => [r.ngay, r.luot]));
     const theo_ngay = [];
@@ -522,6 +532,52 @@ export const DOC = {
       hang: sql(`select ten_mien, sum(luot) luot, count(distinct key) so_nguoi, count(distinct ma_may) so_may, max(ngay) cuoi from trang_web where ${w} group by ten_mien order by luot desc, ten_mien limit ? offset ?`, ...ts, moi, (trang - 1) * moi),
       nguoi: sql('select key, max(nhan_su) nhan_su from trang_web where ngay >= ? and ngay < ? group by key order by nhan_su', tu, den),
       may: sql('select ma_may, max(ten_may) ten_may, max(nhan_su) nhan_su from trang_web where ngay >= ? and ngay < ? group by ma_may order by ten_may', tu, den),
+    };
+  },
+
+  // Website chia theo thiết bị, cùng bộ lọc với trang Website: mỗi máy bao nhiêu lượt, vào những website nào nhiều nhất.
+  // "phang" là từng cặp máy và website, để xuất Excel.
+  websiteTheoMay(sql, a, bay) {
+    const { tu, den, w, ts } = locWeb(a, bay);
+    if (a.phang) return { hang: sql(`select max(ten_may) ten_may, max(nhan_su) nhan_su, ten_mien, sum(luot) luot, max(ngay) cuoi from trang_web where ${w} group by ma_may, ten_mien order by ten_may, ma_may, luot desc, ten_mien limit 5000`, ...ts) };
+    const trang = Math.max(1, Number(a.trang) || 1), moi = 50;
+    const hang = sql(`select ma_may, max(ten_may) ten_may, max(nhan_su) nhan_su, sum(luot) luot, count(distinct ten_mien) so_web, max(ngay) cuoi from trang_web where ${w} group by ma_may order by luot desc, ma_may limit ? offset ?`, ...ts, moi, (trang - 1) * moi);
+    const top = new Map(hang.map((m) => [m.ma_may, []]));
+    if (hang.length) {
+      for (const r of sql(`select ma_may, ten_mien, luot from (select ma_may, ten_mien, sum(luot) luot, row_number() over (partition by ma_may order by sum(luot) desc, ten_mien) thu from trang_web where ${w} and ma_may in (${hang.map(() => '?').join(',')}) group by ma_may, ten_mien) where thu <= 3 order by ma_may, thu`, ...ts, ...hang.map((m) => m.ma_may))) top.get(r.ma_may).push({ ten_mien: r.ten_mien, luot: r.luot });
+    }
+    return { tu, den, trang, moi, hang: hang.map((m) => ({ ...m, top: top.get(m.ma_may) })) };
+  },
+
+  // Biểu đồ riêng một máy trong khoảng ngày đã chọn. Đọc các phiên của máy một lần rồi tự chia theo ngày, nền tảng và giờ.
+  bieuDoMay(sql, a, bay) {
+    const { tu, den, so_ngay } = khoang(a, bay);
+    const ma = String(a.ma_may || ''), cuoi = Math.min(den, bay);
+    const theo_ngay = [], web_theo_ngay = [];
+    for (let d = tu; d < den; d += NGAY) { theo_ngay.push({ ngay: d, ms: 0, luot: 0 }); web_theo_ngay.push({ ngay: d, luot: 0 }); }
+    const nen = new Map(), profile = new Set(), o = oGioTrong();
+    let ms = 0, luot = 0;
+    for (const r of sql('select profile_id, nen_tang, bat_dau, coalesce(ket_thuc, ?) kt from phien where ma_may = ? and bat_dau < ? and coalesce(ket_thuc, ?) > ? limit 50000', bay, ma, den, bay, tu)) {
+      profile.add(r.profile_id);
+      const n = nen.get(r.nen_tang) || { nen_tang: r.nen_tang, luot: 0, ms: 0 };
+      nen.set(r.nen_tang, n);
+      n.luot++;
+      if (r.bat_dau >= tu) { theo_ngay[Math.floor((r.bat_dau - tu) / NGAY)].luot++; luot++; }
+      chiaTheoGio(Math.max(r.bat_dau, tu), Math.min(r.kt, cuoi), (t, sau, thu, gio) => {
+        const c = sau - t;
+        o[thu][gio] += c;
+        theo_ngay[Math.floor((t - tu) / NGAY)].ms += c;
+        n.ms += c;
+        ms += c;
+      });
+    }
+    for (const r of sql('select ngay, sum(luot) luot from trang_web where ma_may = ? and ngay >= ? and ngay < ? group by ngay', ma, tu, den)) web_theo_ngay[Math.round((r.ngay - tu) / NGAY)].luot = r.luot;
+    return {
+      tu, den, so_ngay, giu_ngay: cauHinh(sql).giu_ngay, ms, luot, so_profile: profile.size,
+      theo_ngay, theo_nen: [...nen.values()], theo_gio: { o },
+      web_theo_ngay, luot_web: web_theo_ngay.reduce((c, x) => c + x.luot, 0),
+      so_web: sql('select count(distinct ten_mien) n from trang_web where ma_may = ? and ngay >= ? and ngay < ?', ma, tu, den)[0].n,
+      web: sql('select ten_mien, sum(luot) luot from trang_web where ma_may = ? and ngay >= ? and ngay < ? group by ten_mien order by luot desc, ten_mien limit 200', ma, tu, den),
     };
   },
 
