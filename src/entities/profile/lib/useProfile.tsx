@@ -173,7 +173,7 @@ export type ProfileStore = {
   /** Profiles another machine has open or is still saving: who, and whether it is saving. */
   elsewhere: Record<string, { by: string; saving: boolean }>;
   /** Running browsers a partner tool (HirS, Hir-F) opened: profile → the tool's name. That tool
-   *  works in it and closes it; here it is shown as in use, with no Stop. */
+   *  works in it and closes it; here it is shown as in use, and Stop asks first. */
   openedBy: Record<string, string>;
   selected: Set<string>;
 
@@ -499,7 +499,13 @@ export const useProfile = create<ProfileStore>((set, get) => ({
   startStop: async (p) => {
     if (get().running[p.id]) {
       const tool = get().openedBy[p.id];
-      if (tool) { toast.err(t("profileRowActions.toolUsingTitle", { who: tool })); return; }
+      // Normally the tool closes what it opened, but it can lose track of a browser (it crashed, or
+      // its close never got here): the owner must still have a way to end it, knowing what it costs.
+      if (tool && (await confirmModal({
+        title: t("useProfile.stopToolProfileTitle", { who: tool }),
+        message: t("useProfile.stopToolProfileMessage", { who: tool }),
+        danger: true,
+      })) !== true) return;
       try { await processKill(p.id); }
       catch (e) { toast.err(String(e)); }
       return;
