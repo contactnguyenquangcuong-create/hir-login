@@ -949,14 +949,26 @@ async fn resolve_auto_fields(
         }
     } };
 
+    let cfg_name = cfg.get("name").and_then(|v| v.as_str()).unwrap_or(profile_id).to_string();
     let host_warn = || {
-        if proxy_opt.is_some() {
-            crate::notify_warning(
-                "Could not read the proxy's location. Rather than hand a page \
-                 this computer's timezone, the profile starts on UTC — which \
-                 few people really keep. Test the proxy again, or set the \
-                 timezone on the profile yourself.",
+        if let Some(p) = proxy_opt {
+            // Says which profile and which proxy: a tool can open a profile in the background, or
+            // give it a proxy for one launch that the profile list does not show.
+            let name = cfg_name.as_str();
+            let whose = if pin_values {
+                "its proxy"
+            } else {
+                "the proxy a tool gave it for this launch (not one set on the profile)"
+            };
+            let text = format!(
+                "Profile \"{name}\": could not read the location of {whose}, {}:{}. Rather than \
+                 hand a page this computer's timezone, the profile starts on UTC — which few \
+                 people really keep. Test the proxy again, or set the timezone on the profile \
+                 yourself.",
+                p.host, p.port,
             );
+            crate::cloud_sync::log_line(&format!("launch {profile_id}: {text}"));
+            crate::notify_warning(text);
         }
     };
 
