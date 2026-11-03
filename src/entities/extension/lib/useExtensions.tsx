@@ -133,9 +133,9 @@ export const useExtensions = create<ExtensionStore>((set, get) => ({
     });
     if (ok !== true) return;
     try {
-      await extensionDelete(e.id);
+      const count = await extensionDelete(e.id);
       await get().reload();
-      toast.ok(t("useExtensions.removed"));
+      toast.ok(t("useExtensions.removed", { count }));
     } catch (err) { toast.err(String(err)); }
   },
 }));

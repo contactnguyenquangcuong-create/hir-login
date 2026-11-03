@@ -551,7 +551,7 @@ pub fn save_raw_exact(stored: &mut StoredProfile) -> Result<()> {
     save_raw_locked_with(stored, false)
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -1054,6 +1054,34 @@ pub fn set_folder(id: &str, folder: &str) -> Result<()> {
 /// (temporary profiles are left alone — they live for one run). Returns how
 /// many profiles changed. Like pin and folder this is the machine's own
 /// choice, so it is written without bumping the sync revision.
+/// Takes an extension off every profile here, stamped now so the team takes the shorter list
+/// instead of putting it back. Returns how many changed.
+pub fn remove_extension_from_all(ext_id: &str) -> Result<usize> {
+    let _guard = file_lock();
+    let dir = store::profiles_dir()?;
+    let mut n = 0;
+    for entry in fs::read_dir(&dir)? {
+        let entry = entry?;
+        if entry.path().extension().and_then(|s| s.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(body) = fs::read_to_string(entry.path()) else { continue };
+        let Ok(mut stored): std::result::Result<StoredProfile, _> = serde_json::from_str(&body)
+        else {
+            continue;
+        };
+        if !stored.meta.extensions.iter().any(|e| e == ext_id) {
+            continue;
+        }
+        stored.meta.extensions.retain(|e| e != ext_id);
+        stored.meta.extensions_at = now_ms();
+        let out = serde_json::to_string_pretty(&stored)?;
+        write_atomic(&entry.path(), out.as_bytes())?;
+        n += 1;
+    }
+    Ok(n)
+}
+
 pub fn add_extension_to_all(ext_id: &str) -> Result<usize> {
     let _guard = file_lock();
     let dir = store::profiles_dir()?;

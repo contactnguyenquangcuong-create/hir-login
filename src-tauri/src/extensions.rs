@@ -365,6 +365,7 @@ pub fn import(src: &Path) -> Result<ExtensionEntry> {
     // The same extension imported again replaces (or is dropped for) the copy
     // already here — never a second one.
     let id = settle_under_canonical_id(&dst, &id)?;
+    remember_removed(&id, false);
     read_entry(&id)
 }
 
@@ -481,12 +482,50 @@ fn webstore_id(raw: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
-pub fn delete(id: &str) -> Result<()> {
+/// Removes an extension from the library and from every profile here, and remembers it as removed.
+/// Only taking the folder away was not enough: the profiles still listed it, and the next team
+/// sync brought it back with their bundles. Returns how many profiles dropped it.
+pub fn delete(id: &str) -> Result<usize> {
     let dir = dir_for(id)?;
+    remember_removed(id, true);
+    let n = crate::profile::remove_extension_from_all(id)?;
     if dir.exists() {
         crate::winfs::remove_dir_all(&dir)?;
     }
-    Ok(())
+    if n > 0 {
+        crate::cloud_sync::kick();
+    }
+    Ok(n)
+}
+
+/// Extensions removed from the library on this machine: a bundle from the team does not put them
+/// back, and a profile that arrives still listing one has it taken off. Importing it again lifts it.
+fn removed_path() -> Result<PathBuf> {
+    Ok(store::extensions_dir()?.join(".removed.json"))
+}
+
+pub fn removed() -> Vec<String> {
+    removed_path()
+        .ok()
+        .and_then(|p| fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn remember_removed(id: &str, gone: bool) {
+    let mut ids = removed();
+    let had = ids.iter().any(|x| x == id);
+    if gone == had {
+        return;
+    }
+    if gone {
+        ids.push(id.to_string());
+    } else {
+        ids.retain(|x| x != id);
+    }
+    if let (Ok(p), Ok(body)) = (removed_path(), serde_json::to_string(&ids)) {
+        let _ = fs::write(p, body);
+    }
 }
 
 /// A .crx is a header followed by a plain zip; strip the header and unzip.

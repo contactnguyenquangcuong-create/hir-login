@@ -1171,6 +1171,14 @@ fn apply_bundle_inner(id: &str, bytes: &[u8], keep_local_session: bool) -> Resul
                         local.meta.extensions = merged;
                     }
                 }
+                // An extension removed from the library here does not come back with the team's list.
+                let removed = crate::extensions::removed();
+                if local.meta.extensions.iter().any(|e| removed.contains(e)) {
+                    local.meta.extensions.retain(|e| !removed.contains(e));
+                    local.meta.extensions_at = crate::profile::now_ms();
+                    slog!("{id}: dropped the extensions removed from the library here — and it will be sent up");
+                    update_state(|st| { st.pending.insert(id.to_string()); });
+                }
                 local.meta.color = remote.meta.color.clone();
                 local.meta.android_media = remote.meta.android_media;
                 bundle_proxy_at = remote.meta.proxy_at;
@@ -1461,7 +1469,11 @@ fn install_portable(udd: &Path, dest_rel: &str, bytes: &[u8], kind: cookies::Sea
 /// different copy (an updated version) is replaced whole.
 fn install_bundled_extensions(bundled: HashMap<String, Vec<(String, Vec<u8>)>>) {
     let Ok(root) = store::extensions_dir() else { return };
+    let removed = crate::extensions::removed();
     for (id, files) in bundled {
+        if removed.contains(&id) {
+            continue;
+        }
         let dst = root.join(&id);
         let wanted: std::collections::BTreeMap<&str, usize> =
             files.iter().map(|(p, b)| (p.as_str(), b.len())).collect();
@@ -4283,6 +4295,70 @@ mod tests {
         let _ = std::fs::remove_dir_all(&a);
         assert_eq!(key, "MY-OWN-KEY", "this machine's key must survive a pull");
         assert_eq!(marks, "new", "ordinary files still come across");
+    }
+
+    /// An extension removed from the library leaves every profile, and a team bundle that still
+    /// carries it (an older one, or one changed later on a machine that has not heard) does not
+    /// put it back. Importing it again lifts that.
+    #[test]
+    fn a_removed_extension_does_not_come_back_with_the_team() {
+        let _g = TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let a = std::env::temp_dir().join(format!("hir-exra-{}", uuid::Uuid::new_v4()));
+        let b = std::env::temp_dir().join(format!("hir-exrb-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let src = std::env::temp_dir().join(format!("hir-exrs-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("manifest.json"), "{\"name\":\"rm\",\"version\":\"1\"}").unwrap();
+        let ids = ["profile-exr-1", "profile-exr-2"];
+
+        // Both machines: two profiles using the extension.
+        let mut ext = String::new();
+        for root in [&a, &b] {
+            store::set_data_root(Some(root.clone()));
+            ext = crate::extensions::import(&src).unwrap().id;
+            for id in ids {
+                let mut stored = crate::profile::StoredProfile::default();
+                stored.meta.id = id.to_string();
+                stored.meta.extensions = vec![ext.clone()];
+                stored.config.insert("name".into(), serde_json::json!(id));
+                crate::profile::save_raw(&mut stored).unwrap();
+            }
+        }
+        store::set_data_root(Some(a.clone()));
+        let old_bundle = build_bundle(ids[0]).unwrap();
+
+        // Machine B removes it from the library.
+        store::set_data_root(Some(b.clone()));
+        let dropped = crate::extensions::delete(&ext).unwrap();
+        let uses = |id: &str| crate::profile::load_raw(id).unwrap().meta.extensions;
+        let gone_here = dropped == 2 && uses(ids[0]).is_empty() && uses(ids[1]).is_empty()
+            && !store::extensions_dir().unwrap().join(&ext).exists();
+
+        // A's bundle from before, then one A changed after the removal: neither brings it back.
+        apply_bundle(ids[0], &old_bundle).unwrap();
+        let after_old = uses(ids[0]).is_empty() && !store::extensions_dir().unwrap().join(&ext).exists();
+        store::set_data_root(Some(a.clone()));
+        std::thread::sleep(Duration::from_millis(5));
+        let mut p = crate::profile::load_raw(ids[1]).unwrap();
+        p.meta.extensions_at = crate::profile::now_ms();
+        crate::profile::save_raw_exact(&mut p).unwrap();
+        let newer_bundle = build_bundle(ids[1]).unwrap();
+        store::set_data_root(Some(b.clone()));
+        apply_bundle(ids[1], &newer_bundle).unwrap();
+        let after_newer = uses(ids[1]).is_empty() && !store::extensions_dir().unwrap().join(&ext).exists();
+
+        // Imported again on purpose: it is a library extension again.
+        let back = crate::extensions::import(&src).unwrap().id == ext && !crate::extensions::removed().contains(&ext);
+
+        store::set_data_root(None);
+        for d in [&a, &b, &src] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+        assert!(gone_here, "delete takes it off every profile and out of the library");
+        assert!(after_old, "an older team bundle brought it back");
+        assert!(after_newer, "a newer team bundle still listing it brought it back");
+        assert!(back, "importing it again lifts the removal");
     }
 
     /// Extensions ride inside the profile's own bundle: a machine that never had

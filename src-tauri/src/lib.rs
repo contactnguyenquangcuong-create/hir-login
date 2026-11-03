@@ -1357,7 +1357,7 @@ fn extension_apply_all(id: String) -> Result<usize, String> {
 }
 
 #[tauri::command]
-fn extension_delete(id: String) -> Result<(), String> {
+fn extension_delete(id: String) -> Result<usize, String> {
     extensions::delete(&id).map_err(|e| e.to_string())
 }
 
