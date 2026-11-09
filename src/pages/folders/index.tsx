@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { createPortal } from "react-dom";
 import { Button, Input } from "@proxyshard/shardx-ui-kit";
 import { Topbar } from "../../shared/ui/Topbar";
 import { FolderIcon } from "../../shared/icons";
@@ -18,6 +19,138 @@ import { MoreIcon, TeamCloudIcon, LocalOnlyIcon, SyncIcon, RefreshIcon } from ".
 type Member = { id: string; name: string; role: "manager" | "member"; disabled: boolean };
 type ServerFolder = { name: string; profiles: number; access: Record<string, string>; canDelete?: boolean; createdBy?: { role: "admin" | "manager"; name: string } };
 type TrashedFolder = { name: string; deletedBy: string; daysLeft: number };
+
+/** One person or partner tool a folder is shared with. */
+type Sharee = { key: string; name: string; manage: boolean; tool: boolean };
+
+/**
+ * A soft colour per name, so the same person keeps the same colour in every row. Plain values:
+ * the theme only emits the colour variables some class uses, so `--color-stable-base` and the like
+ * are empty at run time and an avatar painted with them had no background.
+ */
+const SHAREE_COLORS = ["#335cff", "#1fc16b", "#22d3bb", "#47c2ff", "#f6b51e", "#7d52f4", "#fb4ba3"];
+const hueOf = (s: string) => { let h = 0; for (const c of s) h = (h * 31 + c.charCodeAt(0)) >>> 0; return SHAREE_COLORS[h % SHAREE_COLORS.length]; };
+const initialOf = (s: string) => (Array.from(s.replace(/\(bạn\)/i, "").trim())[0] ?? "?").toUpperCase();
+const SHAREE_MAX_AVATARS = 4;
+
+function ShareeAvatar({ s, plain }: { s: Sharee; plain?: boolean }) {
+  const hue = hueOf(s.name);
+  return (
+    <span
+      className={`relative grid size-7 flex-none place-items-center text-[11px] font-semibold ${plain ? "" : "shadow-[0_0_0_2px_var(--color-bg-white-0)]"} ${s.tool ? "rounded-md" : "rounded-full"}`}
+      style={{ background: `color-mix(in srgb, ${hue} 22%, var(--color-bg-white-0))`, color: `color-mix(in srgb, ${hue} 70%, var(--color-text-strong-950))` }}
+    >
+      {initialOf(s.name)}
+      {s.manage && <span className="absolute -right-0.5 -top-0.5 z-10 size-2 rounded-full bg-primary-base shadow-[0_0_0_1.5px_var(--color-bg-white-0)]" />}
+    </span>
+  );
+}
+
+/** The one open "who has it" box at a time: opening another row's closes this one. */
+let closeOpenSharee: (() => void) | null = null;
+
+/** Everyone a folder is shared with and how far, in a small box under the cell that was pressed. */
+function ShareeBox({ list, at, onShare, onClose }: { list: Sharee[]; at: { x: number; y?: number; b?: number }; onShare: () => void; onClose: () => void }) {
+  useEffect(() => {
+    const down = (e: MouseEvent) => {
+      const t = e.target as HTMLElement | null;
+      if (!t?.closest("[data-sharee-box], [data-sharee-trigger]")) onClose();
+    };
+    const key = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("mousedown", down);
+    document.addEventListener("keydown", key);
+    window.addEventListener("scroll", onClose, true);
+    window.addEventListener("resize", onClose);
+    return () => {
+      document.removeEventListener("mousedown", down);
+      document.removeEventListener("keydown", key);
+      window.removeEventListener("scroll", onClose, true);
+      window.removeEventListener("resize", onClose);
+    };
+  }, [onClose]);
+  const manage = list.filter((x) => x.manage).length;
+  return createPortal(
+    <div
+      data-sharee-box
+      role="dialog"
+      className="fixed z-[80] flex w-72 flex-col overflow-hidden rounded-lg bg-bg-white-0 shadow-[var(--shadow-md,0_8px_24px_rgba(0,0,0,0.18))] ring-1 ring-inset ring-stroke-soft-200"
+      style={{ left: at.x, top: at.y, bottom: at.b }}
+    >
+      <div className="flex items-center justify-between border-b border-stroke-soft-200 px-3 py-2 text-subheading-2xs text-text-soft-400">
+        <span>ĐÃ CHIA SẺ CHO ({list.length})</span>
+        <span>{manage} quản lý</span>
+      </div>
+      <div className="flex max-h-64 flex-col overflow-y-auto py-1">
+        {list.map((s) => (
+          <div key={s.key} className="flex items-center gap-2.5 px-3 py-1.5">
+            <ShareeAvatar s={s} plain />
+            <span className="min-w-0 flex-1 truncate text-label-xs text-text-strong-950" title={s.name}>{s.name}</span>
+            {s.tool && <span className="flex-none text-paragraph-xs text-text-soft-400">công cụ</span>}
+            <span className={`flex-none rounded-full px-2 py-0.5 text-paragraph-xs font-medium ${s.manage ? "bg-primary-alpha-10 text-primary-base" : "bg-bg-weak-50 text-text-sub-600"}`}>{s.manage ? "Quản lý" : "Được dùng"}</span>
+          </div>
+        ))}
+      </div>
+      <div className="border-t border-stroke-soft-200 p-2">
+        <Button variant="neutral" mode="stroke" size="xsmall" className="w-full" onClick={() => { onClose(); onShare(); }}>Chia sẻ…</Button>
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+/**
+ * Who a folder is shared with, in the narrow "Chia sẻ cho" column: only the overlapping initials
+ * (a dot on those who manage it; square for a partner tool) and two short counts. Names would not
+ * fit; pressing the cell opens a box with everyone and their level, and the sharing dialog from it.
+ */
+function SharedWith({ list, onShare }: { list: Sharee[]; onShare: () => void }) {
+  const [at, setAt] = useState<{ x: number; y?: number; b?: number } | null>(null);
+  const close = useCallback(() => { setAt(null); if (closeOpenSharee === close) closeOpenSharee = null; }, []);
+  if (list.length === 0) {
+    return (
+      <button
+        type="button"
+        onClick={onShare}
+        title="Chưa chia sẻ cho ai. Bấm để chia sẻ."
+        className="inline-flex w-fit cursor-pointer items-center gap-1.5 rounded-full border border-dashed border-stroke-soft-200 bg-transparent px-2.5 py-1 text-paragraph-xs text-text-soft-400 transition-colors hover:border-primary-base hover:text-primary-base"
+      >
+        <span className="text-label-xs leading-none">+</span>Chia sẻ
+      </button>
+    );
+  }
+  const manage = list.filter((x) => x.manage).length;
+  const use = list.length - manage;
+  const counts = [manage > 0 ? `${manage} quản lý` : "", use > 0 ? `${use} dùng` : ""].filter(Boolean).join(" · ");
+  const toggle = (e: React.MouseEvent<HTMLButtonElement>) => {
+    if (at) { close(); return; }
+    closeOpenSharee?.();
+    const r = e.currentTarget.getBoundingClientRect();
+    const x = Math.max(8, Math.min(r.left, window.innerWidth - 296));
+    // Under the cell, or above it when the row is near the bottom of the window.
+    setAt(window.innerHeight - r.bottom < 300 ? { x, b: window.innerHeight - r.top + 6 } : { x, y: r.bottom + 6 });
+    closeOpenSharee = close;
+  };
+  return (
+    <>
+      <button
+        type="button"
+        data-sharee-trigger
+        onClick={toggle}
+        title="Bấm để xem chi tiết"
+        className={`flex min-w-0 cursor-pointer items-center gap-2.5 rounded-lg border-0 p-1 text-left transition-colors hover:bg-bg-weak-50 ${at ? "bg-bg-weak-50" : "bg-transparent"}`}
+      >
+        <span className="flex flex-none items-center">
+          {list.slice(0, SHAREE_MAX_AVATARS).map((s, i) => <span key={s.key} className={i === 0 ? "" : "-ml-2"}><ShareeAvatar s={s} /></span>)}
+          {list.length > SHAREE_MAX_AVATARS && (
+            <span className="-ml-2 grid size-7 flex-none place-items-center rounded-full bg-bg-weak-50 text-[11px] font-semibold text-text-sub-600 shadow-[0_0_0_2px_var(--color-bg-white-0)]">+{list.length - SHAREE_MAX_AVATARS}</span>
+          )}
+        </span>
+        <span className="min-w-0 truncate text-paragraph-xs text-text-soft-400">{counts}</span>
+      </button>
+      {at && <ShareeBox list={list} at={at} onShare={onShare} onClose={close} />}
+    </>
+  );
+}
 
 /** Every folder in one place: how many profiles it holds, who may use or manage it, and the sharing dialog. */
 export function FoldersPage() {
@@ -337,7 +470,6 @@ export function FoldersPage() {
             {filtered.slice(0, limit).map((f) => {
               const people = Object.entries(f.access);
               const shared = partnersOf(f.name);
-              const max = Math.max(1, 3 - shared.length);
               const deletable = f.local ? !unknown : f.canDelete !== false;
               const hasProfiles = !unknown && (f.profiles > 0 || (localCount[f.name] ?? 0) > 0);
               const open = () => { setFolder(f.name); setSection("browsers"); };
@@ -380,20 +512,15 @@ export function FoldersPage() {
                     </div>
                   )}
                   <div className={`cell-count text-paragraph-xs ${f.profiles > 0 ? "text-text-sub-600" : "text-text-soft-400"}`}>{f.profiles}</div>
-                  {/* Who has it, on one line: the first few, then how many more (all of them on hover). */}
-                  <div
-                    className="flex min-w-0 items-center gap-1 overflow-hidden"
-                    title={[...shared.map((p) => `${p.name} · ${p.level === "manage" ? "quản lý" : "được dùng"}`), ...people.map(([id, lvl]) => `${nameOf(id)} · ${lvl === "manage" ? "quản lý" : "được dùng"}`)].join("\n") || undefined}
-                  >
-                    {people.length === 0 && shared.length === 0
-                      ? <span className="text-paragraph-xs text-text-soft-400">Chưa chia sẻ</span>
-                      : <>
-                        {partnerPills(f.name)}
-                        {people.slice(0, max).map(([id, lvl]) => (
-                          <Pill key={id} tone={lvl === "manage" ? "primary" : "neutral"}>{nameOf(id)} · {lvl === "manage" ? "quản lý" : "dùng"}</Pill>
-                        ))}
-                        {people.length > max && <span className="flex-none text-paragraph-xs text-text-soft-400">+{people.length - max}</span>}
-                      </>}
+                  {/* Who has it: initials stack + first names + counts (the partner tools first, then people). */}
+                  <div className="flex min-w-0 items-center">
+                    <SharedWith
+                      list={[
+                        ...shared.map((p): Sharee => ({ key: `tool:${p.name}`, name: p.name, manage: p.level === "manage", tool: true })),
+                        ...people.map(([id, lvl]): Sharee => ({ key: id, name: nameOf(id), manage: lvl === "manage", tool: false })),
+                      ]}
+                      onShare={() => setSharing(f.name)}
+                    />
                   </div>
                   <div className="min-w-0 truncate text-paragraph-xs text-text-soft-400">
                     {f.local ? "Máy này" : f.createdBy?.role === "manager" ? f.createdBy.name : f.createdBy ? "Quản trị" : "—"}
