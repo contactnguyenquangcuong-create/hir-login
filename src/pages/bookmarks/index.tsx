@@ -9,6 +9,10 @@ import { useBookmarks, emptyBookmark, type Bookmark } from "../../entities/bookm
 import { useFolders, useProfile } from "../../entities/profile";
 import { FolderListButton, inlineFolders } from "../../shared/ui/FolderListButton";
 import { useT } from "../../shared/i18n";
+import { open } from "@tauri-apps/plugin-dialog";
+import { useTeam } from "../../shared/model/teamRole";
+import { toast } from "../../shared/lib/toast";
+import { bookmarkImportHtml } from "../../entities/bookmark/model/api";
 
 function Editor({ initial, folders, onClose }: {
   initial: Bookmark;
@@ -77,6 +81,25 @@ export function BookmarksPage() {
   const profiles = useProfile((s) => s.profiles);
 
   const reload = useBookmarks((s) => s.reload);
+  // In a team the list is the team's, and only an admin may change it (the server refuses anyone
+  // else, and their machine takes the team's list back).
+  const role = useTeam((s) => s.role);
+  const configured = useTeam((s) => s.configured);
+  const mayEdit = configured ? role === "admin" : true;
+  const target = folder === "all" || folder === "__any__" ? "" : folder;
+  const importHtml = async () => {
+    const path = await open({
+      title: t("bookmarks.importPickTitle"),
+      multiple: false,
+      filters: [{ name: "HTML", extensions: ["html", "htm"] }],
+    });
+    if (typeof path !== "string") return;
+    try {
+      const [added, skipped] = await bookmarkImportHtml(path, target);
+      await reload();
+      toast.ok(t("bookmarks.importedToast", { added, skipped, folder: target || t("bookmarks.tabEveryProfile") }));
+    } catch (e) { toast.err(String(e)); }
+  };
   useEffect(() => { init(); initProfiles(); }, [init, initProfiles]);
   useStoreChanged(reload);
 
@@ -149,15 +172,22 @@ export function BookmarksPage() {
             />
           )}
         </div>
-        <div className="pb-2">
-          <Button
-            variant="primary" mode="filled" size="small"
-            leftIcon={<AddIcon className="size-4" />}
-            onClick={() => setEditing(emptyBookmark(folder === "all" || folder === "__any__" ? "" : folder))}
-          >
-            {t("bookmarks.newButton")}
-          </Button>
-        </div>
+        {mayEdit ? (
+          <div className="flex gap-2 pb-2">
+            <Button variant="neutral" mode="stroke" size="small" onClick={importHtml} title={t("bookmarks.importHint")}>
+              {t("bookmarks.importButton")}
+            </Button>
+            <Button
+              variant="primary" mode="filled" size="small"
+              leftIcon={<AddIcon className="size-4" />}
+              onClick={() => setEditing(emptyBookmark(target))}
+            >
+              {t("bookmarks.newButton")}
+            </Button>
+          </div>
+        ) : (
+          <div className="pb-2 text-paragraph-xs text-text-soft-400">{t("bookmarks.teamReadOnly")}</div>
+        )}
       </div>
 
       <div className="overflow-hidden rounded-12 bg-bg-white-0 shadow-[var(--shadow-xs)] ring-1 ring-inset ring-stroke-soft-200">
@@ -168,7 +198,7 @@ export function BookmarksPage() {
           >
             <div
               className="min-w-0 cursor-pointer truncate text-label-xs text-text-strong-950 transition-colors hover:text-primary-base"
-              onClick={() => setEditing(b)}
+              onClick={() => mayEdit && setEditing(b)}
               title={t("bookmarks.editTooltip")}
             >
               {b.title || b.url}
@@ -184,13 +214,13 @@ export function BookmarksPage() {
                 : t("bookmarks.everyProfileCount", { n: profiles.length })}
             </div>
             <div className="flex justify-end">
-              <Button
+              {mayEdit && <Button
                 variant="error" mode="ghost" size="2xsmall"
                 leftIcon={<DeleteIcon className="size-3.5" />}
                 onClick={() => remove(b)}
               >
                 {t("bookmarks.delete")}
-              </Button>
+              </Button>}
             </div>
           </div>
         ))}

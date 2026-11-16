@@ -2193,7 +2193,63 @@ async fn sync_library(base: &str, token: &str) -> usize {
             }
         }
     }
+    installed += sync_bookmarks(base, token).await;
     installed
+}
+
+/// The team's one bookmark list: the newer copy wins. Someone who may not change it
+/// (the server refuses their upload) takes the team's. A server from before this
+/// does not know the kind (400): each machine keeps its own list, as before.
+async fn sync_bookmarks(base: &str, token: &str) -> usize {
+    let resp = match client().get(format!("{base}/library/bookmarks/list")).bearer_auth(token).send().await {
+        Ok(r) => r,
+        Err(e) => { slog!("bookmarks: {e:#}"); return 0; }
+    };
+    let status = resp.status();
+    let remote = if status.is_success() {
+        match resp.bytes().await { Ok(b) => Some(b.to_vec()), Err(_) => return 0 }
+    } else if status == reqwest::StatusCode::NOT_FOUND {
+        None
+    } else {
+        if status != reqwest::StatusCode::BAD_REQUEST {
+            slog!("bookmarks: the server answered {status}");
+        }
+        return 0;
+    };
+    let push = match &remote {
+        Some(bytes) => match crate::bookmarks::take_remote(bytes, false) {
+            Ok(crate::bookmarks::RemoteOutcome::Taken) => {
+                slog!("bookmarks: took the team's list");
+                crate::notify_store_changed("bookmarks");
+                return 1;
+            }
+            Ok(crate::bookmarks::RemoteOutcome::Same) => return 0,
+            Ok(crate::bookmarks::RemoteOutcome::Push) => true,
+            Err(e) => { slog!("bookmarks: the team's list could not be read: {e:#}"); return 0; }
+        },
+        None => true,
+    };
+    // Only a list this machine has: never an absent one, which would empty the team's.
+    let Ok(Some(mine)) = crate::bookmarks::team_copy() else { return 0 };
+    if !push {
+        return 0;
+    }
+    match library_put(base, token, "bookmarks", "list", mine).await {
+        Ok(()) => { slog!("bookmarks: sent this machine's list to the team"); 0 }
+        Err(e) => {
+            slog!("bookmarks: not sent ({e:#})");
+            // Not allowed to change it: the team's list is the list here.
+            if format!("{e:#}").contains("403") {
+                if let Some(bytes) = remote {
+                    if crate::bookmarks::take_remote(&bytes, true).is_ok() {
+                        crate::notify_store_changed("bookmarks");
+                        return 1;
+                    }
+                }
+            }
+            0
+        }
+    }
 }
 
 // ---- background sync ----
@@ -4489,6 +4545,9 @@ mod tests {
         let fp_ids = library_ids(&base, token, "fingerprints").await.unwrap();
         let got = library_get(&base, token, "fingerprints", "fp1").await.unwrap();
         // Extensions are not a server-side library any more: they ride with the profile.
+        // The team's bookmark list is one item of its own kind.
+        library_put(&base, token, "bookmarks", "list", br#"{"updated_ms":5,"bookmarks":[]}"#.to_vec()).await.unwrap();
+        assert_eq!(library_get(&base, token, "bookmarks", "list").await.unwrap(), br#"{"updated_ms":5,"bookmarks":[]}"#.to_vec());
         let bad_kind = library_ids(&base, token, "extensions").await.is_err();
         let bad_token = library_ids(&base, "wrong-token-000", "fingerprints").await.is_err();
 

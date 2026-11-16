@@ -4,11 +4,12 @@
 //      src-tauri/tauri.conf.json) and commit it.
 //   2. node scripts/phat-hanh/windows.mjs --ghi-chu "what changed, in Vietnamese"
 //
-// Builds the NSIS installer, signs it with D:\AI\HirLogin-goi\hir-login.key (password in ky.json),
-// uploads it, and only then switches windows/x86_64/latest.json to the new version — so a client
-// that sees the new version can always download it. Tags vX.Y.Z on this PC only: once the Windows
-// build has been checked, scripts/phat-hanh/mac.mjs pushes the tag, which builds the Mac version.
-// Never packages or prints a secret.
+// Builds the frontend, runs it through scripts/obfuscate.mjs, then builds the NSIS installer and
+// signs it with D:\AI\HirLogin-goi\hir-login.key (password in ky.json), uploads it, and only then
+// switches windows/x86_64/latest.json to the new version — so a client that sees the new version
+// can always download it. Tags vX.Y.Z on this PC only: once the Windows build has been checked,
+// scripts/phat-hanh/mac.mjs pushes the tag, which builds the Mac version. Never packages or prints
+// a secret.
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
@@ -40,9 +41,11 @@ const key = JSON.parse(fs.readFileSync(path.join(GOI, 'ky.json'), 'utf8'));
 const current = await (await fetch(`${base}/windows/x86_64/latest.json?t=${Date.now()}`)).text();
 if (current && JSON.parse(current).version === version) throw new Error(`Kênh Windows đã có ${version} — nâng phiên bản trước khi phát hành`);
 
-// 3) Frontend, then the signed installer (beforeBuildCommand skipped: it reinstalls ui-kit).
+// 3) Frontend (obfuscated — raises the cost of reading this client's JS on a customer's machine),
+// then the signed installer (beforeBuildCommand skipped: it reinstalls ui-kit).
 sh('npx', ['tsc', '--noEmit', '-p', 'tsconfig.json']);
 sh('npx', ['vite', 'build']);
+sh('node', ['scripts/obfuscate.mjs']);
 fs.mkdirSync(TARGET_DIR, { recursive: true });
 const overrides = path.join(TARGET_DIR, 'phat-hanh.conf.json');
 fs.writeFileSync(overrides, JSON.stringify({ build: { beforeBuildCommand: '' } }));

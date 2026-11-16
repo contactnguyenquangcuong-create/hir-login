@@ -27,8 +27,11 @@ pub struct Progress {
 }
 
 /// Directories that move; everything else in the config dir stays where the
-/// launcher can always find it.
-const MOVED: &[&str] = &["profiles", "user-data", "extensions", "trash"];
+/// launcher can always find it. Exactly what is looked up through `data_root()`:
+/// `team-sync` is the team server's store (every profile's bundle, the members,
+/// the sharing) — left behind, a server whose data was moved came back empty
+/// on the new disk while the old copy kept filling the system disk.
+pub(crate) const MOVED: &[&str] = &["profiles", "user-data", "extensions", "trash", "team-sync"];
 
 fn emit(app: &tauri::AppHandle, p: Progress) {
     let _ = app.emit("data-migration", p);
@@ -68,6 +71,19 @@ fn do_run(app: &tauri::AppHandle, dst: &Path) -> Result<u64> {
         }
     }
     let total = files.len() as u64;
+    // Room for all of it before the first byte: a copy that fills the disk half-way leaves
+    // nothing deleted, but a full disk under every running program.
+    let need: u64 = files.iter().map(|(f, _)| std::fs::metadata(f).map(|m| m.len()).unwrap_or(0)).sum();
+    if let Some(free) = crate::winfs::free_space(&dst) {
+        // Copied, checked, then deleted: the whole of it must fit, on the same disk too.
+        if free < need + need / 20 + 1_000_000_000 {
+            anyhow::bail!(
+                "not enough space there: {:.1} GB needed, {:.1} GB free",
+                need as f64 / 1e9,
+                free as f64 / 1e9
+            );
+        }
+    }
     if total == 0 {
         finish(&dst)?;
         emit(app, Progress { phase: "done", done: 0, total: 0, percent: 100, current: String::new() });

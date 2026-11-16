@@ -100,3 +100,25 @@ mod legacy {
         remove_dir(dir)
     }
 }
+
+/// Bytes free for this user on the disk holding `dir`; None when it cannot be told.
+pub fn free_space(dir: &Path) -> Option<u64> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let wide: Vec<u16> = dir.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        let mut free: u64 = 0;
+        // SAFETY: a NUL-terminated path and a valid out pointer; the other two outs may be null.
+        let ok = unsafe {
+            windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
+                wide.as_ptr(), &mut free, std::ptr::null_mut(), std::ptr::null_mut(),
+            )
+        };
+        if ok != 0 { Some(free) } else { None }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = dir;
+        None
+    }
+}

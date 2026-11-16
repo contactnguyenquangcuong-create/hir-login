@@ -49,11 +49,19 @@ jobs:
       - name: Install frontend deps
         run: npm ci
 
+      # Built here instead of via beforeBuildCommand so scripts/obfuscate.mjs can run between
+      # `vite build` and packaging (same order as scripts/phat-hanh/windows.mjs on Windows).
+      - name: Build frontend (obfuscated)
+        run: |
+          npx tsc --noEmit -p tsconfig.json
+          npx vite build
+          node scripts/obfuscate.mjs
+
       - name: Build and sign (app + dmg)
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: npm run tauri build -- --bundles app,dmg
+        run: npm run tauri build -- --bundles app,dmg --config '{"build":{"beforeBuildCommand":""}}'
 
       # Without a signature on the whole app, a Mac that downloads it reports "Hir-Login is damaged
       # and can't be opened". The app is signed ad hoc by the build ("signingIdentity": "-"); this

@@ -88,7 +88,7 @@ pub async fn sweep() {
             continue;
         }
         let udd = root.join(&id);
-        let f = tokio::task::spawn_blocking(move || clean(&udd)).await.unwrap_or(0);
+        let f = tokio::task::spawn_blocking(move || clean(&udd) + slim(&udd)).await.unwrap_or(0);
         if f > 0 {
             freed += f;
             n += 1;
@@ -96,8 +96,137 @@ pub async fn sweep() {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     }
     if freed > 0 {
-        crate::cloud_sync::log_line(&format!("browser caches: {} MB freed from {n} closed profiles", freed / 1_000_000));
+        crate::cloud_sync::log_line(&format!("browser caches and leftovers: {} MB freed from {n} closed profiles", freed / 1_000_000));
     }
+}
+
+// ---- what every profile carries twice ----
+
+/// Chromium components kept one folder per version; the browser leaves the old ones behind.
+const VERSIONED: &[&str] = &["WidevineCdm", "WasmTtsEngine", "OnDeviceHeadSuggestModel"];
+/// Left over and never read again: copies of the profile from an older browser version, and
+/// usage-metrics files.
+const LEFTOVERS: &[&str] = &["Snapshots", "BrowserMetrics", "BrowserMetrics-spare.pma"];
+/// The Widevine version whose files this profile shares with the launcher's cache.
+const LINKED_MARK: &str = ".hir-widevine-linked";
+
+/// Frees what a closed profile keeps for nothing: older versions of the browser's components,
+/// leftovers, and its own copy of the Widevine module (about 10 MB a profile) — shared with
+/// the launcher's cache instead, as a hard link, when the two are on the same disk. Returns
+/// the bytes freed.
+pub fn slim(udd: &Path) -> u64 {
+    if !udd.is_dir() || crate::process::Tracker::user_data_in_use(udd) {
+        return 0;
+    }
+    let mut freed = 0;
+    for comp in VERSIONED {
+        freed += prune_versions(&udd.join(comp));
+    }
+    for rel in LEFTOVERS {
+        let p = udd.join(rel);
+        if p.is_dir() {
+            let size = dir_size(&p);
+            if crate::winfs::remove_dir_all(&p).is_ok() {
+                freed += size;
+            }
+        } else if let Ok(m) = std::fs::metadata(&p) {
+            if std::fs::remove_file(&p).is_ok() {
+                freed += m.len();
+            }
+        }
+    }
+    if let Ok(cache) = crate::store::widevine_cache_dir() {
+        freed += link_widevine(udd, &cache);
+    }
+    freed
+}
+
+fn version_of(name: &str) -> Option<Vec<u64>> {
+    let parts: Option<Vec<u64>> = name.split('.').map(|p| p.parse().ok()).collect();
+    parts.filter(|p| p.len() >= 2)
+}
+
+/// Keeps only the newest version folder in `dir`.
+fn prune_versions(dir: &Path) -> u64 {
+    let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
+    let mut versions: Vec<(Vec<u64>, std::path::PathBuf)> = rd
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| version_of(&e.file_name().to_string_lossy()).map(|v| (v, e.path())))
+        .collect();
+    if versions.len() < 2 {
+        return 0;
+    }
+    versions.sort();
+    versions.pop(); // the newest stays
+    let mut freed = 0;
+    for (_, old) in versions {
+        let size = dir_size(&old);
+        if crate::winfs::remove_dir_all(&old).is_ok() {
+            freed += size;
+        }
+    }
+    freed
+}
+
+/// Hard-links every file of `src` into a new `dst`. Fails, leaving nothing, if any one cannot be
+/// linked (another disk, a file system without links).
+pub(crate) fn link_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
+    fn go(src: &Path, dst: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(dst)?;
+        for e in std::fs::read_dir(src)? {
+            let e = e?;
+            let to = dst.join(e.file_name());
+            if e.file_type()?.is_dir() {
+                go(&e.path(), &to)?;
+            } else {
+                std::fs::hard_link(e.path(), &to)?;
+            }
+        }
+        Ok(())
+    }
+    let out = go(src, dst);
+    if out.is_err() {
+        let _ = std::fs::remove_dir_all(dst);
+    }
+    out
+}
+
+/// The profile's copy of the cached Widevine version, replaced by links to the cache.
+fn link_widevine(udd: &Path, cache: &Path) -> u64 {
+    let Some(version) = crate::launch::cdm_version_of(cache) else { return 0 };
+    let mark = udd.join(LINKED_MARK);
+    if std::fs::read_to_string(&mark).ok().as_deref() == Some(version.as_str()) {
+        return 0;
+    }
+    let mine = udd.join("WidevineCdm").join(&version);
+    if crate::launch::cdm_version_of(&mine).as_deref() != Some(version.as_str()) {
+        return 0;
+    }
+    // Same files or nothing: a copy that differs from the cache (a partial download) stays.
+    if dir_size(&mine) != dir_size(cache) {
+        return 0;
+    }
+    let staging = udd.join("WidevineCdm").join(format!("{version}.linking"));
+    let _ = std::fs::remove_dir_all(&staging);
+    if link_dir(cache, &staging).is_err() {
+        return 0;
+    }
+    let size = dir_size(&mine);
+    let old = udd.join("WidevineCdm").join(format!("{version}.old"));
+    let _ = std::fs::remove_dir_all(&old);
+    if std::fs::rename(&mine, &old).is_err() {
+        let _ = std::fs::remove_dir_all(&staging);
+        return 0;
+    }
+    if std::fs::rename(&staging, &mine).is_err() {
+        let _ = std::fs::rename(&old, &mine);
+        let _ = std::fs::remove_dir_all(&staging);
+        return 0;
+    }
+    let _ = crate::winfs::remove_dir_all(&old);
+    let _ = std::fs::write(&mark, &version);
+    size
 }
 
 fn dir_size(dir: &Path) -> u64 {
@@ -114,6 +243,48 @@ fn dir_size(dir: &Path) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn old_component_versions_and_leftovers_go_and_widevine_is_shared() {
+        let base = std::env::temp_dir().join(format!("slim-{}", uuid::Uuid::new_v4()));
+        let udd = base.join("udd");
+        let cache = base.join("cdm");
+        let put = |p: std::path::PathBuf, bytes: usize| {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, vec![7u8; bytes]).unwrap();
+        };
+        put(udd.join("WasmTtsEngine/20261005.1/bindings_main.wasm"), 300);
+        put(udd.join("WasmTtsEngine/20261029.1/bindings_main.wasm"), 200);
+        put(udd.join("Snapshots/156.0/Default/History"), 50);
+        put(udd.join("BrowserMetrics-spare.pma"), 40);
+        put(udd.join("Default/Preferences"), 10);
+        let manifest = br#"{"version":"4.10.1.0"}"#;
+        for root in [cache.clone(), udd.join("WidevineCdm/4.10.1.0")] {
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join("manifest.json"), manifest).unwrap();
+            put(root.join("_platform_specific/win_x64/widevinecdm.dll"), 1000);
+        }
+
+        let freed = prune_versions(&udd.join("WasmTtsEngine"));
+        assert_eq!(freed, 300, "the older version goes");
+        assert!(udd.join("WasmTtsEngine/20261029.1/bindings_main.wasm").exists(), "the newest stays");
+
+        let linked = link_widevine(&udd, &cache);
+        assert!(linked > 1000, "{linked}");
+        let dll = udd.join("WidevineCdm/4.10.1.0/_platform_specific/win_x64/widevinecdm.dll");
+        assert_eq!(std::fs::read(&dll).unwrap().len(), 1000);
+        // A link: a write through the cache is seen in the profile.
+        std::fs::write(cache.join("_platform_specific/win_x64/widevinecdm.dll"), b"x").unwrap();
+        assert_eq!(std::fs::read(&dll).unwrap(), b"x");
+        assert_eq!(link_widevine(&udd, &cache), 0, "done once");
+
+        for rel in ["Snapshots", "BrowserMetrics-spare.pma"] {
+            let p = udd.join(rel);
+            if p.is_dir() { std::fs::remove_dir_all(&p).unwrap() } else { std::fs::remove_file(&p).unwrap() }
+        }
+        assert!(udd.join("Default/Preferences").exists());
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn removes_the_caches_and_keeps_what_matters() {

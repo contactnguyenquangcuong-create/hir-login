@@ -953,7 +953,8 @@ async fn delete_profile(
 // ---- shared library (extensions, custom fingerprints) ----
 
 fn safe_kind(kind: &str) -> bool {
-    kind == "fingerprints"
+    // "bookmarks": the team's one bookmark list, as a single item "list".
+    kind == "fingerprints" || kind == "bookmarks"
 }
 
 fn library_dir(kind: &str) -> Result<PathBuf> {

@@ -1378,6 +1378,13 @@ fn bookmark_delete(id: String) -> Result<(), String> {
     bookmarks::delete(&id).map_err(|e| e.to_string())
 }
 
+/// A browser's "Export bookmarks" file, added to `folder` (empty = every profile).
+#[tauri::command]
+fn bookmark_import_html(path: String, folder: String) -> Result<(usize, usize), String> {
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    bookmarks::import_html(&String::from_utf8_lossy(&bytes), &folder).map_err(|e| e.to_string())
+}
+
 // ---- Data root ----
 
 #[derive(serde::Serialize)]
@@ -1406,10 +1413,34 @@ async fn data_root_migrate(app: tauri::AppHandle, path: String) -> Result<u64, S
         return Err("close every running profile first".into());
     }
     let dst = std::path::PathBuf::from(&path);
-    tauri::async_runtime::spawn_blocking(move || migrate::run(&app, &dst))
+    // The team server reads and writes its store under the data folder: paused while it moves,
+    // so no upload lands in the copy being left behind, then served again from the new place.
+    let paused = team_server::running_info();
+    if paused.is_some() {
+        team_server::stop().map_err(|e| e.to_string())?;
+        // Uploads already under way finish first.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
+    let out = tauri::async_runtime::spawn_blocking(move || migrate::run(&app, &dst))
         .await
-        .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())
+        .and_then(|r| r.map_err(|e| e.to_string()));
+    if let Some((port, token)) = paused {
+        // The port can take a moment to be free again after the stop.
+        let mut started = team_server::start(port, token.clone()).await;
+        for _ in 0..10 {
+            if started.is_ok() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            started = team_server::start(port, token.clone()).await;
+        }
+        if let Err(e) = started {
+            let msg = format!("the data moved, but the team server did not start again: {e:#}");
+            return Err(match out { Ok(_) => msg, Err(m) => format!("{m}; {msg}") });
+        }
+    }
+    out
 }
 
 #[tauri::command]
@@ -4200,6 +4231,7 @@ pub fn run() {
             bookmark_list,
             bookmark_save,
             bookmark_delete,
+            bookmark_import_html,
             data_root_get,
             data_root_migrate,
             profile_bind_proxy,
@@ -4503,7 +4535,13 @@ pub fn run() {
             tauri::async_runtime::spawn(cloud_sync::watch_locks());
             tauri::async_runtime::spawn(fleet_report::run_forever());
             // Caches left in profiles closed by an earlier version (or while the app was not running).
-            tauri::async_runtime::spawn(cache_clean::sweep());
+            // Again every few hours: a machine left running for days kept filling its disk.
+            tauri::async_runtime::spawn(async {
+                loop {
+                    cache_clean::sweep().await;
+                    tokio::time::sleep(std::time::Duration::from_secs(6 * 3600)).await;
+                }
+            });
 
             // Trash older than its week.
             match trash::purge_expired() {

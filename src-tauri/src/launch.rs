@@ -1094,7 +1094,7 @@ fn cdm_version(v: &str) -> Vec<u64> {
     v.split('.').map(|p| p.parse().unwrap_or(0)).collect()
 }
 
-fn cdm_version_of(dir: &Path) -> Option<String> {
+pub(crate) fn cdm_version_of(dir: &Path) -> Option<String> {
     let text = std::fs::read_to_string(dir.join("manifest.json")).ok()?;
     let manifest: serde_json::Value = serde_json::from_str(&text).ok()?;
     manifest.get("version")?.as_str().map(String::from)
@@ -1135,8 +1135,19 @@ fn harvest_widevine(udd: &Path) -> Result<()> {
     let staging = cache.with_extension("incoming");
     let _ = std::fs::remove_dir_all(&staging);
     copy_dir_recursive(&src, &staging)?;
-    let _ = std::fs::remove_dir_all(&cache);
-    std::fs::rename(&staging, &cache)?;
+    // Profiles share the cache's files as hard links, and a running one has its module loaded:
+    // the live cache is never deleted in place. Set aside first, swapped, then dropped if it can be.
+    let aside = cache.with_extension("old");
+    let _ = std::fs::remove_dir_all(&aside);
+    if cache.exists() && std::fs::rename(&cache, &aside).is_err() {
+        let _ = std::fs::remove_dir_all(&staging);
+        anyhow::bail!("the cached module is in use; kept as it is");
+    }
+    if let Err(e) = std::fs::rename(&staging, &cache) {
+        let _ = std::fs::rename(&aside, &cache);
+        return Err(e.into());
+    }
+    let _ = std::fs::remove_dir_all(&aside);
     eprintln!("[launcher] widevine cached from a profile: {version}");
     Ok(())
 }
@@ -1177,9 +1188,15 @@ fn install_widevine(udd: &Path) -> Result<()> {
             }
         }
     }
-    copy_dir_recursive(&src, &versioned).with_context(|| {
-        format!("copy {} → {}", src.display(), versioned.display())
-    })?;
+    // Linked to the cache when both are on one disk — the same ~10 MB in every profile was
+    // gigabytes across a few hundred; copied otherwise.
+    if crate::cache_clean::link_dir(&src, &versioned).is_err() {
+        copy_dir_recursive(&src, &versioned).with_context(|| {
+            format!("copy {} → {}", src.display(), versioned.display())
+        })?;
+    } else {
+        let _ = std::fs::write(udd.join(".hir-widevine-linked"), version);
+    }
     // Chromium reads this single-line marker on startup.
     std::fs::write(
         widevine_root.join("latest-component-updated-version"),
