@@ -53,6 +53,7 @@ jobs:
       # `vite build` and packaging (same order as scripts/phat-hanh/windows.mjs on Windows).
       - name: Build frontend (obfuscated)
         run: |
+          npm run build:ui-kit
           npx tsc --noEmit -p tsconfig.json
           npx vite build
           node scripts/obfuscate.mjs
