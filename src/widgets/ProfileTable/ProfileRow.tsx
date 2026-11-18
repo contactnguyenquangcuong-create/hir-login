@@ -49,6 +49,7 @@ export function ProfileRow({ profile, proxy, onMenu }: {
     ...(isRunning ? [{ label: t("profileRow.menuShowWindow"), onClick: () => { profileShowWindow(p.id).catch(() => {}); } }] : []),
     { label: t("profileRow.menuEdit"), onClick: () => expand(p.id) },
     { label: t("profileRow.menuClone"), onClick: () => cloneProfile(p.id) },
+    { label: t("profileRow.menuCloneWithCookies"), onClick: () => cloneProfile(p.id, true) },
     { label: p.pinned ? t("profileRow.menuUnpin") : t("profileRow.menuPin"), onClick: () => togglePin(p) },
     { sep: true, label: "", onClick: () => {} },
     { label: t("profileRow.menuMoveToFolder"), onClick: () => setFolderModal({ profileId: p.id }) },

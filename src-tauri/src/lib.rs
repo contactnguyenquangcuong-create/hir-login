@@ -1450,9 +1450,29 @@ fn profile_bind_proxy(profile_id: String, proxy_id: Option<String>) -> Result<()
     profile::save_raw(&mut p).map_err(|e| e.to_string())
 }
 
+/// What a clone made: the new profile, and how many cookies came with it
+/// (None when the copy was asked for without them).
+#[derive(Debug, serde::Serialize)]
+struct CloneResult {
+    profile: profile::ProfileMeta,
+    cookies: Option<usize>,
+    /// Why the cookies did not come over; the profile itself was still made.
+    cookie_error: Option<String>,
+}
+
 #[tauri::command]
-fn profile_clone(id: String) -> Result<profile::ProfileMeta, String> {
-    profile::clone_profile(&id).map_err(|e| e.to_string())
+fn profile_clone(id: String, with_cookies: Option<bool>) -> Result<CloneResult, String> {
+    let meta = profile::clone_profile(&id).map_err(|e| e.to_string())?;
+    if !with_cookies.unwrap_or(false) {
+        return Ok(CloneResult { profile: meta, cookies: None, cookie_error: None });
+    }
+    // The source is read read-only, so it may be running; the copy is brand new and never is.
+    // The copy gets its own encryption key: the cookies are decrypted and written again with it.
+    let copied = cookies::export(&id).and_then(|list| cookies::import(&meta.id, &list));
+    Ok(match copied {
+        Ok(n) => CloneResult { profile: meta, cookies: Some(n), cookie_error: None },
+        Err(e) => CloneResult { profile: meta, cookies: Some(0), cookie_error: Some(format!("{e:#}")) },
+    })
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -5115,6 +5135,30 @@ mod bulk_file_tests {
         assert!(with.iter().any(|c| c.name == "xs" && c.value == "43%3Aabc"), "{with:?}");
         assert_eq!(without, 0);
         assert!(res[2].error.as_deref().unwrap_or("").contains("cookie"), "a bad cookie is reported on its row: {:?}", res[2].error);
+    }
+
+    /// "Clone with cookies" carries the login over, re-encrypted with the copy's own key;
+    /// a plain clone starts with an empty jar.
+    #[test]
+    fn clone_with_cookies_copies_the_cookie_jar() {
+        let _g = cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-clone-ck-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        store::set_data_root(Some(tmp.clone()));
+        let row = |n: &str, ck: &str| BulkRow { name: n.into(), folder: String::new(), notes: String::new(), proxy: String::new(), color: String::new(), kind: String::new(), os: String::new(), cookie: ck.into(), ram: String::new(), cores: String::new(), timezone: String::new(), language: String::new(), resolution: String::new(), user_agent: String::new() };
+        let res = profile_bulk_create(vec![row("Src", "c_user=100000000000001; xs=43%3Aabc")]).expect("create");
+        let src = res[0].id.clone().unwrap();
+        let with = profile_clone(src.clone(), Some(true)).expect("clone with cookies");
+        let without = profile_clone(src, None).expect("plain clone");
+        let got = cookies::export(&with.profile.id);
+        let plain = cookies::export(&without.profile.id).map(|c| c.len()).unwrap_or(0);
+        store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert_eq!((with.cookies, with.cookie_error.clone()), (Some(2), None));
+        let got = got.expect("copy's cookie jar readable");
+        assert!(got.iter().any(|c| c.name == "xs" && c.value == "43%3Aabc"), "{got:?}");
+        assert_eq!(without.cookies, None);
+        assert_eq!(plain, 0);
     }
     fn make_profile(fp_id: &str, name: &str, folder: &str) -> String {
         let mut m = merge_library_fingerprint(fp_id).unwrap();

@@ -226,7 +226,7 @@ export type ProfileStore = {
 
   startStop: (p: ProfileMeta) => Promise<void>;
   remove: (id: string) => Promise<void>;
-  cloneProfile: (id: string) => Promise<void>;
+  cloneProfile: (id: string, withCookies?: boolean) => Promise<void>;
   togglePin: (p: ProfileMeta) => Promise<void>;
   exportCookies: (p: ProfileMeta) => Promise<void>;
   importCookies: (p: ProfileMeta) => Promise<void>;
@@ -545,8 +545,13 @@ export const useProfile = create<ProfileStore>((set, get) => ({
     } catch (e) { toast.err(String(e)); }
   },
 
-  cloneProfile: async (id) => {
-    try { await profileClone(id); get().reload(); }
+  cloneProfile: async (id, withCookies = false) => {
+    try {
+      const r = await profileClone(id, withCookies);
+      get().reload();
+      if (r.cookie_error) toast.err(t("profileRow.cloneCookiesFailed", { error: r.cookie_error }));
+      else if (r.cookies != null) toast.ok(t("profileRow.cloneWithCookiesDone", { count: r.cookies }));
+    }
     catch (e) { toast.err(String(e)); }
   },
 
