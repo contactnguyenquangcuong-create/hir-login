@@ -213,7 +213,9 @@ export const useProxy = create<ProxyStore>((set, get) => ({
         if (ids.length === 0) return;
         toast.info(ids.length === 1 ? t("useProxy.testingOne", { n: ids.length }) : t("useProxy.testingMany", { n: ids.length }));
         const targets = proxies.filter((p) => proxySel.has(p.id));
-        const CONCURRENCY = 5;
+        // Each check is a few small connections; a dead proxy now answers in ≤3 s. Twenty at once
+        // keeps a list of dozens to seconds (five at once made a dead list take minutes).
+        const CONCURRENCY = 20;
         let i = 0;
         await Promise.all(
             Array.from({ length: Math.min(CONCURRENCY, targets.length) }, async () => {

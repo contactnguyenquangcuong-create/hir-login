@@ -192,6 +192,23 @@ pub fn get(id: &str) -> Result<Option<ProxyEntry>> {
     Ok(load()?.proxies.into_iter().find(|p| p.id == id))
 }
 
+/// How long a proxy may take to accept a connection before it counts as dead. A live proxy
+/// answers in well under a second; waiting 8 s on each of several tries is what made opening a
+/// profile on a dead proxy take 40 s.
+pub const CONNECT_WAIT: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// Whether the proxy's port accepts a connection at all — the first thing asked when a profile
+/// opens, so a dead proxy is reported in a few seconds instead of after every slower check has
+/// timed out one by one.
+pub async fn reachable(entry: &ProxyEntry) -> Result<(), String> {
+    let addr = format!("{}:{}", entry.host, entry.port);
+    match tokio::time::timeout(std::time::Duration::from_secs(3), tokio::net::TcpStream::connect(&addr)).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(e)) => Err(format!("{addr}: {e}")),
+        Err(_) => Err(format!("{addr}: no answer in 3 s")),
+    }
+}
+
 /// SOCKS5/HTTP CONNECT probe; returns RTT in ms on success.
 pub async fn probe(entry: &ProxyEntry) -> Result<u128> {
     // Only the connect had a timeout; every read after it could wait forever on
@@ -209,7 +226,7 @@ async fn probe_inner(entry: &ProxyEntry) -> Result<u128> {
 
     let started = Instant::now();
     let addr = format!("{}:{}", entry.host, entry.port);
-    let mut stream = timeout(Duration::from_secs(8), TcpStream::connect(&addr))
+    let mut stream = timeout(CONNECT_WAIT, TcpStream::connect(&addr))
         .await
         .context("connect timeout")??;
 
@@ -685,8 +702,8 @@ enum Sniff {
 /// Opens a connection, sends `payload` and returns what comes back first, waiting up to `wait`.
 async fn sniff(entry: &ProxyEntry, payload: &[u8], wait: std::time::Duration) -> Sniff {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::time::{timeout, Duration};
-    let Ok(Ok(mut s)) = timeout(Duration::from_secs(8), tokio::net::TcpStream::connect((entry.host.as_str(), entry.port))).await else {
+    use tokio::time::timeout;
+    let Ok(Ok(mut s)) = timeout(CONNECT_WAIT, tokio::net::TcpStream::connect((entry.host.as_str(), entry.port))).await else {
         return Sniff::Unreachable;
     };
     if s.write_all(payload).await.is_err() {
@@ -1090,16 +1107,27 @@ pub async fn geo_check_via(entry: Option<&ProxyEntry>, provider_override: Option
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| settings::load().ok().and_then(|s| s.geo_checker).unwrap_or_else(|| "ip-api.com".into()));
 
+    // All at once, the chosen one given a head start: asked one after another, a proxy that
+    // answers none of them cost 8 s per source before the launch could go on.
+    let mut set = tokio::task::JoinSet::new();
+    for (i, provider) in provider_chain(&chosen).into_iter().enumerate() {
+        let entry = entry.cloned();
+        set.spawn(async move {
+            if i > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+            }
+            let r = geo_check_one(entry.as_ref(), &provider).await;
+            (provider, r)
+        });
+    }
     let mut failures = Vec::new();
-    for provider in provider_chain(&chosen) {
-        match geo_check_one(entry, &provider).await {
+    while let Some(done) = set.join_next().await {
+        let Ok((provider, r)) = done else { continue };
+        match r {
             Ok(info) => {
+                set.abort_all();
                 if !failures.is_empty() {
-                    eprintln!(
-                        "[launcher] geo: {provider} answered after {} failed: {}",
-                        failures.len(),
-                        failures.join("; ")
-                    );
+                    eprintln!("[launcher] geo: {provider} answered; {} failed: {}", failures.len(), failures.join("; "));
                 }
                 return Ok(info);
             }
@@ -1392,15 +1420,21 @@ fn unix_now() -> String {
 /// Run TCP + UDP + geo, persist into history, auto-fill country tag.
 pub async fn full_test(entry: &ProxyEntry) -> Result<TestSnapshot> {
     let now = unix_now();
-    let entry = &effective_live(entry).await;
+    // Dead or alive first, in at most 3 s: a dead proxy used to take ~40 s here (its type tried,
+    // then every location source waited on in turn), and a list of them several minutes.
+    let reach = reachable(entry).await;
+    let entry = &if reach.is_ok() { effective_live(entry).await } else { entry.clone() };
 
     // The three checks do not depend on each other: one wait, not their sum.
     let want_udp = matches!(entry.kind, ProxyKind::Socks5);
-    let (tcp_res, udp_res, geo_res) = tokio::join!(
-        probe(entry),
-        async { if want_udp { Some(probe_udp(entry).await) } else { None } },
-        geo_check(entry, None)
-    );
+    let (tcp_res, udp_res, geo_res) = match reach {
+        Err(e) => (Err(anyhow::anyhow!(e)), None, Err(anyhow::anyhow!("proxy unreachable"))),
+        Ok(()) => tokio::join!(
+            probe(entry),
+            async { if want_udp { Some(probe_udp(entry).await) } else { None } },
+            geo_check(entry, None)
+        ),
+    };
     // What was just learned is what launching a profile trusts from now on; a proxy that
     // failed is forgotten, so the next open looks again instead of relying on an old answer.
     match (&tcp_res, &geo_res) {
@@ -1926,5 +1960,32 @@ mod verified_tests {
         assert!(geo_record(&saved).is_some());
         delete(&saved.id).unwrap();
         assert!(geo_record(&saved).is_none());
+    }
+}
+
+#[cfg(test)]
+mod reachable_tests {
+    use super::*;
+
+    fn entry(port: u16) -> ProxyEntry {
+        serde_json::from_value(serde_json::json!({
+            "id": "", "name": "", "kind": "http", "host": "127.0.0.1", "port": port,
+            "username": "", "password": ""
+        }))
+        .unwrap()
+    }
+
+    /// A dead proxy is told apart in seconds, not after every slower check has timed out.
+    #[tokio::test]
+    async fn a_dead_proxy_is_told_quickly_and_a_live_one_passes() {
+        let live = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let live_port = live.local_addr().unwrap().port();
+        assert!(reachable(&entry(live_port)).await.is_ok());
+
+        // A port nothing listens on: refused at once.
+        let dead_port = { let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap(); l.local_addr().unwrap().port() };
+        let t = std::time::Instant::now();
+        assert!(reachable(&entry(dead_port)).await.is_err());
+        assert!(t.elapsed() < std::time::Duration::from_secs(4), "{:?}", t.elapsed());
     }
 }

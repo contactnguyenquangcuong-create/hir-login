@@ -211,6 +211,22 @@ async fn launch_inner(
     {
         anyhow::bail!("profile này đang mở trong một cửa sổ Hir-Login khác trên máy này — đóng nó ở đó trước");
     }
+    // A dead proxy is said so at once — before the team lock is taken and before the slower checks
+    // (its type, where it exits) each wait for it in turn. A browser opened on it loads nothing.
+    {
+        let local = profile::load_raw(profile_id)?;
+        let pre = proxy_override.clone().or_else(|| profile::launch_proxy(&local.meta));
+        if let Some(p) = pre {
+            if let Err(e) = proxy::reachable(&p).await {
+                crate::cloud_sync::log_line(&format!("launch {profile_id}: proxy is not reachable — {e}"));
+                anyhow::bail!(
+                    "Proxy {}:{} không kết nối được (chết, hết hạn hoặc sai port). Đổi proxy khác hoặc bấm \"Bỏ proxy\" rồi mở lại.",
+                    p.host,
+                    p.port
+                );
+            }
+        }
+    }
     crate::cloud_sync::checkout(profile_id).await?;
     let t_sync = t_start.elapsed();
     let bin = resolve_binary()?;
