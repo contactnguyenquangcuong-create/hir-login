@@ -62,6 +62,20 @@ fn do_run(app: &tauri::AppHandle, dst: &Path) -> Result<u64> {
     std::fs::create_dir_all(&dst).with_context(|| format!("create {}", dst.display()))?;
     writable(&dst)?;
 
+    // A browser still open on a profile (one this app did not start, or left behind) holds its
+    // files: said by name before anything is copied, not as a failed copy half-way through.
+    if let Ok(rd) = std::fs::read_dir(src.join("user-data")) {
+        for e in rd.flatten() {
+            if crate::process::Tracker::user_data_in_use(&e.path()) {
+                let id = e.file_name().to_string_lossy().to_string();
+                let name = crate::profile::load_raw(&id).ok()
+                    .and_then(|p| p.config.get("name").and_then(|v| v.as_str().map(String::from)))
+                    .unwrap_or_else(|| id.clone());
+                anyhow::bail!("profile \"{name}\" is still open in a browser — close it (or end every chrome.exe of Hir-Login in Task Manager), then move again");
+            }
+        }
+    }
+
     emit(app, Progress { phase: "scan", done: 0, total: 0, percent: 0, current: String::new() });
     let mut files: Vec<(PathBuf, PathBuf)> = Vec::new();
     for name in MOVED {
@@ -91,12 +105,31 @@ fn do_run(app: &tauri::AppHandle, dst: &Path) -> Result<u64> {
     }
 
     let mut done = 0u64;
+    let mut skipped: std::collections::HashSet<PathBuf> = Default::default();
     for (from, to) in &files {
         if let Some(parent) = to.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::copy(from, to)
-            .with_context(|| format!("copy {} → {}", from.display(), to.display()))?;
+        // An antivirus or the search indexer can hold a file for a moment: tried again a few
+        // times. A cache or a tab-restore file that stays locked is left behind (the browser
+        // makes it again); anything else stops the move, nothing deleted.
+        let mut res = std::fs::copy(from, to);
+        for _ in 0..5 {
+            if res.is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            res = std::fs::copy(from, to);
+        }
+        if let Err(e) = res {
+            if rebuilt_by_browser(from) {
+                eprintln!("[launcher] move: left behind {} ({e})", from.display());
+                skipped.insert(from.clone());
+            } else {
+                return Err(anyhow::Error::new(e))
+                    .with_context(|| format!("copy {} → {}", from.display(), to.display()));
+            }
+        }
         done += 1;
         // One event per file is noise on a profile with ten thousand cache
         // entries; the bar only needs to move.
@@ -117,6 +150,9 @@ fn do_run(app: &tauri::AppHandle, dst: &Path) -> Result<u64> {
 
     emit(app, Progress { phase: "verify", done, total, percent: 100, current: String::new() });
     for (from, to) in &files {
+        if skipped.contains(from) {
+            continue;
+        }
         let a = std::fs::metadata(from).map(|m| m.len()).unwrap_or(0);
         let b = std::fs::metadata(to).map(|m| m.len()).unwrap_or(u64::MAX);
         if a != b {
@@ -155,6 +191,12 @@ fn writable(dir: &Path) -> Result<()> {
         .with_context(|| format!("{} is not writable", dir.display()))?;
     let _ = std::fs::remove_file(&probe);
     Ok(())
+}
+
+/// Files the browser makes again by itself: caches and the tabs to restore.
+fn rebuilt_by_browser(p: &Path) -> bool {
+    const DIRS: &[&str] = &["Cache", "Code Cache", "GPUCache", "DawnCache", "DawnGraphiteCache", "DawnWebGPUCache", "GrShaderCache", "GraphiteDawnCache", "ShaderCache", "Sessions", "Crashpad"];
+    p.components().any(|c| DIRS.iter().any(|d| c.as_os_str().eq_ignore_ascii_case(d)))
 }
 
 fn collect(src: &Path, dst: &Path, out: &mut Vec<(PathBuf, PathBuf)>) -> Result<()> {

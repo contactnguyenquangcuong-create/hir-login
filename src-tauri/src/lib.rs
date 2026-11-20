@@ -1417,18 +1417,17 @@ async fn data_root_migrate(app: tauri::AppHandle, path: String) -> Result<u64, S
     // so no upload lands in the copy being left behind, then served again from the new place.
     let paused = team_server::running_info();
     if paused.is_some() {
-        team_server::stop().map_err(|e| e.to_string())?;
-        // Uploads already under way finish first.
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        // Uploads already under way finish first; the members' waiting requests end at once.
+        let _ = team_server::stop_and_wait(std::time::Duration::from_secs(30)).await;
     }
     let out = tauri::async_runtime::spawn_blocking(move || migrate::run(&app, &dst))
         .await
         .map_err(|e| e.to_string())
-        .and_then(|r| r.map_err(|e| e.to_string()));
+        .and_then(|r| r.map_err(|e| format!("{e:#}")));
     if let Some((port, token)) = paused {
         // The port can take a moment to be free again after the stop.
         let mut started = team_server::start(port, token.clone()).await;
-        for _ in 0..10 {
+        for _ in 0..60 {
             if started.is_ok() {
                 break;
             }
@@ -1436,8 +1435,11 @@ async fn data_root_migrate(app: tauri::AppHandle, path: String) -> Result<u64, S
             started = team_server::start(port, token.clone()).await;
         }
         if let Err(e) = started {
-            let msg = format!("the data moved, but the team server did not start again: {e:#}");
-            return Err(match out { Ok(_) => msg, Err(m) => format!("{m}; {msg}") });
+            let msg = format!("the team server did not start again: {e:#} — restart the app to start it");
+            return Err(match out {
+                Ok(_) => format!("The data moved, but {msg}"),
+                Err(m) => format!("The data did not move: {m}. Also, {msg}"),
+            });
         }
     }
     out

@@ -259,6 +259,18 @@ fn server_state() -> &'static Mutex<Option<ServerState>> {
 }
 
 static SHUTDOWN_TX: OnceLock<Mutex<Option<oneshot::Sender<()>>>> = OnceLock::new();
+
+/// The running server's task, so that a stop can wait until the port is really free.
+static SERVE_TASK: Mutex<Option<tokio::task::JoinHandle<()>>> = Mutex::new(None);
+
+/// Wakes every long-poll (`/events/wait`) when the server stops. On Windows a port cannot be
+/// listened on again while a connection accepted on it is still open, and a long-poll held its
+/// connection for up to 25 s after a stop: the server stopped to move the data could not start
+/// again ("only one usage of each socket address", os error 10048).
+fn stopping() -> &'static tokio::sync::watch::Sender<u64> {
+    static S: OnceLock<tokio::sync::watch::Sender<u64>> = OnceLock::new();
+    S.get_or_init(|| tokio::sync::watch::channel(0).0)
+}
 fn shutdown_cell() -> &'static Mutex<Option<oneshot::Sender<()>>> {
     SHUTDOWN_TX.get_or_init(|| Mutex::new(None))
 }
@@ -318,6 +330,7 @@ async fn wait_events(
         return Json(json!({"ok": true, "seq": seq, "ids": Vec::<String>::new()})).into_response();
     };
     let mut rx = event_tx().subscribe();
+    let mut stop_rx = stopping().subscribe();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
     loop {
         let (seq, raw) = events_after(after);
@@ -333,7 +346,11 @@ async fn wait_events(
             return Json(json!({"ok": true, "seq": seq, "ids": ids})).into_response();
         }
         let left = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if left.is_zero() || tokio::time::timeout(left, rx.changed()).await.is_err() {
+        let woke = tokio::select! {
+            r = tokio::time::timeout(left, rx.changed()) => r.is_ok(),
+            _ = stop_rx.changed() => false,
+        };
+        if left.is_zero() || !woke {
             return Json(json!({"ok": true, "seq": seq, "ids": Vec::<String>::new()})).into_response();
         }
     }
@@ -1513,7 +1530,7 @@ pub async fn start(port: u16, token: String) -> Result<u16> {
     let (tx, rx) = oneshot::channel::<()>();
     *shutdown_cell().lock().unwrap() = Some(tx);
 
-    tokio::spawn(async move {
+    let task = tokio::spawn(async move {
         axum::serve(listener, app)
             .with_graceful_shutdown(async {
                 let _ = rx.await;
@@ -1523,6 +1540,9 @@ pub async fn start(port: u16, token: String) -> Result<u16> {
         // Clear state on exit
         if let Ok(mut g) = server_state().lock() { *g = None; }
     });
+    if let Ok(mut g) = SERVE_TASK.lock() {
+        *g = Some(task);
+    }
 
     // Small delay to let bind succeed
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -1535,7 +1555,19 @@ pub fn stop() -> Result<()> {
     if let Some(tx) = tx {
         let _ = tx.send(());
     }
+    stopping().send_modify(|n| *n += 1);
     if let Ok(mut g) = server_state().lock() { *g = None; }
+    Ok(())
+}
+
+/// Stops the server and waits — `limit` at most — until every connection it accepted has
+/// closed, so the port can be listened on again at once. Uploads under way finish first.
+pub async fn stop_and_wait(limit: Duration) -> Result<()> {
+    stop()?;
+    let task = SERVE_TASK.lock().ok().and_then(|mut g| g.take());
+    if let Some(task) = task {
+        let _ = tokio::time::timeout(limit, task).await;
+    }
     Ok(())
 }
 
@@ -1614,6 +1646,40 @@ mod permission_tests {
         let mut r = match method { "GET" => c.get(url), "PUT" => c.put(url), _ => c.post(url) }.bearer_auth(tok).header("x-sync-holder", holder);
         if let Some(b) = body { r = r.body(b); } else if method == "POST" { r = r.json(&json!({"holder": holder})); }
         r.send().await.unwrap().status().as_u16()
+    }
+
+    /// Moving the data stops the server and starts it again on the same port. A member's waiting
+    /// request (`/events/wait`, held up to 25 s) kept its connection open after the stop, and on
+    /// Windows the port cannot be listened on again while one is: the server did not come back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_server_starts_again_on_its_port_at_once_while_a_member_was_waiting_for_news() {
+        let _g = crate::cloud_sync::TEST_ROOT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = std::env::temp_dir().join(format!("hir-restart-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        crate::store::set_data_root(Some(tmp.clone()));
+        let admin = "admin-token-restart-1";
+        let port = start(0, admin.to_string()).await.expect("start");
+        let base = format!("http://127.0.0.1:{port}");
+        let c = reqwest::Client::new();
+        let seq: Value = c.get(format!("{base}/events/wait")).bearer_auth(admin).send().await.unwrap().json().await.unwrap();
+        let after = seq["seq"].as_u64().unwrap();
+        let waiting = tokio::spawn({
+            let c = c.clone();
+            let url = format!("{base}/events/wait?after={after}");
+            async move { c.get(url).bearer_auth(admin).send().await.map(|r| r.status().as_u16()) }
+        });
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        let t = std::time::Instant::now();
+        stop_and_wait(Duration::from_secs(30)).await.unwrap();
+        assert!(t.elapsed() < Duration::from_secs(5), "the waiting request ended with the stop: {:?}", t.elapsed());
+        assert_eq!(waiting.await.unwrap().unwrap(), 200);
+        start(port, admin.to_string()).await.expect("listens on the same port again at once");
+        assert_eq!(c.get(format!("{base}/health")).send().await.unwrap().status().as_u16(), 200);
+
+        let _ = stop();
+        crate::store::set_data_root(None);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// Opening a profile asked for its whole bundle every time. The server now says which version
