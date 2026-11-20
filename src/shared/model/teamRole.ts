@@ -108,6 +108,26 @@ export function startTeamRole() {
   void listen<number>("team:wiped", (e) => {
     toast.err(`Đã xoá ${e.payload} profile của nhóm khỏi máy này vì quyền truy cập đã bị thu hồi.`);
   });
+  // The team server (one of the team's computers) is off: the profile opened from this machine's
+  // copy and goes to the server when it is back.
+  void listen<{ id: string; name: string }>("sync:offline-open", (e) => {
+    useToastStore.getState().push(
+      "info",
+      `Máy chủ team đang tắt hoặc mất kết nối — profile "${e.payload.name}" mở bằng bản trên máy này. Khi máy chủ có lại, bản này sẽ tự đồng bộ lên.`,
+    );
+  });
+  void listen<{ id: string; name: string }>("sync:checkin-deferred", (e) => {
+    useToastStore.getState().push(
+      "info",
+      `Đã lưu profile "${e.payload.name}" trên máy này. Máy chủ team đang tắt — sẽ tự đồng bộ khi máy chủ có lại.`,
+    );
+  });
+  void listen<{ id: string; name: string }>("sync:offline-conflict", (e) => {
+    useToastStore.getState().push(
+      "err",
+      `Profile "${e.payload.name}" đã được mở ở máy khác trong lúc máy chủ tắt. Máy nào đóng sau cùng thì bản của máy đó được giữ.`,
+    );
+  });
   // A profile closed but its state (logins included) did not reach the server.
   // Never silent: the copy on this machine is kept and saved on the next close.
   void listen<{ id: string; name: string; error: string }>("sync:checkin-failed", (e) => {

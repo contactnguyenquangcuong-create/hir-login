@@ -1619,6 +1619,103 @@ fn report_checkin_failed(profile_id: &str, err: &anyhow::Error) {
     }
 }
 
+// ---- working while the team server is off ----
+//
+// The team's server is one of the team's own computers. When it is switched off or loses power,
+// a profile this machine already has opens from its own copy (marked "not saved to the server",
+// as an open always is), and its close is kept here. When the server is back, the background
+// round sends those copies up — a profile still open is locked again first, so no other machine
+// opens it meanwhile, and is sent when it closes.
+
+/// When a request last could not reach the server at all; None once one got through.
+fn server_down_cell() -> &'static Mutex<Option<std::time::Instant>> {
+    static C: OnceLock<Mutex<Option<std::time::Instant>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(None))
+}
+
+pub(crate) fn note_server_down() {
+    if let Ok(mut g) = server_down_cell().lock() {
+        *g = Some(std::time::Instant::now());
+    }
+}
+
+pub(crate) fn note_server_up() {
+    if let Ok(mut g) = server_down_cell().lock() {
+        *g = None;
+    }
+}
+
+/// The server could not be reached a moment ago: the next open does not wait for it again.
+fn server_down_recently() -> bool {
+    server_down_cell().lock().ok().and_then(|g| *g).is_some_and(|at| at.elapsed() < Duration::from_secs(30))
+}
+
+/// Whether `e` means the server could not be reached (off, no network) — not that it refused.
+pub(crate) fn server_unreachable(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.downcast_ref::<reqwest::Error>().is_some_and(|r| r.is_connect() || r.is_timeout()))
+}
+
+/// Profiles opened here while the server was off, not locked on it yet.
+fn offline_opened() -> &'static Mutex<std::collections::HashSet<String>> {
+    static S: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(Default::default()))
+}
+
+fn profile_name(id: &str) -> String {
+    crate::profile::load_raw(id).ok()
+        .and_then(|p| p.config.get("name").and_then(|v| v.as_str().map(String::from)))
+        .unwrap_or_else(|| id.to_string())
+}
+
+fn tell_ui(event: &str, id: &str) {
+    if let Some(app) = crate::app_handle() {
+        use tauri::Emitter;
+        let _ = app.emit(event, serde_json::json!({ "id": id, "name": profile_name(id) }));
+    }
+}
+
+/// Opens from this machine's copy because the server cannot be reached.
+fn open_offline(profile_id: &str, why: &str) -> Result<()> {
+    let has_copy = store::user_data_root().map(|r| r.join(profile_id).join("Default").is_dir()).unwrap_or(false);
+    if !has_copy {
+        anyhow::bail!("Máy chủ team đang không kết nối được, và máy này chưa có bản nào của profile này để mở. Mở lại khi máy chủ bật lại.");
+    }
+    update_state(|st| { st.pending.insert(profile_id.to_string()); });
+    if let Ok(mut s) = offline_opened().lock() {
+        s.insert(profile_id.to_string());
+    }
+    slog!("{profile_id}: the team server cannot be reached ({why}) — opened from this machine's copy; it goes to the server when the server is back");
+    tell_ui("sync:offline-open", profile_id);
+    Ok(())
+}
+
+/// A profile opened while the server was off and still open now the server is back: locked on
+/// it, so that no other machine opens it until it closes here (its close sends it up).
+async fn reattach_offline(c: &reqwest::Client, base: &str, token: &str, holder: &str, id: &str) {
+    let open_offline = offline_opened().lock().map(|s| s.contains(id)).unwrap_or(false);
+    if !open_offline {
+        return;
+    }
+    match relock(c, base, token, id, holder).await {
+        Ok(()) => {
+            keep_lock_alive(id, holder);
+            if let Ok(mut s) = offline_opened().lock() {
+                s.remove(id);
+            }
+            slog!("{id}: the server is back — locked again for this machine, sent when it closes");
+        }
+        Err(e) if server_unreachable(&e) => {}
+        Err(e) => {
+            // Someone opened it on another machine meanwhile. Said once; whichever closes last is kept.
+            if let Ok(mut s) = offline_opened().lock() {
+                s.remove(id);
+            }
+            slog!("{id}: the server is back, but the profile is open on another machine too ({e:#}) — whichever closes last is the copy kept");
+            tell_ui("sync:offline-conflict", id);
+        }
+    }
+}
+
 /// Call before spawning the browser. Locks the profile on the server (fails
 /// loudly if another device holds it) and pulls its latest bundle down. A
 /// no-op when sync isn't configured.
@@ -1627,6 +1724,9 @@ pub async fn checkout(profile_id: &str) -> Result<()> {
     // A personal profile opens like on a machine in no team: nothing to lock or bring down.
     if stays_personal(&base, &token, profile_id).await {
         return Ok(());
+    }
+    if server_down_recently() {
+        return open_offline(profile_id, "it could not be reached a moment ago");
     }
     let started = std::time::Instant::now();
     let _busy = begin_wait(profile_id, "pull").await;
@@ -1674,7 +1774,18 @@ pub async fn checkout(profile_id: &str) -> Result<()> {
         bundle_req = bundle_req.header("If-None-Match", format!("\"{v}\""));
     }
     let (lock_res, bundle_res) = tokio::join!(lock_req, bundle_req.send());
-    let resp = lock_res.context("contact sync server")?;
+    let resp = match lock_res.context("contact sync server") {
+        Ok(r) => r,
+        Err(e) if server_unreachable(&e) => {
+            note_server_down();
+            return open_offline(profile_id, &format!("{e:#}"));
+        }
+        Err(e) => return Err(e),
+    };
+    note_server_up();
+    if let Ok(mut s) = offline_opened().lock() {
+        s.remove(profile_id);
+    }
 
     if resp.status().as_u16() == 409 {
         let body: serde_json::Value = resp.json().await.unwrap_or_default();
@@ -1858,9 +1969,20 @@ pub async fn checkin(profile_id: &str) -> Result<()> {
         Ok(()) => update_state(|st| { st.pending.remove(profile_id); }),
         Err(e) => {
             update_state(|st| { st.pending.insert(profile_id.to_string()); });
-            report_checkin_failed(profile_id, &e);
+            if server_unreachable(&e) {
+                // The server is off: kept here, sent by the background round once it is back.
+                note_server_down();
+                slog!("{profile_id}: closed while the team server cannot be reached — kept on this machine, sent when the server is back");
+                tell_ui("sync:checkin-deferred", profile_id);
+            } else {
+                report_checkin_failed(profile_id, &e);
+            }
             return Err(e);
         }
+    }
+    note_server_up();
+    if let Ok(mut s) = offline_opened().lock() {
+        s.remove(profile_id);
     }
     unlock(&base, &token, profile_id, &holder).await?;
     mark_synced(profile_id).await;
@@ -2497,7 +2619,16 @@ pub async fn sync_round() -> Result<usize> {
     }
     let _finished = Finished;
     let holder = device_name(&cfg);
-    let remote = list_remote().await?;
+    let remote = match list_remote().await {
+        Ok(r) => r,
+        Err(e) => {
+            if server_unreachable(&e) {
+                note_server_down();
+            }
+            return Err(e);
+        }
+    };
+    note_server_up();
     let state = {
         let _g = state_lock().lock().unwrap_or_else(|e| e.into_inner());
         load_state()
@@ -2517,6 +2648,9 @@ pub async fn sync_round() -> Result<usize> {
         // Open, or closed a moment ago and still being saved by its own close: that close
         // sends it; this round would only send it a second time.
         if crate::process::Tracker::shared().is_running(id) || crate::process::is_closing(id) {
+            if crate::process::Tracker::shared().is_running(id) {
+                reattach_offline(&client(), &base, &token, &holder, id).await;
+            }
             continue;
         }
         if r.locked && r.holder.as_deref() != Some(holder.as_str()) {
@@ -4649,6 +4783,11 @@ mod tests {
             }
         }
         let _teardown = Teardown(tmp.clone());
+        // A test that switched its server off must not make the next one open offline.
+        note_server_up();
+        if let Ok(mut set) = offline_opened().lock() {
+            set.clear();
+        }
         let token = "session-test-token-1234".to_string();
         let port = crate::team_server::start(0, token.clone()).await.expect("start");
         let base = format!("http://127.0.0.1:{port}");
@@ -4711,6 +4850,54 @@ mod tests {
             checkout("sess-1").await.expect("reopen");
             assert_eq!(std::fs::read_to_string(&cookies).unwrap(), "logged-in");
             assert_eq!(std::fs::read(&idb).unwrap(), big);
+        }).await;
+    }
+
+    /// The team's server is one of the team's computers; when it loses power, a profile this
+    /// machine has still opens and closes, and what was done meanwhile reaches the server once it
+    /// is back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_profile_opens_and_closes_while_the_server_is_off_and_syncs_when_it_is_back() {
+        with_synced_profile(|base, token, cookies| async move {
+            checkout("sess-1").await.expect("open");
+            checkin("sess-1").await.expect("close");
+            let port: u16 = base.rsplit(':').next().unwrap().parse().unwrap();
+
+            crate::team_server::stop().unwrap();
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            checkout("sess-1").await.expect("opens from this machine's copy while the server is off");
+            assert!(load_state().pending.contains("sess-1"));
+            std::fs::write(&cookies, "logged-in-offline").unwrap();
+            let e = checkin("sess-1").await.expect_err("nothing can be sent while the server is off");
+            assert!(server_unreachable(&e), "{e:#}");
+            assert!(load_state().pending.contains("sess-1"), "the close is kept here");
+            // Opening again does not wait for the dead server a second time.
+            let t2 = std::time::Instant::now();
+            checkout("sess-1").await.expect("reopen offline");
+            assert!(t2.elapsed() < Duration::from_secs(2), "took {:?}", t2.elapsed());
+            assert_eq!(std::fs::read_to_string(&cookies).unwrap(), "logged-in-offline");
+            let _ = checkin("sess-1").await;
+
+            crate::team_server::start(port, token.clone()).await.expect("server back");
+            sync_round().await.expect("round once the server is back");
+            assert_eq!(server_cookie(&base, &token).await, "logged-in-offline");
+            assert!(!load_state().pending.contains("sess-1"));
+            // And it opens normally again, locked on the server.
+            checkout("sess-1").await.expect("open online");
+            assert!(offline_opened().lock().unwrap().is_empty());
+        }).await;
+    }
+
+    /// A profile this machine has never had cannot open while the server is off.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_profile_never_had_here_does_not_open_while_the_server_is_off() {
+        with_synced_profile(|_base, _token, cookies| async move {
+            checkout("sess-1").await.expect("open");
+            checkin("sess-1").await.expect("close");
+            crate::team_server::stop().unwrap();
+            std::fs::remove_dir_all(cookies.parent().unwrap()).unwrap();
+            let e = checkout("sess-1").await.expect_err("nothing to open");
+            assert!(format!("{e:#}").contains("chưa có bản nào"), "{e:#}");
         }).await;
     }
 
