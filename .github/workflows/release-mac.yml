@@ -110,13 +110,16 @@ jobs:
           TGZ_NAME="Hir-Login_${VERSION}_aarch64.app.tar.gz"
           DMG_NAME="Hir-Login_${VERSION}_aarch64.dmg"
           export VERSION TGZ TGZ_NAME DMG_NAME
-          for f in "$TGZ" "$DMG"; do
-            SIZE=$(stat -f%z "$f"); [ "$SIZE" -lt 26214400 ] || { echo "$f is over 25 MB (KV limit)"; exit 1; }
-          done
+          # The update archive is what installed apps download: it must fit. The dmg is only for a
+          # new install: when it does not fit, the "new install" link keeps the previous dmg (that
+          # app updates itself on first start) instead of the release failing.
+          SIZE=$(stat -f%z "$TGZ"); [ "$SIZE" -lt 26214400 ] || { echo "$TGZ is over 25 MB (KV limit)"; exit 1; }
+          DMG_OK=1
+          SIZE=$(stat -f%z "$DMG"); [ "$SIZE" -lt 26214400 ] || { echo "::warning::$DMG is over 25 MB (KV limit): not uploaded, the new-install link keeps the previous dmg"; DMG_OK=0; }
           put() { curl -sf -X PUT "$CHANNEL/upload/$1" -H "x-upload-key: $UPLOAD_KEY" -H "content-type: $2" --data-binary "@$3"; echo; }
           # Files first, then the manifest that points at them.
           put "file:$TGZ_NAME" application/gzip "$TGZ"
-          put "file:$DMG_NAME" application/x-apple-diskimage "$DMG"
+          if [ "$DMG_OK" = 1 ]; then put "file:$DMG_NAME" application/x-apple-diskimage "$DMG"; fi
           node -e '
             const fs = require("fs");
             fs.writeFileSync("latest.json", JSON.stringify({
@@ -129,5 +132,5 @@ jobs:
             fs.writeFileSync("tai.txt", process.env.CHANNEL + "/file/" + process.env.DMG_NAME);
           '
           put "latest:darwin-aarch64" application/json latest.json
-          put "tai:mac" text/plain tai.txt
+          if [ "$DMG_OK" = 1 ]; then put "tai:mac" text/plain tai.txt; fi
           curl -sf "$CHANNEL/darwin/aarch64/latest.json?t=$(date +%s)"
