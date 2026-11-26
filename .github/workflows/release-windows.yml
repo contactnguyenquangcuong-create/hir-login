@@ -1,0 +1,104 @@
+name: Release Windows
+
+# Builds, signs and publishes the Windows installer from GitHub, for when scripts/phat-hanh/windows.mjs
+# cannot run on the owner's PC (its key files live in D:\AI\HirLogin-goi). Same steps as that script:
+# obfuscated frontend, signed NSIS installer, file uploaded first, then the manifest that points at it.
+# Publishes to the Windows channel of the Cloudflare Worker `hirlogin-cap-nhat`; the Mac channel has
+# its own workflow (release-mac.yml), started by pushing the tag vX.Y.Z.
+#
+# Started by hand only (Actions → Release Windows → Run workflow). Uses the same secrets as the Mac build:
+#   TAURI_SIGNING_PRIVATE_KEY, TAURI_SIGNING_PRIVATE_KEY_PASSWORD, HIRLOGIN_UPLOAD_KEY
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag or commit to build"
+        required: true
+        default: "main"
+      notes:
+        description: "What changed, in Vietnamese (shown to users in the updater)"
+        required: false
+        default: ""
+
+env:
+  CHANNEL: https://hirlogin-cap-nhat.hir-contact-vn.workers.dev
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Read the version
+        id: ver
+        shell: bash
+        run: |
+          VERSION=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          LIVE=$(curl -sf "$CHANNEL/windows/x86_64/latest.json?t=$(date +%s)" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).version||"")}catch{}})' || true)
+          if [ "$LIVE" = "$VERSION" ]; then echo "The Windows channel already has $VERSION - bump the version first"; exit 1; fi
+
+      - name: Install frontend deps
+        run: npm ci
+
+      - name: Build frontend (obfuscated)
+        shell: bash
+        run: |
+          npm run build:ui-kit
+          npx tsc --noEmit -p tsconfig.json
+          npx vite build
+          node scripts/obfuscate.mjs
+
+      - name: Build and sign the installer
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: npm run tauri build -- --bundles nsis --config '{"build":{"beforeBuildCommand":""}}'
+
+      - name: Publish to the Windows channel
+        shell: bash
+        env:
+          UPLOAD_KEY: ${{ secrets.HIRLOGIN_UPLOAD_KEY }}
+          NOTES: ${{ inputs.notes }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          NAME="Hir-Login_${VERSION}_x64-setup.exe"
+          EXE="src-tauri/target/release/bundle/nsis/$NAME"
+          test -f "$EXE" && test -f "$EXE.sig"
+          SIZE=$(stat -c%s "$EXE"); [ "$SIZE" -lt 26214400 ] || { echo "$NAME is over 25 MB (KV limit)"; exit 1; }
+          SHA=$(sha256sum "$EXE" | cut -d' ' -f1)
+          put() { curl -sf -X PUT "$CHANNEL/upload/$1" -H "x-upload-key: $UPLOAD_KEY" -H "content-type: $2" --data-binary "@$3"; echo; }
+          # The file first, checked after upload, then the manifest that points at it.
+          put "file:$NAME" application/vnd.microsoft.portable-executable "$EXE"
+          GOT=$(curl -sf "$CHANNEL/file/$NAME" | sha256sum | cut -d' ' -f1)
+          [ "$GOT" = "$SHA" ] || { echo "The uploaded file does not match the build - latest.json not changed"; exit 1; }
+          export VERSION SHA NAME EXE
+          node -e '
+            const fs = require("fs");
+            fs.writeFileSync("latest.json", JSON.stringify({
+              version: process.env.VERSION,
+              notes: process.env.NOTES || "",
+              pub_date: new Date().toISOString(),
+              url: process.env.CHANNEL + "/file/" + process.env.NAME,
+              signature: fs.readFileSync(process.env.EXE + ".sig", "utf8").trim(),
+              sha256: process.env.SHA,
+            }));
+            fs.writeFileSync("tai.txt", process.env.CHANNEL + "/file/" + process.env.NAME);
+          '
+          put "latest:windows-x86_64" application/json latest.json
+          put "tai:windows" text/plain tai.txt
+          curl -sf "$CHANNEL/windows/x86_64/latest.json?t=$(date +%s)"
