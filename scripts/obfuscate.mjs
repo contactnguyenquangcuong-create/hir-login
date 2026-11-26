@@ -55,10 +55,15 @@ for (const name of files) {
 if (!done) throw new Error('Không file nào làm rối được — kiểm tra lại trước khi đóng gói');
 
 // Layer 2: BLA (https://github.com/qybaihe/bla) counter-REA hardening on dist/ only.
-console.log('Đang chạy BLA hardening (bla-agents) trên dist/...');
-execFileSync('npx', ['--yes', 'bla-agents', 'harden', DIST, '--apply', '--weave-decoys'], {
-  cwd: ROOT,
-  stdio: 'inherit',
-  shell: process.platform === 'win32',
-});
-console.log('Đã hoàn tất làm rối (javascript-obfuscator + BLA).');
+// SKIP_BLA=1 leaves it out: on the 7 GB GitHub runner it runs out of memory on this bundle.
+if (process.env.SKIP_BLA === '1') {
+  console.log('Bỏ qua BLA hardening (SKIP_BLA=1). Đã làm rối bằng javascript-obfuscator.');
+} else {
+  console.log('Đang chạy BLA hardening (bla-agents) trên dist/...');
+  execFileSync('npx', ['--yes', 'bla-agents', 'harden', DIST, '--apply', '--weave-decoys'], {
+    cwd: ROOT,
+    stdio: 'inherit',
+    shell: process.platform === 'win32',
+  });
+  console.log('Đã hoàn tất làm rối (javascript-obfuscator + BLA).');
+}

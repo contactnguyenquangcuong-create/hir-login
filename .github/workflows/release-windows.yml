@@ -56,8 +56,9 @@ jobs:
       - name: Build frontend (obfuscated)
         shell: bash
         env:
-          # scripts/obfuscate.mjs (javascript-obfuscator, then bla-agents) runs out of the default
-          # Node heap on this bundle.
+          # The BLA hardening layer of scripts/obfuscate.mjs (bla-agents) runs out of memory on
+          # this bundle on a GitHub runner, so it is left out here; javascript-obfuscator still runs.
+          SKIP_BLA: "1"
           NODE_OPTIONS: --max-old-space-size=5120
         run: |
           npm run build:ui-kit
