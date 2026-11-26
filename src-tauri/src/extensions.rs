@@ -23,6 +23,9 @@ pub struct ExtensionEntry {
     pub size_bytes: u64,
     /// "@<unix_secs>", same marker profiles use.
     pub added_at: String,
+    /// Enabled automatically for every existing and newly created profile.
+    #[serde(default)]
+    pub all_profiles: bool,
 }
 
 fn dir_for(id: &str) -> Result<PathBuf> {
@@ -141,6 +144,7 @@ pub fn canonicalize_all() -> usize {
     if renamed.is_empty() {
         return 0;
     }
+    remap_all_profiles(&renamed);
     if let Ok(profiles) = crate::profile::list_all() {
         for p in profiles {
             let Ok(mut stored) = crate::profile::load_raw(&p.id) else { continue };
@@ -217,6 +221,7 @@ fn read_entry(id: &str) -> Result<ExtensionEntry> {
         path: root.display().to_string(),
         size_bytes: dir_size(&dir),
         added_at,
+        all_profiles: all_profiles_raw().iter().any(|x| x == id),
     })
 }
 
@@ -488,6 +493,7 @@ fn webstore_id(raw: &str) -> Option<String> {
 pub fn delete(id: &str) -> Result<usize> {
     let dir = dir_for(id)?;
     remember_removed(id, true);
+    set_all_profiles(id, false);
     let n = crate::profile::remove_extension_from_all(id)?;
     if dir.exists() {
         crate::winfs::remove_dir_all(&dir)?;
@@ -525,6 +531,68 @@ fn remember_removed(id: &str, gone: bool) {
     }
     if let (Ok(p), Ok(body)) = (removed_path(), serde_json::to_string(&ids)) {
         let _ = fs::write(p, body);
+    }
+}
+
+/// Extensions enabled for "all profiles": automatically attached to every profile created after
+/// the toggle (via UI, template, bulk Excel, or API) as well as existing ones.
+fn all_profiles_path() -> Result<PathBuf> {
+    Ok(store::extensions_dir()?.join(".all_profiles.json"))
+}
+
+fn all_profiles_raw() -> Vec<String> {
+    all_profiles_path()
+        .ok()
+        .and_then(|p| fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Live extension ids currently marked "enable for all profiles".
+pub fn all_profiles_ids() -> Vec<String> {
+    all_profiles_raw()
+        .into_iter()
+        .filter(|id| load_path(id).is_some())
+        .collect()
+}
+
+pub fn set_all_profiles(id: &str, on: bool) {
+    let mut ids = all_profiles_raw();
+    let had = ids.iter().any(|x| x == id);
+    if on == had {
+        return;
+    }
+    if on {
+        ids.push(id.to_string());
+    } else {
+        ids.retain(|x| x != id);
+    }
+    if let (Ok(p), Ok(body)) = (all_profiles_path(), serde_json::to_string(&ids)) {
+        let _ = fs::write(p, body);
+    }
+}
+
+fn remap_all_profiles(renamed: &[(String, String)]) {
+    let raw = all_profiles_raw();
+    if raw.is_empty() {
+        return;
+    }
+    let mut changed = false;
+    let mut out = Vec::new();
+    for id in raw {
+        let mapped = renamed.iter().find(|(o, _)| o == &id).map(|(_, n)| n.clone());
+        if mapped.is_some() {
+            changed = true;
+        }
+        let id = mapped.unwrap_or(id);
+        if !out.contains(&id) {
+            out.push(id);
+        }
+    }
+    if changed {
+        if let (Ok(p), Ok(body)) = (all_profiles_path(), serde_json::to_string(&out)) {
+            let _ = fs::write(p, body);
+        }
     }
 }
 

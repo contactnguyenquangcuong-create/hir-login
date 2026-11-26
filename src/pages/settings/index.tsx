@@ -88,32 +88,40 @@ export function SettingsPage() {
   // click. Persist it at once and drop the cached role right away, or the
   // Nhân sự list (built from the old, still-saved token) keeps showing.
   const disconnect = async () => {
-    // Leaving takes back what the team gave this machine; what was here before it joined, or was
-    // made here, stays — with its folder. A machine that joined before the app recorded that
-    // cannot tell them apart, so the person is asked.
-    const choice: "cancel" | "delete" | "keep" = await confirmModal({
+    // Voluntary leave lets the person choose what stays on this machine (profiles and/or proxies);
+    // being kicked out by an admin always removes every team profile and team proxy automatically.
+    const choice: "cancel" | "keep-all" | "keep-proxies" | "delete-all" = await confirmModal({
       title: "Rời nhóm",
       message:
-        "Profile bạn tạo riêng (có trước khi vào nhóm hoặc tự tạo) luôn được giữ nguyên cùng thư mục cá nhân. " +
-        "Profile do nhóm cấp xuống máy này sẽ bị xoá khỏi máy (dữ liệu trên server vẫn còn). " +
-        "Nếu máy này vào nhóm từ phiên bản cũ, app không phân biệt được profile riêng với profile của nhóm — " +
-        "chọn “Rời nhóm, giữ mọi profile” để không mất cái nào.",
+        "Chọn dữ liệu muốn giữ lại trên máy này khi tự rời nhóm (dữ liệu trên máy chủ nhóm vẫn giữ nguyên). " +
+        "Profile cá nhân bạn tự tạo luôn được giữ lại. Lưu ý: nếu bị quản trị viên xoá/kích khỏi nhóm thì toàn bộ profile và proxy của nhóm sẽ tự động bị gỡ bỏ.",
       buttons: [
         { label: "Huỷ", value: "cancel" },
-        { label: "Rời nhóm, giữ mọi profile", value: "keep" },
-        { label: "Rời nhóm, xoá profile của nhóm", value: "delete", danger: true },
+        { label: "Giữ cả profile & proxy", value: "keep-all" },
+        { label: "Giữ proxy, xoá profile nhóm", value: "keep-proxies" },
+        { label: "Xoá cả profile & proxy nhóm", value: "delete-all", danger: true },
       ],
     });
-    if (choice !== "keep" && choice !== "delete") return;
+    if (choice !== "keep-all" && choice !== "keep-proxies" && choice !== "delete-all") return;
     let removed = 0;
-    try { removed = await teamLeave(choice === "keep"); }
-    catch (e) { toast.err(String(e)); return; }
+    try {
+      removed = await teamLeave(choice === "keep-all", {
+        keepProfiles: choice === "keep-all",
+        keepProxies: choice === "keep-all" || choice === "keep-proxies",
+      });
+    } catch (e) { toast.err(String(e)); return; }
     const next = { ...s, sync: { ...s.sync!, enabled: false, server_url: null, token: null } };
     setS(next);
     setSaved(JSON.stringify(next));
     useTeam.setState({ role: null, name: "", id: "", isServerAdmin: false, folderNames: null });
     try { localStorage.removeItem("hir.teamRole"); } catch { /* ignore */ }
-    toast.ok(choice === "keep" ? "Đã rời nhóm — mọi profile được giữ lại trên máy này" : `Đã rời nhóm — đã xoá ${removed} profile của nhóm khỏi máy này`);
+    toast.ok(
+      choice === "keep-all"
+        ? "Đã rời nhóm — mọi profile và proxy được giữ lại trên máy này"
+        : choice === "keep-proxies"
+          ? `Đã rời nhóm — đã xoá ${removed} profile của nhóm, giữ lại proxy`
+          : `Đã rời nhóm — đã xoá ${removed} profile và proxy của nhóm khỏi máy này`,
+    );
     window.dispatchEvent(new CustomEvent("store-changed"));
   };
 

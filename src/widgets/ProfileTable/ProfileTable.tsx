@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Checkbox, Pagination } from "@proxyshard/shardx-ui-kit";
 import { ShardLogo } from "../../shared/icons";
+import { SelectAllStrip } from "../../shared/ui";
 import { useT } from "../../shared/i18n";
 import { useContextMenu } from "../../shared/hooks/useContextMenu";
 import {
@@ -97,6 +98,10 @@ export function ProfileTable() {
 
   const allPageSelected = paged.length > 0 && paged.every((p) => selected.has(p.id));
   const anyPageSelected = paged.some((p) => selected.has(p.id));
+  const selectedInList = useMemo(
+    () => visible.reduce((n, p) => n + (selected.has(p.id) ? 1 : 0), 0),
+    [visible, selected],
+  );
 
   return (
     <>
@@ -124,6 +129,17 @@ export function ProfileTable() {
           <SortHead k="launched" label={t("profileTable.colLastRun")} className="head-lastrun" />
           <div></div>
         </div>
+        )}
+        {!editing && pageCount > 1 && (
+          <SelectAllStrip
+            pageCount={paged.length}
+            total={visible.length}
+            selected={selectedInList}
+            allPageSelected={allPageSelected}
+            onSelectPage={() => selectProfiles(true, paged)}
+            onSelectAll={() => selectProfiles(true, visible)}
+            onClearAll={() => selectProfiles(false, visible)}
+          />
         )}
         {expanded === "__new__" && (
           <div className="row-expanded row-new relative border-t border-stroke-soft-200 first:border-t-0">

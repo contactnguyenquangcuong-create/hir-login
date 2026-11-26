@@ -6,6 +6,7 @@ import { useProfile, useFolders, usePartnerShare, PARTNERS, type PartnerKey } fr
 import { toast } from "../../shared/model/toast";
 import { useTeam, canEdit, canShare, startTeamRole } from "../../shared/model/teamRole";
 import { FolderListButton, inlineFolders } from "../../shared/ui/FolderListButton";
+import { FolderModal } from "../../features/manage-profiles/ui/FolderModal";
 import { ShareFolderModal } from "../../features/manage-profiles/ui/ShareFolderModal";
 import { teamFoldersGone } from "../../shared/model/folderSync";
 
@@ -32,12 +33,16 @@ export function FolderTabs() {
   const setFolder = useProfile((s) => s.setFolder);
   const setDropTarget = useProfile((s) => s.setDropTarget);
   const setProfileFolder = useProfile((s) => s.setProfileFolder);
+  const rememberFolder = useProfile((s) => s.rememberFolder);
+  const renameFolder = useProfile((s) => s.renameFolder);
   const deleteFolder = useProfile((s) => s.deleteFolder);
   const folders = useFolders();
   const ctx = useContextMenu();
   const role = useTeam((s) => s.role);
   const configured = useTeam((s) => s.configured);
   const [sharing, setSharing] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [renaming, setRenaming] = useState<string | null>(null);
   const folderNames = useTeam((s) => s.folderNames);
   const forgetFolder = useProfile((s) => s.forgetFolder);
   // A folder the server no longer shows this person (deleted, or access removed) goes from the
@@ -115,6 +120,7 @@ export function FolderTabs() {
             onClick: () => flipPartner(p.key, p.name, f),
           }))
         : []),
+      ...(canEdit(role, configured) ? [{ label: t("folderTabs.renameFolder"), onClick: () => setRenaming(f) }] : []),
       ...(canEdit(role, configured) ? [{ label: t("folderTabs.deleteFolder"), onClick: () => deleteFolder(f), danger: true }] : []),
     ]);
 
@@ -153,6 +159,16 @@ export function FolderTabs() {
           className={cn(tabBase, "border-b-transparent text-primary-base hover:text-primary-base")}
         />
       )}
+      {canEdit(role, configured) && (
+        <button
+          type="button"
+          className={cn(tabBase, "border-b-transparent px-2.5 text-text-soft-400 hover:text-primary-base")}
+          title={t("folderTabs.newFolder")}
+          onClick={() => setCreating(true)}
+        >
+          +
+        </button>
+      )}
       {canShare(role, configured) && folder !== "all" && (
         <button
           className="ml-auto flex-none cursor-pointer whitespace-nowrap border-0 bg-transparent px-3 py-2 text-label-xs text-text-sub-600 hover:text-primary-base"
@@ -161,6 +177,33 @@ export function FolderTabs() {
         >
           Chia sẻ quyền
         </button>
+      )}
+      {creating && (
+        <FolderModal
+          mode="create"
+          existing={folders}
+          onPick={() => {}}
+          onCreate={(name) => {
+            setCreating(false);
+            rememberFolder(name);
+            setFolder(name);
+          }}
+          onClose={() => setCreating(false)}
+        />
+      )}
+      {renaming && (
+        <FolderModal
+          mode="rename"
+          initialName={renaming}
+          existing={folders}
+          onPick={() => {}}
+          onCreate={(next) => {
+            const old = renaming;
+            setRenaming(null);
+            void renameFolder(old, next);
+          }}
+          onClose={() => setRenaming(null)}
+        />
       )}
       {sharing && <ShareFolderModal folder={sharing} onClose={() => setSharing(null)} />}
       {ctx.node}

@@ -3,35 +3,52 @@ import { Button, DialogModal, Input } from "@proxyshard/shardx-ui-kit";
 import { FolderIcon } from "../../../shared/icons";
 import { useT } from "../../../shared/i18n";
 
-/// Folder picker/creator modal (replaces native prompt). mode: "create" | "move".
+/// Folder picker/creator/renamer modal (replaces native prompt). mode: "create" | "move" | "rename".
 export function FolderModal({
-  mode, existing, onPick, onCreate, onClose,
+  mode, existing, initialName, onPick, onCreate, onClose,
 }: {
-  mode: "create" | "move";
+  mode: "create" | "move" | "rename";
   existing: string[];
+  initialName?: string;
   onPick: (folder: string) => void;
   onCreate: (name: string) => void;
   onClose: () => void;
 }) {
   const t = useT();
-  const [name, setName] = useState("");
+  const [name, setName] = useState(initialName ?? "");
   const [find, setFind] = useState("");
   const ref = useRef<HTMLInputElement>(null);
-  useEffect(() => { ref.current?.focus(); }, []);
+  useEffect(() => {
+    ref.current?.focus();
+    if (mode === "rename") ref.current?.select();
+  }, [mode]);
   const trimmed = name.trim();
-  const dup = existing.includes(trimmed);
-  const create = () => { if (trimmed && !dup) onCreate(trimmed); };
+  const unchanged = mode === "rename" && trimmed === (initialName ?? "").trim();
+  const dup = !unchanged && existing.includes(trimmed);
+  const submit = () => { if (trimmed && !dup && !unchanged) onCreate(trimmed); };
   const showList = mode === "move" && existing.length > 0;
   const listed = find.trim() ? existing.filter((f) => f.toLowerCase().includes(find.trim().toLowerCase())) : existing;
+  const title =
+    mode === "move"
+      ? t("folderModal.moveTitle")
+      : mode === "rename"
+        ? t("folderModal.renameTitle")
+        : t("folderModal.createTitle");
+  const confirmLabel =
+    showList
+      ? t("folderModal.createAndMove")
+      : mode === "rename"
+        ? t("folderModal.renameConfirm")
+        : t("folderModal.create");
   return (
     <DialogModal
       open
       onClose={onClose}
       icon={<FolderIcon className="size-5" />}
-      title={mode === "move" ? t("folderModal.moveTitle") : t("folderModal.createTitle")}
-      confirmLabel={showList ? t("folderModal.createAndMove") : t("folderModal.create")}
-      onConfirm={create}
-      isDisabled={!trimmed || dup}
+      title={title}
+      confirmLabel={confirmLabel}
+      onConfirm={submit}
+      isDisabled={!trimmed || dup || unchanged}
       cancelLabel={t("folderModal.cancel")}
       onCancel={onClose}
     >
@@ -71,14 +88,14 @@ export function FolderModal({
         )}
         <Input
           ref={ref}
-          label={showList ? t("folderModal.newFolderNameLabel") : t("folderModal.folderNameLabel")}
+          label={showList || mode === "rename" ? t("folderModal.newFolderNameLabel") : t("folderModal.folderNameLabel")}
           inputSize="small"
           value={name}
           placeholder={t("folderModal.namePlaceholder")}
           error={dup ? t("folderModal.duplicateError", { name: trimmed }) : undefined}
           onChange={(e) => setName(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter") create();
+            if (e.key === "Enter") submit();
             if (e.key === "Escape") onClose();
           }}
         />

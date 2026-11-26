@@ -5,8 +5,9 @@
 // product names, protocol names, the endonyms in the language picker.
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+const ROOT = fileURLToPath(new URL("..", import.meta.url));
 const SRC = join(ROOT, "src");
 const LOCALES = join(SRC, "shared/i18n/locales");
 

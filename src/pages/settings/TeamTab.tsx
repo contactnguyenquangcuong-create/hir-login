@@ -341,10 +341,15 @@ export function TeamTab({
       {fw?.supported && (
         <Section title="Quyền mạng (tường lửa Windows)" desc="Cho phép Hir-Login và trình duyệt của nó đi qua tường lửa, mọi cổng — hết các hộp hỏi quyền và lỗi không kết nối được. Chỉ cần làm một lần trên mỗi máy.">
           <Row label="Trạng thái" hint={fw.granted ? "Đã cho phép." : "Chưa cho phép. Bấm nút, Windows sẽ hỏi quyền quản trị một lần."}>
-            <div className="sm:flex sm:justify-end">
-              {fw.granted
-                ? <Pill tone="success"><Dot on />Đã cấp</Pill>
-                : <Button variant="primary" mode="stroke" size="small" onClick={grantFw} isLoading={fwBusy}>Cấp quyền mạng</Button>}
+            <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+              {fw.granted ? (
+                <>
+                  <Pill tone="success"><Dot on />Đã cấp</Pill>
+                  <Button variant="neutral" mode="stroke" size="xsmall" onClick={grantFw} isLoading={fwBusy}>Cấp lại</Button>
+                </>
+              ) : (
+                <Button variant="primary" mode="stroke" size="small" onClick={grantFw} isLoading={fwBusy}>Cấp quyền mạng</Button>
+              )}
             </div>
           </Row>
         </Section>

@@ -6,6 +6,7 @@ import { FirstRunGate } from "../widgets/FirstRunGate/FirstRunGate";
 import { ToastHost } from "../widgets/ToastHost/ToastHost";
 import { ConfirmHost } from "../widgets/ConfirmHost/ConfirmHost";
 import { SyncWorkingBanner } from "../widgets/SyncWorkingBanner/SyncWorkingBanner";
+import { ImportProgressModal } from "../widgets/ImportProgressModal/ImportProgressModal";
 import { HelperWatcher } from "../widgets/HelperWatcher";
 import { BrowsersPage } from "../pages/browsers";
 import { ProxiesPage } from "../pages/proxies";
@@ -58,6 +59,7 @@ export function App() {
             <ToastHost />
             <ConfirmHost />
             <SyncWorkingBanner />
+            <ImportProgressModal />
           </div>
         </FirstRunGate>
       </ActivationGate>

@@ -379,6 +379,9 @@ async fn mark_synced_many(ids: &[String]) {
 
 fn build_client() -> reqwest::Client {
     reqwest::Client::builder()
+        // The team server sits on Tailscale (100.x.x.x) or LAN; routing through a system proxy
+        // (Clash, VPN, Windows Proxy Settings) breaks every request to it.
+        .no_proxy()
         // A server that is switched off or unreachable must fail in seconds, not hold a
         // profile launch for the system's own TCP timeout (more than a minute).
         .connect_timeout(Duration::from_secs(8))
@@ -559,7 +562,8 @@ fn removed_from_team(token: &str) {
         let _ = app.emit("team:kicked-out", ());
     }
     tauri::async_runtime::spawn(async {
-        let n = wipe_team_data().await;
+        // Kicked out by admin: always remove everything belonging to the team (profiles + proxies).
+        let n = wipe_team_data_opts(false, false, true).await;
         slog!("this machine was removed from the team — {n} team profiles were deleted from it");
     });
 }
@@ -614,33 +618,62 @@ pub fn forget_team() {
 /// running first; forgets the sync state. Local-only profiles are left alone. Returns how many
 /// profiles were deleted. Nothing is reported to the server — it already has them.
 pub async fn wipe_team_data() -> usize {
+    wipe_team_data_opts(false, false, false).await
+}
+
+/// Voluntary leave can keep profiles and/or proxies (`keep_profiles`, `keep_proxies`); being kicked
+/// out (`kicked = true`) always wipes every synced profile and every proxy brought in or used by
+/// those profiles.
+pub async fn wipe_team_data_opts(keep_profiles: bool, keep_proxies: bool, kicked: bool) -> usize {
     let st = load_state();
     // What came from the team goes; what was here before it joined, or was made here, stays. A
-    // machine that joined before that was recorded cannot tell them apart: everything that synced.
-    let mut ids: Vec<String> = if st.tracked {
+    // machine that joined before that was recorded — or a machine kicked out of the team — wipes
+    // everything that synced with the team.
+    let mut ids: Vec<String> = if st.tracked && !kicked {
         st.pulled.iter().cloned().collect()
     } else {
         let mut all: Vec<String> = st.items.keys().cloned().collect();
+        all.extend(st.pulled.iter().cloned());
         all.extend(st.pending.iter().cloned());
         all
     };
     ids.sort();
     ids.dedup();
+    let mut proxies_to_wipe: std::collections::HashSet<String> = st.team_proxies.clone();
     let mut gone = 0;
-    for id in &ids {
-        if crate::process::Tracker::shared().is_running(id) {
-            let _ = crate::process::Tracker::shared().kill(id).await;
-            crate::cdp::detach(id);
-        }
-        let existed = crate::profile::load_raw(id).is_ok();
-        let _ = crate::profile::delete(id);
-        let _ = trash::purge(id);
-        if existed {
-            gone += 1;
+    if !keep_profiles {
+        for id in &ids {
+            if crate::process::Tracker::shared().is_running(id) {
+                let _ = crate::process::Tracker::shared().kill(id).await;
+                crate::cdp::detach(id);
+            }
+            if let Ok(raw) = crate::profile::load_raw(id) {
+                if kicked {
+                    if let Some(pid) = raw.meta.proxy_id {
+                        proxies_to_wipe.insert(pid);
+                    }
+                }
+                let _ = crate::profile::delete(id);
+                let _ = trash::purge(id);
+                gone += 1;
+            } else {
+                let _ = crate::profile::delete(id);
+                let _ = trash::purge(id);
+            }
         }
     }
-    for pid in &st.team_proxies {
-        let _ = crate::proxy::delete(pid);
+    if !keep_proxies {
+        // When kicked, never delete a proxy that is still bound to a surviving local-only profile.
+        let still_used: std::collections::HashSet<String> = crate::profile::list_all()
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|p| p.proxy_id)
+            .collect();
+        for pid in &proxies_to_wipe {
+            if !still_used.contains(pid) {
+                let _ = crate::proxy::delete(pid);
+            }
+        }
     }
     update_state(|s| {
         s.items.clear();

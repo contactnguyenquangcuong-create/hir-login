@@ -319,7 +319,9 @@ async fn launch_inner(
     resolve_auto_fields(profile_id, &mut raw, bound_proxy.as_ref(), !ephemeral_proxy).await;
     // A profile made on another machine carries that machine's screen; on Win/Linux
     // the window has to fit this monitor. "real" mode skips — the core drops it anyway.
-    if settings::load()?.screen_resolution_mode.as_deref() != Some("real") {
+    // Mobile profiles keep their phone-sized window.
+    let is_mobile = profile::claims_mobile(&stored.config);
+    if !is_mobile && settings::load()?.screen_resolution_mode.as_deref() != Some("real") {
         if let Some(w) = crate::main_window() {
             // Only the window is fitted to this monitor. The screen the profile declares is left as
             // it is: replacing it with this monitor's size made the same profile report a
@@ -387,13 +389,20 @@ async fn launch_inner(
 
     // Extensions from the library. Chromium loads only what
     // --disable-extensions-except allows, so the two lists have to match.
-    let ext_paths: Vec<String> = stored
+    let mut ext_paths: Vec<String> = stored
         .meta
         .extensions
         .iter()
         .filter_map(|id| extensions::load_path(id))
         .map(|p| p.display().to_string())
         .collect();
+    // Built-in toolbar extension for switching proxies live inside Chrome without restarting.
+    if !headless {
+        match crate::proxy_switcher::prepare_extension(&udd, profile_id).await {
+            Ok(p) => ext_paths.push(p.display().to_string()),
+            Err(e) => eprintln!("[launcher] proxy switcher extension skipped: {e:#}"),
+        }
+    }
     if !ext_paths.is_empty() {
         let joined = ext_paths.join(",");
         cmd.arg(format!("--load-extension={joined}"));
@@ -616,9 +625,24 @@ async fn launch_inner(
         cmd.arg(a);
     }
 
-    // Operator's own switches, last so they win a repeat.
     let extra_args = settings::parse_extra_args(&s.extra_args);
     let operator_start_url = extra_args.iter().any(|a| !a.starts_with('-'));
+
+    // Interactive desktop launches start maximized so the browser fills whichever monitor it opens
+    // on (including multi-monitor and scaled displays), while keeping the profile's declared
+    // `screen.*` fingerprint parameters unchanged.
+    if !headless && !is_mobile && sync_group.is_none() && !enable_cdp {
+        let custom_window = chromium_args.iter().chain(extra_args.iter()).any(|a| {
+            a.starts_with("--window-size")
+                || a.starts_with("--start-fullscreen")
+                || a == "--start-maximized"
+        });
+        if !custom_window {
+            cmd.arg("--start-maximized");
+        }
+    }
+
+    // Operator's own switches, last so they win a repeat.
     for a in &extra_args {
         cmd.arg(a);
     }

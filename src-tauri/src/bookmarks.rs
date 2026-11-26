@@ -112,6 +112,25 @@ pub fn delete(id: &str) -> Result<()> {
     save_store(&mut s)
 }
 
+/// Retag bookmarks belonging to folder `old` when that folder is renamed.
+pub fn rename_folder(old: &str, new: &str) {
+    let new = new.trim();
+    if old.is_empty() || new.is_empty() || old == new {
+        return;
+    }
+    let Ok(Some(mut s)) = load_store_opt() else { return };
+    let mut changed = false;
+    for b in &mut s.bookmarks {
+        if b.folder == old {
+            b.folder = new.to_string();
+            changed = true;
+        }
+    }
+    if changed {
+        let _ = save_store(&mut s);
+    }
+}
+
 /// Adds every link of a browser's "Export bookmarks" file (Netscape HTML) to
 /// `folder`, skipping ones already there. Returns (added, skipped).
 pub fn import_html(html: &str, folder: &str) -> Result<(usize, usize)> {

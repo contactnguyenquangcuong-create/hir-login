@@ -263,6 +263,10 @@ pub struct StoredMeta {
     /// save landing on top of someone else's is refused instead of silent.
     #[serde(default)]
     pub rev: u64,
+    /// Original profile id when brought in via `import_bundle`, so importing the
+    /// same bundle again skips duplicates even if the profile was renamed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported_from: Option<String>,
 }
 
 /// The screen the profile claims, as (width, height).
@@ -714,6 +718,8 @@ pub struct ExportReport {
 #[derive(Debug, Default, Serialize)]
 pub struct ImportReport {
     pub imported: usize,
+    #[serde(default)]
+    pub skipped: usize,
     pub failed: Vec<BundleFailure>,
     pub warnings: Vec<String>,
 }
@@ -813,6 +819,112 @@ fn looks_like_browser_profile_dir(path: &Path) -> bool {
         || path.join("Preferences").is_file()
 }
 
+/// Tracks already-present profiles during `import_bundle` so importing the same
+/// folder twice (or overlapping batches) skips duplicates automatically.
+struct ImportDedup {
+    /// Known profile ids (both current `meta.id` and `meta.imported_from`).
+    ids: std::collections::HashSet<String>,
+    /// Known `(lowercase trimmed name, lowercase trimmed folder)` pairs.
+    name_folders: std::collections::HashSet<(String, String)>,
+}
+
+impl ImportDedup {
+    fn load_existing() -> Self {
+        let mut dedup = Self {
+            ids: std::collections::HashSet::new(),
+            name_folders: std::collections::HashSet::new(),
+        };
+        let Ok(dir) = store::profiles_dir() else {
+            return dedup;
+        };
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return dedup;
+        };
+        for entry in entries.flatten() {
+            if entry.path().extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(body) = fs::read_to_string(entry.path()) else { continue };
+            let Ok(stored) = serde_json::from_str::<StoredProfile>(&body) else { continue };
+            if stored.meta.temporary {
+                continue;
+            }
+            if !stored.meta.id.is_empty() {
+                dedup.ids.insert(stored.meta.id.clone());
+            }
+            if let Some(ref orig) = stored.meta.imported_from {
+                if !orig.is_empty() {
+                    dedup.ids.insert(orig.clone());
+                }
+            }
+            if let Some(name) = stored.config.get("name").and_then(|v| v.as_str()) {
+                let n = name.trim().to_lowercase();
+                if !n.is_empty() {
+                    dedup.name_folders.insert((n, stored.meta.folder.trim().to_lowercase()));
+                }
+            }
+        }
+        dedup
+    }
+
+    fn is_duplicate(&self, orig_id: Option<&str>, name: &str, folder: &str) -> bool {
+        if let Some(oid) = orig_id {
+            if !oid.is_empty() && self.ids.contains(oid) {
+                return true;
+            }
+        }
+        let n = name.trim().to_lowercase();
+        if !n.is_empty() && self.name_folders.contains(&(n, folder.trim().to_lowercase())) {
+            return true;
+        }
+        false
+    }
+
+    fn record(&mut self, new_id: &str, orig_id: Option<&str>, name: &str, folder: &str) {
+        if !new_id.is_empty() {
+            self.ids.insert(new_id.to_string());
+        }
+        if let Some(oid) = orig_id {
+            if !oid.is_empty() {
+                self.ids.insert(oid.to_string());
+            }
+        }
+        let n = name.trim().to_lowercase();
+        if !n.is_empty() {
+            self.name_folders.insert((n, folder.trim().to_lowercase()));
+        }
+    }
+}
+
+enum ImportOneOutcome {
+    Imported,
+    SkippedDuplicate,
+}
+
+fn emit_import_progress(
+    done: usize,
+    total: usize,
+    imported: usize,
+    skipped: usize,
+    failed: usize,
+    current: &str,
+) {
+    if let Some(app) = crate::app_handle() {
+        use tauri::Emitter;
+        let _ = app.emit(
+            "profile:import-progress",
+            serde_json::json!({
+                "done": done,
+                "total": total,
+                "imported": imported,
+                "skipped": skipped,
+                "failed": failed,
+                "current": current,
+            }),
+        );
+    }
+}
+
 /// Import one profile from `dir`: `dir/profile.json` (written by
 /// `export_bundle`) round-trips its config and `dir/userdata/` verbatim; a
 /// bare browser-profile folder is adopted as the user-data itself and given
@@ -821,7 +933,11 @@ fn looks_like_browser_profile_dir(path: &Path) -> bool {
 /// All or nothing: if the browser data cannot be copied the profile that was
 /// just created for it is removed again, instead of leaving a profile that
 /// opens empty and logged out.
-fn import_one_profile_dir(dir: &Path, warnings: &mut Vec<String>) -> Result<()> {
+fn import_one_profile_dir(
+    dir: &Path,
+    dedup: &mut ImportDedup,
+    warnings: &mut Vec<String>,
+) -> Result<ImportOneOutcome> {
     let folder_name = dir
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
@@ -850,12 +966,22 @@ fn import_one_profile_dir(dir: &Path, warnings: &mut Vec<String>) -> Result<()> 
         config.insert("name".into(), serde_json::Value::String(folder_name.clone()));
         StoredProfile { meta: StoredMeta::default(), config }
     };
+    let orig_id = if profile_json.exists() && !stored.meta.id.trim().is_empty() {
+        Some(stored.meta.id.trim().to_string())
+    } else {
+        None
+    };
     let name = stored
         .config
         .get("name")
         .and_then(|v| v.as_str())
         .unwrap_or(folder_name.as_str())
         .to_string();
+    let folder = stored.meta.folder.clone();
+
+    if dedup.is_duplicate(orig_id.as_deref(), &name, &folder) {
+        return Ok(ImportOneOutcome::SkippedDuplicate);
+    }
 
     // The proxy: bring it across when the bundle carries it (deduped, so 72
     // profiles sharing one proxy make one entry, not 72); with none in the
@@ -880,9 +1006,16 @@ fn import_one_profile_dir(dir: &Path, warnings: &mut Vec<String>) -> Result<()> 
         }
     }
 
+    for ext_id in crate::extensions::all_profiles_ids() {
+        if !stored.meta.extensions.contains(&ext_id) {
+            stored.meta.extensions.push(ext_id);
+        }
+    }
+
     let _guard = file_lock();
     let new_id = uuid::Uuid::new_v4().to_string();
     stored.meta.id = new_id.clone();
+    stored.meta.imported_from = orig_id.clone();
     stored.meta.last_launched_at = None;
     stored.meta.created_at = None;
     stored.meta.pinned = false;
@@ -906,41 +1039,52 @@ fn import_one_profile_dir(dir: &Path, warnings: &mut Vec<String>) -> Result<()> 
             return Err(e);
         }
     }
-    Ok(())
+    dedup.record(&new_id, orig_id.as_deref(), &name, &folder);
+    Ok(ImportOneOutcome::Imported)
 }
 
 /// Import a portable bundle directory. If `src` is itself one profile's data
 /// (a bundle with `profile.json`, or a real Chromium profile folder), it is
 /// imported as that single profile. Otherwise every immediate subfolder of
 /// `src` is imported as one profile each — see `import_one_profile_dir`.
+/// Duplicates already on this machine (or earlier in the same folder) are
+/// skipped automatically, and progress is emitted via `profile:import-progress`.
 /// One that fails is reported and skipped; the rest still come in.
 pub fn import_bundle(src: &Path) -> Result<ImportReport> {
     let mut report = ImportReport::default();
-    if src.join("profile.json").exists() || looks_like_browser_profile_dir(src) {
-        let name = src.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-        match import_one_profile_dir(src, &mut report.warnings) {
-            Ok(()) => report.imported = 1,
-            Err(e) => report.failed.push(BundleFailure { name, error: format!("{e:#}") }),
+    let candidates: Vec<PathBuf> = if src.join("profile.json").exists() || looks_like_browser_profile_dir(src) {
+        vec![src.to_path_buf()]
+    } else {
+        let mut dirs: Vec<PathBuf> = Vec::new();
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                let p = entry.path();
+                if p.join("profile.json").exists() || looks_like_browser_profile_dir(&p) {
+                    dirs.push(p);
+                }
+            }
         }
-        return Ok(report);
-    }
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            dirs.push(entry.path());
+        dirs.sort();
+        dirs
+    };
+
+    let total = candidates.len();
+    let mut dedup = ImportDedup::load_existing();
+    emit_import_progress(0, total, 0, 0, 0, "");
+
+    for (idx, subdir) in candidates.into_iter().enumerate() {
+        let name = subdir
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        emit_import_progress(idx, total, report.imported, report.skipped, report.failed.len(), &name);
+        match import_one_profile_dir(&subdir, &mut dedup, &mut report.warnings) {
+            Ok(ImportOneOutcome::Imported) => report.imported += 1,
+            Ok(ImportOneOutcome::SkippedDuplicate) => report.skipped += 1,
+            Err(e) => report.failed.push(BundleFailure { name: name.clone(), error: format!("{e:#}") }),
         }
-    }
-    dirs.sort();
-    for subdir in dirs {
-        if !subdir.join("profile.json").exists() && !looks_like_browser_profile_dir(&subdir) {
-            continue;
-        }
-        let name = subdir.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-        match import_one_profile_dir(&subdir, &mut report.warnings) {
-            Ok(()) => report.imported += 1,
-            Err(e) => report.failed.push(BundleFailure { name, error: format!("{e:#}") }),
-        }
+        emit_import_progress(idx + 1, total, report.imported, report.skipped, report.failed.len(), &name);
     }
     Ok(report)
 }
@@ -1005,6 +1149,11 @@ pub fn clone_profile(id: &str) -> Result<ProfileMeta> {
     // save_raw re-derives fresh ones from new_id, giving the copy its own
     // canvas/audio/WebGL fingerprint instead of a clone of the original's.
     clear_noise_seeds(&mut src.config);
+    for ext_id in crate::extensions::all_profiles_ids() {
+        if !src.meta.extensions.contains(&ext_id) {
+            src.meta.extensions.push(ext_id);
+        }
+    }
     save_raw_locked(&mut src)?;
     Ok(ProfileMeta {
         id: src.meta.id,
@@ -1133,6 +1282,10 @@ pub fn rename_folder(old: &str, new: &str) -> Result<usize> {
         }
     }
     crate::partners::renamed(old, new);
+    crate::bookmarks::rename_folder(old, new);
+    if n > 0 {
+        crate::cloud_sync::kick();
+    }
     Ok(n)
 }
 
@@ -1644,5 +1797,23 @@ mod bundle_tests {
         // This machine keeps it (profile.json on disk), so the next open still uses it.
         let kept = serde_json::to_string(&sp).unwrap();
         assert!(kept.contains("surfshark"));
+    }
+
+    #[test]
+    fn importing_the_same_bundle_twice_skips_duplicates() {
+        let root = Root::new("imp-dedup");
+        let ids: Vec<String> = (0..5).map(|i| make(&format!("Dup {i}"), None)).collect();
+        let dest = root.dir.join("bundle");
+        export_bundle(&ids, &dest).unwrap();
+
+        root.switch_to("machine-b");
+        let first = import_bundle(&dest).unwrap();
+        assert_eq!((first.imported, first.skipped, first.failed.len()), (5, 0, 0), "{first:?}");
+        assert_eq!(list_all().unwrap().len(), 5);
+
+        // Importing the exact same folder again skips all 5.
+        let second = import_bundle(&dest).unwrap();
+        assert_eq!((second.imported, second.skipped, second.failed.len()), (0, 5, 0), "{second:?}");
+        assert_eq!(list_all().unwrap().len(), 5);
     }
 }

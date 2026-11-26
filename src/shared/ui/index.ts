@@ -43,3 +43,4 @@ export { CopyField } from "./CopyField";
 export { CountryFlag } from "./CountryFlag";
 export { Metric } from "./Metric";
 export { Topbar } from "./Topbar";
+export { SelectAllStrip } from "./SelectAllStrip";

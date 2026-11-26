@@ -350,6 +350,24 @@ impl AclStore {
         self.trashed.insert(folder.to_string(), TrashedFolder { owner, access, deleted_at_ms: now_ms, deleted_by: by.name.clone(), by_admin: by.is_privileged() });
     }
 
+    /// Rename a folder, keeping its owner and every member's sharing level.
+    /// False when the target name is empty, unchanged, or already taken (active or trashed).
+    pub fn rename_folder(&mut self, old: &str, new: &str) -> bool {
+        let new = new.trim();
+        if old.is_empty() || new.is_empty() || old == new {
+            return false;
+        }
+        if self.owners.contains_key(new) || self.folders.contains_key(new) || self.trashed.contains_key(new) {
+            return false;
+        }
+        let owner = self.owners.remove(old).unwrap_or_else(|| "admin".into());
+        self.owners.insert(new.to_string(), owner);
+        if let Some(access) = self.folders.remove(old) {
+            self.folders.insert(new.to_string(), access);
+        }
+        true
+    }
+
     /// Bring a trashed folder back. False when its name has been taken meanwhile or it is not in the trash.
     pub fn restore_folder(&mut self, folder: &str) -> bool {
         if self.owners.contains_key(folder) || self.folders.contains_key(folder) { return false; }

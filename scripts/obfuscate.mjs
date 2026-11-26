@@ -1,6 +1,8 @@
-// Obfuscates the built frontend (dist/assets/*.js) in place, to raise the cost of reverse
-// engineering the client once it is in a customer's hands — not to defeat anyone else's
-// protection. Runs AFTER `vite build`, right before the result is packaged into the installer:
+// Obfuscates and hardens the built frontend (dist/) in place before packaging into the installer:
+//   1) `javascript-obfuscator` (control-flow flattening, dead code, base64 string array, self-defending)
+//   2) `bla-agents` (https://github.com/qybaihe/bla — Blind LLM Agents counter-REA hardening with
+//      structural decoys) on `dist/` so automated reverse-engineering agents are misled too.
+// Runs AFTER `vite build`, right before `tauri build`:
 //   - scripts/phat-hanh/windows.mjs calls this after its own `vite build`.
 //   - .github/workflows/release-mac.yml calls this after its own `vite build`, before `tauri build`.
 // Never wired into `npm run build`/`npm run dev` — those stay unobfuscated for local debugging.
@@ -8,11 +10,13 @@
 // Usage: node scripts/obfuscate.mjs
 import fs from 'fs';
 import path from 'path';
+import { execFileSync } from 'child_process';
 import { fileURLToPath } from 'url';
 import JavaScriptObfuscator from 'javascript-obfuscator';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const ASSETS = path.join(ROOT, 'dist', 'assets');
+const DIST = path.join(ROOT, 'dist');
+const ASSETS = path.join(DIST, 'assets');
 
 const files = fs.existsSync(ASSETS) ? fs.readdirSync(ASSETS).filter((f) => f.endsWith('.js')) : [];
 if (!files.length) throw new Error('Không thấy file .js nào trong dist/assets — chạy `vite build` trước');
@@ -49,3 +53,12 @@ for (const name of files) {
   }
 }
 if (!done) throw new Error('Không file nào làm rối được — kiểm tra lại trước khi đóng gói');
+
+// Layer 2: BLA (https://github.com/qybaihe/bla) counter-REA hardening on dist/ only.
+console.log('Đang chạy BLA hardening (bla-agents) trên dist/...');
+execFileSync('npx', ['--yes', 'bla-agents', 'harden', DIST, '--apply', '--weave-decoys'], {
+  cwd: ROOT,
+  stdio: 'inherit',
+  shell: process.platform === 'win32',
+});
+console.log('Đã hoàn tất làm rối (javascript-obfuscator + BLA).');

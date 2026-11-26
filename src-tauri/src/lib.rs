@@ -23,6 +23,7 @@ mod process;
 mod profile;
 mod proxy;
 mod proxy_relay;
+mod proxy_switcher;
 mod psapi;
 mod runtime;
 mod settings;
@@ -527,11 +528,16 @@ pub fn fit_window_to_real_display(
     window: &tauri::WebviewWindow,
     payload: &mut serde_json::Map<String, Value>,
 ) {
+    if profile::claims_mobile(payload) {
+        return;
+    }
+    // Prefer the monitor this window currently sits on (multi-monitor setups where the user works
+    // on an external display larger than the laptop primary), falling back to the primary display.
     let Some(monitor) = window
-        .primary_monitor()
+        .current_monitor()
         .ok()
         .flatten()
-        .or_else(|| window.current_monitor().ok().flatten())
+        .or_else(|| window.primary_monitor().ok().flatten())
     else {
         return;
     };
@@ -656,6 +662,20 @@ pub fn save_profile_core(
 
     let mut stored: profile::StoredProfile =
         serde_json::from_value(payload).map_err(|e| e.to_string())?;
+    // Auto-attach extensions marked "enable for all profiles" to every newly created profile
+    // (UI, template, bulk Excel, API — temporary one-shot profiles stay clean).
+    if is_new && !stored.meta.temporary {
+        let mut added = false;
+        for ext_id in extensions::all_profiles_ids() {
+            if !stored.meta.extensions.contains(&ext_id) {
+                stored.meta.extensions.push(ext_id);
+                added = true;
+            }
+        }
+        if added && stored.meta.extensions_at == 0 {
+            stored.meta.extensions_at = profile::now_ms();
+        }
+    }
     profile::save_raw(&mut stored).map_err(|e| e.to_string())?;
     let name = stored
         .config
@@ -1348,12 +1368,27 @@ fn table_columns(path: String) -> Result<Vec<TableColumn>, String> {
     Ok(out)
 }
 
-/// Turns a library extension on for every profile; returns how many changed.
+/// Turns a library extension on for every profile (existing and newly created); returns how many
+/// existing profiles changed.
 #[tauri::command]
 fn extension_apply_all(id: String) -> Result<usize, String> {
     // Only what is actually in the library.
     extensions::load_path(&id).ok_or_else(|| "that extension is not in the library".to_string())?;
+    extensions::set_all_profiles(&id, true);
     profile::add_extension_to_all(&id).map_err(|e| e.to_string())
+}
+
+/// Toggle whether a library extension is automatically enabled for all profiles (existing + new).
+#[tauri::command]
+fn extension_set_all_profiles(id: String, enabled: bool) -> Result<usize, String> {
+    if enabled {
+        extensions::load_path(&id).ok_or_else(|| "that extension is not in the library".to_string())?;
+        extensions::set_all_profiles(&id, true);
+        profile::add_extension_to_all(&id).map_err(|e| e.to_string())
+    } else {
+        extensions::set_all_profiles(&id, false);
+        Ok(0)
+    }
 }
 
 #[tauri::command]
@@ -3437,7 +3472,11 @@ fn team_invite_parse(code: String) -> Result<Value, String> {
 /// their folders); `keep_all` keeps everything, as ordinary local profiles. Answers how many
 /// profiles were deleted.
 #[tauri::command]
-async fn team_leave(keep_all: Option<bool>) -> Result<usize, String> {
+async fn team_leave(
+    keep_all: Option<bool>,
+    keep_profiles: Option<bool>,
+    keep_proxies: Option<bool>,
+) -> Result<usize, String> {
     let mut s = settings::load().map_err(|e| e.to_string())?;
     let syncs_to_itself = has_token(&s.sync.token) && s.sync.token == s.server_host.token;
     if syncs_to_itself {
@@ -3453,11 +3492,13 @@ async fn team_leave(keep_all: Option<bool>) -> Result<usize, String> {
         s.server_host.token = None;
     }
     settings::save(&s).map_err(|e| e.to_string())?;
-    if keep_all == Some(true) {
+    let kp = keep_profiles.unwrap_or(keep_all == Some(true));
+    let kx = keep_proxies.unwrap_or(keep_all == Some(true));
+    if kp && kx {
         cloud_sync::forget_team();
         return Ok(0);
     }
-    Ok(cloud_sync::wipe_team_data().await)
+    Ok(cloud_sync::wipe_team_data_opts(kp, kx, false).await)
 }
 
 /// The last lines of the sync log, for the Team tab: what was pulled, what was made portable,
@@ -3581,6 +3622,51 @@ async fn tailscale_revoke_key(id: String) -> Result<(), String> {
     tailscale::revoke_key(&o.client_id, &o.client_secret, &id).await.map_err(|e| e.to_string())
 }
 
+/// `reqwest::Error::to_string()` only says "error sending request for url (...)" and hides the
+/// underlying OS/TCP reason (timeout vs connection refused vs no route). Walk the source chain so
+/// the user sees what actually failed and gets a plain hint for the common causes.
+fn describe_connect_error(e: &reqwest::Error) -> String {
+    let mut parts = vec![e.to_string()];
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = std::error::Error::source(e);
+    while let Some(src) = cur {
+        let s = src.to_string();
+        if !s.is_empty() && parts.last().map(|p| p != &s).unwrap_or(true) {
+            parts.push(s);
+        }
+        cur = src.source();
+    }
+    classify_connect_error(e.is_timeout(), &parts.join(": "))
+}
+
+fn classify_connect_error(is_timeout: bool, chain: &str) -> String {
+    let low = chain.to_lowercase();
+    let hint = if is_timeout
+        || low.contains("timed out")
+        || low.contains("timeout")
+        || low.contains("os error 10060")
+    {
+        Some("hết thời gian chờ — tường lửa/antivirus trên máy chủ đang chặn cổng, hoặc Tailscale chặn kết nối vào (mở lại mục Quyền mạng trên máy chủ và bấm Cấp lại)")
+    } else if low.contains("connection refused")
+        || low.contains("actively refused")
+        || low.contains("os error 10061")
+    {
+        Some("máy chủ từ chối kết nối — kiểm tra máy chủ có đang bật Hir-Login và mục Làm máy chủ đúng cổng không")
+    } else if low.contains("no route to host")
+        || low.contains("network is unreachable")
+        || low.contains("host is unreachable")
+        || low.contains("os error 10065")
+        || low.contains("os error 10051")
+    {
+        Some("không tìm thấy đường mạng tới máy chủ — kiểm tra Tailscale trên cả hai máy")
+    } else {
+        None
+    };
+    match hint {
+        Some(h) => format!("{h} [{chain}]"),
+        None => chain.to_string(),
+    }
+}
+
 #[tauri::command]
 async fn team_invite_join(code: String) -> Result<Value, String> {
     // Symmetric to the guard in `team_server_start`: hosting your own team and
@@ -3597,7 +3683,11 @@ async fn team_invite_join(code: String) -> Result<Value, String> {
     let mut join_err: Option<String> = None;
     let health_url = format!("{}/health", url.trim_end_matches('/'));
     let probe = |secs: u64| {
-        let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(secs)).build();
+        // Direct to Tailscale/LAN: never route private team-server probes through a system proxy.
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(secs))
+            .build();
         let (u, t) = (health_url.clone(), token.clone());
         async move {
             match client {
@@ -3673,6 +3763,7 @@ async fn team_invite_join(code: String) -> Result<Value, String> {
     // Verify connectivity before saving. Right after a join the route to the server takes a few
     // seconds to appear (on a Mac most of all), so a first miss is not yet an answer.
     let client = reqwest::Client::builder()
+        .no_proxy()
         .timeout(std::time::Duration::from_secs(8))
         .build()
         .map_err(|e| e.to_string())?;
@@ -3681,7 +3772,7 @@ async fn team_invite_join(code: String) -> Result<Value, String> {
     for attempt in 0..4 {
         match client.get(&health_url).bearer_auth(&token).send().await {
             Ok(r) => { resp = Some(r); break; }
-            Err(e) => last_err = e.to_string(),
+            Err(e) => last_err = describe_connect_error(&e),
         }
         if attempt < 3 && !reachable && join_err.is_none() {
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -4247,6 +4338,7 @@ pub fn run() {
             extension_import,
             extension_import_url,
             extension_apply_all,
+            extension_set_all_profiles,
             table_columns,
             profile_show_window,
             extension_delete,
@@ -4806,6 +4898,26 @@ mod team_server_stop_tests {
         store::set_data_root(None);
         let _ = std::fs::remove_dir_all(&tmp);
         assert!(err.contains("máy chủ"), "{err}");
+    }
+
+    #[test]
+    fn connect_error_classification_surfaces_root_cause_and_hint() {
+        let timed_out = classify_connect_error(
+            true,
+            "error sending request for url (http://100.100.193.87:8787/health): operation timed out",
+        );
+        assert!(timed_out.contains("tường lửa"), "{timed_out}");
+        assert!(timed_out.contains("operation timed out"), "{timed_out}");
+
+        let refused = classify_connect_error(
+            false,
+            "error sending request for url (http://100.100.193.87:8787/health): tcp connect error: No connection could be made because the target machine actively refused it. (os error 10061)",
+        );
+        assert!(refused.contains("từ chối kết nối"), "{refused}");
+        assert!(refused.contains("10061"), "{refused}");
+
+        let other = classify_connect_error(false, "error sending request for url (...): unexpected eof");
+        assert_eq!(other, "error sending request for url (...): unexpected eof");
     }
 
     /// `sync.enabled=true` with a blank (not null) token — what the "Nâng cao"

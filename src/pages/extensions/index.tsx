@@ -12,6 +12,7 @@ function Card({ e }: { e: ExtensionEntry }) {
   const t = useT();
   const remove = useExtensions((s) => s.remove);
   const applyAll = useExtensions((s) => s.applyAll);
+  const disableAllProfiles = useExtensions((s) => s.disableAllProfiles);
   return (
     <article className="flex flex-col gap-2.5 rounded-xl bg-bg-white-0 p-3.5 ring-1 ring-inset ring-stroke-soft-200">
       <div className="flex items-start gap-2.5">
@@ -23,7 +24,14 @@ function Card({ e }: { e: ExtensionEntry }) {
           </div>
         )}
         <div className="min-w-0 flex-1">
-          <h3 className="m-0 truncate text-label-xs text-text-strong-950" title={e.name}>{e.name}</h3>
+          <div className="flex items-center gap-1.5">
+            <h3 className="m-0 truncate text-label-xs text-text-strong-950" title={e.name}>{e.name}</h3>
+            {e.all_profiles && (
+              <span className="shrink-0 rounded-full bg-success-alpha-10 px-1.5 py-0.5 text-[10px] font-medium text-success-base">
+                {t("extensions.allProfilesBadge")}
+              </span>
+            )}
+          </div>
           <div className="mt-0.5 flex items-center gap-1.5 text-paragraph-xs text-text-soft-400">
             {e.version && <span>v{e.version}</span>}
             <span>·</span>
@@ -35,14 +43,25 @@ function Card({ e }: { e: ExtensionEntry }) {
         {e.description || <span className="text-text-soft-400">{t("extensions.noDescription")}</span>}
       </p>
       <div className="flex items-center justify-between gap-2">
-        <Button
-          variant="primary"
-          mode="ghost"
-          size="2xsmall"
-          onClick={() => applyAll(e)}
-        >
-          {t("extensions.applyAll")}
-        </Button>
+        {e.all_profiles ? (
+          <Button
+            variant="neutral"
+            mode="ghost"
+            size="2xsmall"
+            onClick={() => disableAllProfiles(e)}
+          >
+            {t("extensions.disableAllProfiles")}
+          </Button>
+        ) : (
+          <Button
+            variant="primary"
+            mode="ghost"
+            size="2xsmall"
+            onClick={() => applyAll(e)}
+          >
+            {t("extensions.applyAll")}
+          </Button>
+        )}
         <Button
           variant="error"
           mode="ghost"

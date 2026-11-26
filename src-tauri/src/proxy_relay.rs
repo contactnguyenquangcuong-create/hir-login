@@ -18,14 +18,20 @@ use crate::proxy::{ProxyEntry, ProxyKind};
 use anyhow::{Context, Result};
 use base64::Engine as _;
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
-fn running() -> &'static Mutex<HashMap<String, JoinHandle<()>>> {
-    static M: OnceLock<Mutex<HashMap<String, JoinHandle<()>>>> = OnceLock::new();
+struct RunningRelay {
+    port: u16,
+    upstream: Arc<RwLock<Upstream>>,
+    task: JoinHandle<()>,
+}
+
+fn running() -> &'static Mutex<HashMap<String, RunningRelay>> {
+    static M: OnceLock<Mutex<HashMap<String, RunningRelay>>> = OnceLock::new();
     M.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -61,8 +67,30 @@ pub fn cannot_carry(p: &ProxyEntry) -> bool {
 /// What the forwarder talks to on the far side.
 #[derive(Clone)]
 enum Upstream {
-    Http { addr: String, auth: String },
+    Direct,
+    Http { addr: String, auth: Option<String> },
     Socks5 { addr: String, user: String, pass: String },
+}
+
+impl Upstream {
+    fn from_entry(p: &ProxyEntry) -> Self {
+        let addr = format!("{}:{}", p.host, p.port);
+        match p.kind {
+            ProxyKind::Socks5 => Upstream::Socks5 {
+                addr,
+                user: p.username.clone(),
+                pass: p.password.clone(),
+            },
+            _ => {
+                let auth = if p.username.is_empty() && p.password.is_empty() {
+                    None
+                } else {
+                    Some(base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", p.username, p.password)))
+                };
+                Upstream::Http { addr, auth }
+            }
+        }
+    }
 }
 
 /// Starts the forwarder for `profile_id` (replacing any earlier one) and returns
@@ -74,41 +102,70 @@ pub async fn start(profile_id: &str, p: &ProxyEntry) -> Result<u16> {
 /// The same on a given loopback port (0 = any): a browser this app takes back after it was
 /// restarted still points at the port of the forwarder that ended with the old app.
 pub async fn start_on(profile_id: &str, p: &ProxyEntry, port: u16) -> Result<u16> {
-    let addr = format!("{}:{}", p.host, p.port);
-    let upstream = match p.kind {
-        ProxyKind::Socks5 => Upstream::Socks5 { addr, user: p.username.clone(), pass: p.password.clone() },
-        _ => Upstream::Http {
-            addr,
-            auth: base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", p.username, p.password)),
-        },
-    };
+    let upstream = Arc::new(RwLock::new(Upstream::from_entry(p)));
     let listener = TcpListener::bind(("127.0.0.1", port)).await.context("bind local proxy relay")?;
     // Not inherited by the browser it serves: one that kept it held the port after the app was
     // ended for an update, and the forwarder could not be started again on it.
     crate::api::no_inherit(&listener);
     let port = listener.local_addr()?.port();
+    let up_loop = upstream.clone();
     let task = tokio::spawn(async move {
         loop {
             let Ok((conn, _)) = listener.accept().await else { break };
-            let upstream = upstream.clone();
+            let up = up_loop.read().map(|g| g.clone()).unwrap_or(Upstream::Direct);
             tokio::spawn(async move {
-                let _ = handle(conn, &upstream).await;
+                let _ = handle(conn, &up).await;
             });
         }
     });
     if let Ok(mut m) = running().lock() {
-        if let Some(old) = m.insert(profile_id.to_string(), task) {
-            old.abort();
+        if let Some(old) = m.insert(profile_id.to_string(), RunningRelay { port, upstream, task }) {
+            old.task.abort();
         }
     }
     Ok(port)
 }
 
+/// Hot-swaps the live relay upstream for `profile_id` (starting one on an ephemeral loopback port
+/// if none is running yet). Returns the loopback port when proxying, or `None` when switched to
+/// direct (no proxy). Used by the in-Chrome proxy switcher extension so users can switch HTTP and
+/// authenticated SOCKS5 proxies live without restarting the browser.
+pub async fn switch(profile_id: &str, p: Option<&ProxyEntry>) -> Result<Option<u16>> {
+    match p {
+        Some(entry) => {
+            if let Ok(m) = running().lock() {
+                if let Some(r) = m.get(profile_id) {
+                    if let Ok(mut w) = r.upstream.write() {
+                        *w = Upstream::from_entry(entry);
+                    }
+                    return Ok(Some(r.port));
+                }
+            }
+            Ok(Some(start(profile_id, entry).await?))
+        }
+        None => {
+            if let Ok(m) = running().lock() {
+                if let Some(r) = m.get(profile_id) {
+                    if let Ok(mut w) = r.upstream.write() {
+                        *w = Upstream::Direct;
+                    }
+                }
+            }
+            Ok(None)
+        }
+    }
+}
+
+/// Current loopback relay port for `profile_id`, if one is running.
+pub fn port_of(profile_id: &str) -> Option<u16> {
+    running().lock().ok()?.get(profile_id).map(|r| r.port)
+}
+
 /// Stops the forwarder when its profile's browser has exited.
 pub fn stop(profile_id: &str) {
     if let Ok(mut m) = running().lock() {
-        if let Some(t) = m.remove(profile_id) {
-            t.abort();
+        if let Some(r) = m.remove(profile_id) {
+            r.task.abort();
         }
     }
 }
@@ -230,8 +287,51 @@ async fn handle(mut client: TcpStream, upstream: &Upstream) -> std::io::Result<(
     let mut parts = request_line.split_whitespace();
     let (method, target, version) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or("HTTP/1.1"));
     let is_connect = method.eq_ignore_ascii_case("CONNECT");
+    if matches!(upstream, Upstream::Direct) {
+        let (host, port, path) = if is_connect {
+            let (h, p) = split_host_port(target, 443);
+            (h, p, String::new())
+        } else {
+            let rest_of = target.strip_prefix("http://").unwrap_or(target);
+            let (hostport, path) = match rest_of.find('/') {
+                Some(i) => (&rest_of[..i], rest_of[i..].to_string()),
+                None => (rest_of, "/".to_string()),
+            };
+            let (h, p) = split_host_port(hostport, 80);
+            (h, p, path)
+        };
+        let Ok(mut up) = dial(&format!("{host}:{port}")).await else {
+            let _ = client.write_all(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n").await;
+            return Ok(());
+        };
+        if is_connect {
+            client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n").await?;
+            up.write_all(&rest).await?;
+        } else {
+            let mut out = format!("{method} {path} {version}\r\n");
+            let mut has_host = false;
+            for l in lines.filter(|l| !l.is_empty()) {
+                let name = l.split(':').next().unwrap_or("").trim().to_ascii_lowercase();
+                if matches!(name.as_str(), "proxy-authorization" | "proxy-connection" | "connection") {
+                    continue;
+                }
+                has_host |= name == "host";
+                out.push_str(l);
+                out.push_str("\r\n");
+            }
+            if !has_host {
+                out.push_str(&format!("Host: {host}\r\n"));
+            }
+            out.push_str("Connection: close\r\n\r\n");
+            up.write_all(out.as_bytes()).await?;
+            up.write_all(&rest).await?;
+        }
+        let _ = tokio::io::copy_bidirectional(&mut client, &mut up).await;
+        return Ok(());
+    }
     let addr = match upstream {
         Upstream::Http { addr, .. } | Upstream::Socks5 { addr, .. } => addr,
+        Upstream::Direct => unreachable!(),
     };
 
     let mut up = match dial(addr).await {
@@ -243,10 +343,15 @@ async fn handle(mut client: TcpStream, upstream: &Upstream) -> std::io::Result<(
     };
 
     match upstream {
+        Upstream::Direct => unreachable!(),
         Upstream::Http { auth, .. } => {
+            let auth_line = auth
+                .as_deref()
+                .map(|a| format!("Proxy-Authorization: Basic {a}\r\n"))
+                .unwrap_or_default();
             if is_connect {
                 let req = format!(
-                    "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nProxy-Authorization: Basic {auth}\r\nProxy-Connection: keep-alive\r\n\r\n"
+                    "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n{auth_line}Proxy-Connection: keep-alive\r\n\r\n"
                 );
                 up.write_all(req.as_bytes()).await?;
                 let (resp_head, resp_rest) = read_head(&mut up).await?;
@@ -269,7 +374,7 @@ async fn handle(mut client: TcpStream, upstream: &Upstream) -> std::io::Result<(
                     out.push_str(l);
                     out.push_str("\r\n");
                 }
-                out.push_str(&format!("Proxy-Authorization: Basic {auth}\r\nConnection: close\r\n\r\n"));
+                out.push_str(&format!("{auth_line}Connection: close\r\n\r\n"));
                 up.write_all(out.as_bytes()).await?;
                 up.write_all(&rest).await?;
             }

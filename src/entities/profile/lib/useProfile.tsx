@@ -7,7 +7,9 @@ import { clip } from "../../../shared/lib/clipboard";
 import { readTextFile } from "../../../shared/lib/utils";
 import { storeBus } from "../../../shared/lib/storeBus";
 import { offerTeamFolder } from "../../../shared/model/folderSync";
+import { teamCall, useTeam } from "../../../shared/model/teamRole";
 import { t } from "../../../shared/i18n";
+import { useExtensions } from "../../extension";
 import { proxyList, type ProxyEntry } from "../../proxy";
 import { fingerprintList, fingerprintGet, type FingerprintEntry } from "../../fingerprint";
 import type { ProfileMeta, ProfileForm } from "../model/types";
@@ -16,7 +18,7 @@ import {
   profileSetPin, profileSetFolder, profileBindProxy,
   profileExportFolder, profileImportFolder, syncActivity, syncKick,
   profileCreateFromTemplate, processList, processKill, launch, syncLaunch,
-  folderDelete, cookiesExportToFile, cookiesImportText, cookiesExportMany,
+  folderRename, folderDelete, cookiesExportToFile, cookiesImportText, cookiesExportMany,
 } from "../model/api";
 import { defaultForm, fromStored, toStored } from "../model/form";
 
@@ -194,6 +196,9 @@ export type ProfileStore = {
   sort: ProfileSort;
   /// Row the last plain click landed on; a shift-click selects the run from it.
   anchorId: string | null;
+  /// True while `importProfilesFromFolder` is running; drives the progress overlay
+  /// and blocks accidental double-imports.
+  importingBundle: boolean;
 
   init: () => Promise<void>;
   reload: () => Promise<void>;
@@ -211,6 +216,7 @@ export type ProfileStore = {
   clearFilters: () => void;
 
   rememberFolder: (f: string) => void;
+  rememberFolderSilent: (f: string) => void;
   forgetFolder: (f: string) => void;
 
   selectProfiles: (isChecked: boolean, profiles: ProfileMeta[]) => void;
@@ -232,6 +238,7 @@ export type ProfileStore = {
   importCookies: (p: ProfileMeta) => Promise<void>;
 
   setProfileFolder: (id: string, f: string) => Promise<void>;
+  renameFolder: (oldName: string, newName: string) => Promise<boolean>;
   deleteFolder: (f: string) => Promise<void>;
   createFromTemplate: (tplId: string) => Promise<void>;
 
@@ -289,6 +296,7 @@ export const useProfile = create<ProfileStore>((set, get) => ({
   filters: emptyFilters(),
   sort: loadSort(),
   anchorId: null,
+  importingBundle: false,
 
   init: async () => {
     if (get().status === "loading" || get().status === "ready") return;
@@ -392,6 +400,13 @@ export const useProfile = create<ProfileStore>((set, get) => ({
     localStorage.setItem(FOLDERS_KEY, JSON.stringify(next));
     set({ folderRegistry: next });
   },
+  rememberFolderSilent: (f) => {
+    const next = get().folderRegistry.includes(f)
+      ? get().folderRegistry
+      : [...get().folderRegistry, f];
+    localStorage.setItem(FOLDERS_KEY, JSON.stringify(next));
+    set({ folderRegistry: next });
+  },
   forgetFolder: (f) => {
     const next = get().folderRegistry.filter((x) => x !== f);
     localStorage.setItem(FOLDERS_KEY, JSON.stringify(next));
@@ -440,7 +455,17 @@ export const useProfile = create<ProfileStore>((set, get) => ({
   },
   newProfile: () => {
     const { folder } = get();
-    set({ draft: { ...defaultForm(), folder: folder && folder !== "all" ? folder : "" }, expanded: "__new__" });
+    const extState = useExtensions.getState();
+    if (extState.status === "idle") void extState.init();
+    const defaultExts = extState.items.filter((e) => e.all_profiles).map((e) => e.id);
+    set({
+      draft: {
+        ...defaultForm(),
+        folder: folder && folder !== "all" ? folder : "",
+        extensions: defaultExts,
+      },
+      expanded: "__new__",
+    });
   },
   cancelEdit: () => set({ expanded: null, draft: null }),
 
@@ -610,6 +635,42 @@ export const useProfile = create<ProfileStore>((set, get) => ({
       get().reload();
       storeBus.emit("profiles");
     } catch (e) { toast.err(String(e)); }
+  },
+
+  renameFolder: async (oldName, newName) => {
+    const next = newName.trim();
+    if (!next || next === oldName) return false;
+    const { configured, folderNames } = useTeam.getState();
+    const onTeamServer = configured === true && !!folderNames?.includes(oldName);
+    if (onTeamServer) {
+      try {
+        await teamCall("POST", `/admin/folders/${encodeURIComponent(oldName)}/rename`, { name: next });
+      } catch (e) {
+        const msg = String(e);
+        toast.err(
+          /409|exists/i.test(msg)
+            ? t("folderModal.duplicateError", { name: next })
+            : /404|405/.test(msg)
+              ? t("useProfile.folderRenameServerOld")
+              : msg,
+        );
+        return false;
+      }
+    }
+    try {
+      await folderRename(oldName, next);
+      get().forgetFolder(oldName);
+      get().rememberFolderSilent(next);
+      if (get().folder === oldName) set({ folder: next });
+      await get().reload();
+      storeBus.emit("profiles");
+      if (onTeamServer) void useTeam.getState().refresh();
+      toast.ok(t("useProfile.folderRenamed", { old: oldName, next }));
+      return true;
+    } catch (e) {
+      toast.err(String(e));
+      return false;
+    }
   },
 
   deleteFolder: async (f) => {
@@ -854,12 +915,21 @@ export const useProfile = create<ProfileStore>((set, get) => ({
 
   // Picked folder's subfolders → fresh profiles (each subfolder = one profile).
   importProfilesFromFolder: async () => {
+    if (get().importingBundle) return;
     try {
       const src = await open({ directory: true, title: t("useProfile.importPickFolderTitle") });
       if (!src || Array.isArray(src)) return;
-      const r = await profileImportFolder(src);
-      get().reload();
-      reportBundle("import", r.imported, r.imported + r.failed.length, r.failed, r.warnings);
+      set({ importingBundle: true });
+      try {
+        const r = await profileImportFolder(src);
+        await get().reload();
+        storeBus.emit("profiles");
+        if (r.imported > 0) void syncKick().catch(() => {});
+        const skipped = r.skipped ?? 0;
+        reportBundle("import", r.imported, r.imported + r.failed.length, r.failed, r.warnings, skipped);
+      } finally {
+        set({ importingBundle: false });
+      }
     } catch (e) { toast.err(t("useProfile.importFailed", { e: String(e) })); }
   },
 }));
@@ -867,15 +937,33 @@ export const useProfile = create<ProfileStore>((set, get) => ({
 /// One message for a bulk export/import that says what actually happened: all
 /// done, or X of Y with the names and reasons of the rest — never a bare
 /// "failed" that leaves 72 selected and 2 done unexplained.
-function reportBundle(kind: "export" | "import", done: number, total: number, failed: { name: string; error: string }[], warnings: string[]) {
+function reportBundle(
+  kind: "export" | "import",
+  done: number,
+  total: number,
+  failed: { name: string; error: string }[],
+  warnings: string[],
+  skipped = 0,
+) {
   if (failed.length === 0) {
-    if (kind === "import" && done === 1) toast.ok(t("useProfile.profileImportedOne"));
-    else if (kind === "export") toast.ok(t("useProfile.profilesExportedMany", { n: done }));
-    else toast.ok(t("useProfile.profilesImportedMany", { n: done }));
+    if (kind === "export") {
+      toast.ok(t("useProfile.profilesExportedMany", { n: done }));
+    } else if (done === 0 && skipped > 0) {
+      toast.info(t("useProfile.profilesAllDuplicates", { skipped }));
+    } else if (done === 0) {
+      toast.info(t("useProfile.profilesImportEmpty"));
+    } else if (skipped > 0) {
+      toast.ok(t("useProfile.profilesImportedWithSkipped", { n: done, skipped }));
+    } else if (done === 1) {
+      toast.ok(t("useProfile.profileImportedOne"));
+    } else {
+      toast.ok(t("useProfile.profilesImportedMany", { n: done }));
+    }
   } else {
     const detail = failed.slice(0, 5).map((f) => `${f.name}: ${f.error}`).join("; ") + (failed.length > 5 ? ` … (+${failed.length - 5})` : "");
-    const vars = { ok: done, total, bad: failed.length, detail };
+    const vars = { ok: done, total, bad: failed.length, skipped, detail };
     if (kind === "export") toast.err(t("useProfile.exportPartial", vars));
+    else if (skipped > 0) toast.err(t("useProfile.importPartialWithSkipped", vars));
     else toast.err(t("useProfile.importPartial", vars));
   }
   if (warnings.length > 0) {

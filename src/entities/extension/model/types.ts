@@ -9,4 +9,6 @@ export type ExtensionEntry = {
   size_bytes: number;
   /** "@<unix_secs>". */
   added_at: string;
+  /** Automatically attached to every existing and newly created profile. */
+  all_profiles?: boolean;
 };

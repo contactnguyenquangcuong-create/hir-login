@@ -40,7 +40,15 @@ export const syncLogTail = (lines = 120) => invoke<string>("sync_log_tail", { li
 export const syncPushAll = () => invoke<{ sent: number; skipped: number }>("sync_push_all");
 /** Leaves the team: sync off and every profile that came from the team deleted from this machine. */
 export const syncWorking = () => invoke<number>("sync_working");
-export const teamLeave = (keepAll = false) => invoke<number>("team_leave", { keepAll });
+export const teamLeave = (
+  keepAll = false,
+  opts?: { keepProfiles?: boolean; keepProxies?: boolean },
+) =>
+  invoke<number>("team_leave", {
+    keepAll,
+    keepProfiles: opts?.keepProfiles ?? keepAll,
+    keepProxies: opts?.keepProxies ?? keepAll,
+  });
 export const tailscaleStatus = () => invoke<{ installed: boolean; connected: boolean; ip: string | null }>("tailscale_status");
 export const autostartGet = () => invoke<boolean>("autostart_get");
 export const autostartSet = (enabled: boolean) => invoke<void>("autostart_set", { enabled });

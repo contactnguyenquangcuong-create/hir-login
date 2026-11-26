@@ -1299,6 +1299,142 @@ async fn admin_folder_access(
     Json(json!({"ok": true})).into_response()
 }
 
+/// Rewrite `profile.json` inside a bundle zip on disk so `_meta.folder` becomes `new_folder`,
+/// returning the updated `(profile, proxy)` metadata and new bundle size. Atomic via temp file.
+fn rewrite_bundle_folder(path: &std::path::Path, new_folder: &str) -> Result<(Value, Value, u64)> {
+    use std::io::{Read, Write};
+    let tmp = path.with_extension(format!("zip.tmp-{}", uuid::Uuid::new_v4().simple()));
+    let mut new_profile = Value::Null;
+    let mut proxy = Value::Null;
+    {
+        let src_file = std::fs::File::open(path)?;
+        let mut zin = zip::ZipArchive::new(src_file)?;
+        let out_file = std::fs::File::create(&tmp)?;
+        let mut zout = zip::ZipWriter::new(out_file);
+        for i in 0..zin.len() {
+            let mut f = zin.by_index(i)?;
+            let name = f.name().to_string();
+            let opts = zip::write::SimpleFileOptions::default().compression_method(f.compression());
+            if f.is_dir() {
+                zout.add_directory(name, opts)?;
+                continue;
+            }
+            let mut buf = Vec::with_capacity(f.size() as usize);
+            f.read_to_end(&mut buf)?;
+            if name == "profile.json" {
+                if let Ok(mut v) = serde_json::from_slice::<Value>(&buf) {
+                    if let Some(meta) = v.get_mut("_meta").and_then(|m| m.as_object_mut()) {
+                        meta.insert("folder".into(), Value::String(new_folder.to_string()));
+                    } else if let Some(obj) = v.as_object_mut() {
+                        obj.insert("_meta".into(), json!({ "folder": new_folder }));
+                    }
+                    new_profile = v.clone();
+                    buf = serde_json::to_vec_pretty(&v)?;
+                }
+            } else if name == "proxy.json" {
+                proxy = serde_json::from_slice::<Value>(&buf).unwrap_or(Value::Null);
+            }
+            zout.start_file(name, opts)?;
+            zout.write_all(&buf)?;
+        }
+        let finished = zout.finish()?;
+        finished.sync_all()?;
+    }
+    let len = std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
+    rename_into_place(&tmp, path)?;
+    Ok((new_profile, proxy, len))
+}
+
+/// Rename a folder (`{ "name": "NewName" }`): keeps owner and every member's sharing level,
+/// updates `meta.json` and each affected bundle so every machine picks up the new name.
+async fn admin_folder_rename(
+    headers: HeaderMap,
+    axum::extract::State(state): axum::extract::State<Arc<ServerState>>,
+    AxumPath(folder): AxumPath<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    let who = match staff_only(&headers, &state) { Ok(w) => w, Err(r) => return r };
+    let v: Value = serde_json::from_slice(&body).unwrap_or(json!({}));
+    let new_name = v.get("name").and_then(|x| x.as_str()).unwrap_or("").trim().to_string();
+    if new_name.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"ok":false,"error":"name required"}))).into_response();
+    }
+    if new_name == folder {
+        return Json(json!({"ok": true, "moved": 0})).into_response();
+    }
+    let moved_ids: Vec<String> = {
+        let _acl_g = acl_lock();
+        let _store_g = store_lock();
+        let mut acl = load_acl();
+        if acl.level(&who, &folder) != Level::Full {
+            return not_found();
+        }
+        if !acl.may_delete_folder(&who, &folder) {
+            audit(&who, "folder-rename", &format!("{folder} -> {new_name}"), false, "created by someone above");
+            return forbidden("folder-owner");
+        }
+        let mut meta = match load_meta_checked() {
+            Ok(m) => m,
+            Err(e) => return service_unavailable(&format!("the team's profile list cannot be read right now ({e})")),
+        };
+        let target_in_use = acl.owners.contains_key(&new_name)
+            || acl.folders.contains_key(&new_name)
+            || acl.trashed.contains_key(&new_name)
+            || meta.values().any(|m| {
+                m.get("folder").and_then(|f| f.as_str()) == Some(new_name.as_str())
+                    && !m.get("deleted").and_then(|d| d.as_bool()).unwrap_or(false)
+            });
+        if target_in_use {
+            return (StatusCode::CONFLICT, Json(json!({"ok":false,"error":"folder exists"}))).into_response();
+        }
+        if !acl.rename_folder(&folder, &new_name) {
+            return (StatusCode::CONFLICT, Json(json!({"ok":false,"error":"folder exists"}))).into_response();
+        }
+        if let Err(e) = save_acl(&acl) {
+            return err500(e);
+        }
+        let dir = match bundles_dir() { Ok(d) => d, Err(e) => return err500(e) };
+        let mut ids = Vec::new();
+        for (id, m) in meta.iter_mut() {
+            let deleted = m.get("deleted").and_then(|d| d.as_bool()).unwrap_or(false);
+            if deleted || m.get("folder").and_then(|f| f.as_str()) != Some(folder.as_str()) {
+                continue;
+            }
+            let path = dir.join(format!("{id}.zip"));
+            let prev_ms = m.get("verMs").and_then(|v| v.as_u64()).unwrap_or(0);
+            let (now_iso, ver_ms) = next_version(prev_ms);
+            if let Ok((prof, proxy, size)) = rewrite_bundle_folder(&path, &new_name) {
+                if let Some(obj) = m.as_object_mut() {
+                    obj.insert("folder".into(), json!(new_name));
+                    obj.insert("updatedAt".into(), json!(now_iso));
+                    obj.insert("verMs".into(), json!(ver_ms));
+                    obj.insert("sizeBytes".into(), json!(size));
+                    if !prof.is_null() {
+                        obj.insert("sig".into(), json!(team_acl::protected_signature(&prof, &proxy)));
+                        obj.insert("sig_np".into(), json!(team_acl::protected_signature_without_proxy(&prof)));
+                    }
+                }
+            } else if let Some(obj) = m.as_object_mut() {
+                obj.insert("folder".into(), json!(new_name));
+                obj.insert("updatedAt".into(), json!(now_iso));
+                obj.insert("verMs".into(), json!(ver_ms));
+            }
+            ids.push(id.clone());
+        }
+        if !ids.is_empty() {
+            if let Err(e) = save_meta(&meta) {
+                return err500(e);
+            }
+        }
+        ids
+    };
+    for id in &moved_ids {
+        publish_event(id);
+    }
+    audit(&who, "folder-rename", &format!("{folder} -> {new_name}"), true, "");
+    Json(json!({"ok": true, "moved": moved_ids.len()})).into_response()
+}
+
 /// Delete an empty folder: it goes to the folder trash for 30 days, with its sharing.
 /// Only the admin or the manager who made it; one handed down from above cannot be deleted.
 async fn admin_folder_delete(
@@ -1504,6 +1640,7 @@ pub async fn start(port: u16, token: String) -> Result<u16> {
         .route("/admin/folders", get(admin_folders).put(admin_folder_create))
         .route("/admin/folders/trash", get(admin_folder_trash))
         .route("/admin/folders/:folder/delete", post(admin_folder_delete))
+        .route("/admin/folders/:folder/rename", post(admin_folder_rename))
         .route("/admin/folders/:folder/restore", post(admin_folder_restore))
         .route("/admin/folders/:folder/purge", post(admin_folder_purge))
         .route("/admin/folders/:folder/access", axum::routing::put(admin_folder_access))

@@ -7,7 +7,7 @@ import { toast } from "../../shared/model/toast";
 import { confirmModal } from "../../shared/model/confirm";
 import { useNav } from "../../shared/model/navigation";
 import { startTeamRole, teamCall, useTeam, canShare } from "../../shared/model/teamRole";
-import { useProfile, useFolders, usePartnerShare, PARTNERS, folderDelete } from "../../entities/profile";
+import { useProfile, useFolders, usePartnerShare, PARTNERS, folderDelete, folderRename } from "../../entities/profile";
 import { FolderModal } from "../../features/manage-profiles/ui/FolderModal";
 import { ShareFolderModal } from "../../features/manage-profiles/ui/ShareFolderModal";
 import { offerTeamFolder, makeTeamFolder, stopTeamFolder, askFolderSync, waitTeamFolderEmpty } from "../../shared/model/folderSync";
@@ -159,6 +159,7 @@ export function FoldersPage() {
   const setSection = useNav((s) => s.setSection);
   const profiles = useProfile((s) => s.profiles);
   const rememberFolder = useProfile((s) => s.rememberFolder);
+  const rememberFolderSilent = useProfile((s) => s.rememberFolderSilent);
   const forgetFolder = useProfile((s) => s.forgetFolder);
   const bulkMoveToFolder = useProfile((s) => s.bulkMoveToFolder);
   const setFolderTab = useProfile((s) => s.setFolder);
@@ -313,7 +314,43 @@ export function FoldersPage() {
   };
   /** A folder whose profiles are being moved out (to delete it, or just to empty it): asks where to. */
   const [mover, setMover] = useState<{ from: string; team: boolean; deleteAfter: boolean } | null>(null);
+  /** Folder currently being renamed. */
+  const [renaming, setRenaming] = useState<{ name: string; team: boolean } | null>(null);
   const busy = (name: string, on: boolean) => setSwitching((s) => { const n = new Set(s); if (on) n.add(name); else n.delete(name); return n; });
+
+  const runRename = async (newName: string) => {
+    const r = renaming;
+    setRenaming(null);
+    const next = newName.trim();
+    if (!r || !next || next === r.name) return;
+    if (rows.some((x) => x.name === next)) { toast.err("Thư mục này đã tồn tại."); return; }
+    busy(r.name, true);
+    try {
+      if (r.team) {
+        try {
+          await teamCall("POST", `/admin/folders/${encodeURIComponent(r.name)}/rename`, { name: next });
+        } catch (e) {
+          const msg = String(e);
+          toast.err(
+            /409|exists/i.test(msg)
+              ? "Tên thư mục này đã tồn tại."
+              : /404|405/.test(msg)
+                ? "Máy chủ chưa hỗ trợ đổi tên thư mục. Hãy cập nhật máy chủ lên bản mới nhất."
+                : msg,
+          );
+          return;
+        }
+      }
+      await folderRename(r.name, next);
+      forgetFolder(r.name);
+      rememberFolderSilent(next);
+      if (currentTab === r.name) setFolderTab(next);
+      await useProfile.getState().reload();
+      if (r.team) void useTeam.getState().refresh();
+      toast.ok(`Đã đổi tên "${r.name}" thành "${next}"`);
+    } catch (e) { toast.err(String(e)); }
+    finally { busy(r.name, false); await load(); }
+  };
 
   /** The folder itself, once nothing is in it: off the team's server (to its trash) or this machine's list. */
   const dropFolder = async (name: string, team: boolean): Promise<boolean> => {
@@ -476,6 +513,7 @@ export function FoldersPage() {
               const menu = [
                 { label: "Xem profile trong thư mục", onClick: open },
                 { label: "Chia sẻ…", onClick: () => setSharing(f.name) },
+                ...(deletable && !switching.has(f.name) ? [{ label: "Đổi tên thư mục…", onClick: () => setRenaming({ name: f.name, team: !f.local }) }] : []),
                 ...(configured === true ? [{ label: f.local ? "Đồng bộ cho cả nhóm" : "Ngừng đồng bộ (chỉ trên máy này)", onClick: () => changeSync(f) }] : []),
                 ...(hasProfiles && !switching.has(f.name) ? [{ label: "Chuyển profile sang thư mục khác…", onClick: () => setMover({ from: f.name, team: !f.local, deleteAfter: false }) }] : []),
                 ...(deletable && !switching.has(f.name) ? [{ sep: true, label: "", onClick: () => {} }, { label: "Xoá thư mục", onClick: () => { void removeFolder(f); }, danger: true }] : []),
@@ -574,6 +612,16 @@ export function FoldersPage() {
           onPick={(dest) => { void runMove(dest); }}
           onCreate={(name) => { const d = name.trim(); if (d) void runMove(d); }}
           onClose={() => setMover(null)}
+        />
+      )}
+      {renaming && (
+        <FolderModal
+          mode="rename"
+          initialName={renaming.name}
+          existing={rows.map((x) => x.name)}
+          onPick={() => {}}
+          onCreate={(next) => { void runRename(next); }}
+          onClose={() => setRenaming(null)}
         />
       )}
       {sharing && <ShareFolderModal folder={sharing} onClose={() => { setSharing(null); load(); }} />}

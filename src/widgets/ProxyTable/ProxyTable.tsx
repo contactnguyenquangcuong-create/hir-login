@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Checkbox, Pagination } from "@proxyshard/shardx-ui-kit";
 import { RouteIcon } from "../../shared/icons";
+import { SelectAllStrip } from "../../shared/ui";
 import { useContextMenu } from "../../shared/hooks/useContextMenu";
 import { useT } from "../../shared/i18n";
 import { useProxy, useFilteredProxies, useProfileCountByProxy } from "../../entities/proxy";
@@ -34,6 +35,10 @@ export function ProxyTable() {
 
   const allPageSelected = pagedProxies.length > 0 && pagedProxies.every((p) => proxySel.has(p.id));
   const anyPageSelected = pagedProxies.some((p) => proxySel.has(p.id));
+  const selectedInList = useMemo(
+    () => filteredProxies.reduce((n, p) => n + (proxySel.has(p.id) ? 1 : 0), 0),
+    [filteredProxies, proxySel],
+  );
 
   return (
     <>
@@ -54,6 +59,17 @@ export function ProxyTable() {
           <div>{t("proxyTable.colTestResult")}</div>
           <div></div>
         </div>
+        {proxyPageCount > 1 && (
+          <SelectAllStrip
+            pageCount={pagedProxies.length}
+            total={filteredProxies.length}
+            selected={selectedInList}
+            allPageSelected={allPageSelected}
+            onSelectPage={() => selectProxy(true, pagedProxies)}
+            onSelectAll={() => selectProxy(true, filteredProxies)}
+            onClearAll={() => selectProxy(false, filteredProxies)}
+          />
+        )}
         {pagedProxies.map((p) => (
           <ProxyRow
             key={p.id}

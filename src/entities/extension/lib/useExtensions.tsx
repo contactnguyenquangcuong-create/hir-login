@@ -4,7 +4,7 @@ import { toast } from "../../../shared/lib/toast";
 import { confirmModal } from "../../../shared/lib/confirm";
 import { storeBus } from "../../../shared/lib/storeBus";
 import { t } from "../../../shared/i18n";
-import { extensionApplyAll, extensionDelete, extensionImport, extensionImportUrl, extensionList } from "../model/api";
+import { extensionApplyAll, extensionDelete, extensionImport, extensionImportUrl, extensionList, extensionSetAllProfiles } from "../model/api";
 import type { ExtensionEntry } from "../model/types";
 
 export type ExtensionStore = {
@@ -24,6 +24,7 @@ export type ExtensionStore = {
   setEverywhere: (on: boolean) => void;
   importUrl: (url: string) => Promise<void>;
   applyAll: (e: ExtensionEntry) => Promise<void>;
+  disableAllProfiles: (e: ExtensionEntry) => Promise<void>;
   importFiles: () => Promise<void>;
   importFolder: () => Promise<void>;
   remove: (e: ExtensionEntry) => Promise<void>;
@@ -81,10 +82,19 @@ export const useExtensions = create<ExtensionStore>((set, get) => ({
   applyAll: async (e) => {
     try {
       const n = await extensionApplyAll(e.id);
+      await get().reload();
       storeBus.emit("profiles");
       toast.ok(n > 0
         ? t("useExtensions.appliedAll", { n, name: e.name })
         : t("useExtensions.appliedAllNone", { name: e.name }));
+    } catch (err) { toast.err(String(err)); }
+  },
+
+  disableAllProfiles: async (e) => {
+    try {
+      await extensionSetAllProfiles(e.id, false);
+      await get().reload();
+      toast.ok(t("useExtensions.disabledAllProfiles", { name: e.name }));
     } catch (err) { toast.err(String(err)); }
   },
 

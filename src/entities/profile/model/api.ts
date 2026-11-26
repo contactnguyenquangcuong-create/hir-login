@@ -22,7 +22,7 @@ export const profileImport = (payloads: any[]) => invoke<number>("profile_import
 /// Folder-per-profile bundle: pairs with profileImportFolder for machine-to-machine moves.
 export type BundleFailure = { name: string; error: string };
 export type ExportReport = { exported: number; failed: BundleFailure[]; warnings: string[] };
-export type ImportReport = { imported: number; failed: BundleFailure[]; warnings: string[] };
+export type ImportReport = { imported: number; skipped?: number; failed: BundleFailure[]; warnings: string[] };
 export const profileExportFolder = (ids: string[], dest: string) => invoke<ExportReport>("profile_export_folder", { ids, dest });
 export const profileImportFolder = (src: string) => invoke<ImportReport>("profile_import_folder", { src });
 export const profileCreateFromTemplate = (templateId: string) => invoke<ProfileMeta>("profile_create_from_template", { templateId });
@@ -59,6 +59,7 @@ export const helperShow = (profile: string) => invoke<void>("helper_show", { pro
 export const helperClose = () => invoke<void>("helper_close");
 /** The operator closed the panel — a refusal about this page only. */
 export const helperDismiss = (profile: string) => invoke<void>("helper_dismiss", { profile });
+export const folderRename = (old: string, next: string) => invoke<number>("folder_rename", { old, new: next });
 export const folderDelete = (folder: string, deleteProfiles: boolean) => invoke<number>("folder_delete", { folder, deleteProfiles });
 /** The partner tools that may borrow profiles: HirS (Shopee video tool) and Hir-F (Flow tool). */
 export type PartnerKey = "hirs" | "hirf";

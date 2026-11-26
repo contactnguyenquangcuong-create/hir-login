@@ -154,7 +154,7 @@ pub fn upsert(mut entry: ProxyEntry) -> Result<ProxyEntry> {
     Ok(entry)
 }
 
-/// Upsert that reuses an entry with the same kind/host/port/username.
+/// Upsert that reuses an entry with the same kind/host/port/username/password.
 pub fn upsert_dedup(mut entry: ProxyEntry) -> Result<ProxyEntry> {
     let _g = store_guard();
     let mut s = load()?;
@@ -163,6 +163,7 @@ pub fn upsert_dedup(mut entry: ProxyEntry) -> Result<ProxyEntry> {
             && p.host == entry.host
             && p.port == entry.port
             && p.username == entry.username
+            && p.password == entry.password
     }) {
         return Ok(existing.clone());
     }
