@@ -52,6 +52,11 @@ jobs:
       # Built here instead of via beforeBuildCommand so scripts/obfuscate.mjs can run between
       # `vite build` and packaging (same order as scripts/phat-hanh/windows.mjs on Windows).
       - name: Build frontend (obfuscated)
+        env:
+          # The BLA hardening layer of scripts/obfuscate.mjs (bla-agents) runs out of memory on this
+          # bundle on a GitHub runner, so it is left out here; javascript-obfuscator still runs.
+          SKIP_BLA: "1"
+          NODE_OPTIONS: --max-old-space-size=5120
         run: |
           npm run build:ui-kit
           npx tsc --noEmit -p tsconfig.json
