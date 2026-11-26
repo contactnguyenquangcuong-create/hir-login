@@ -55,6 +55,10 @@ jobs:
 
       - name: Build frontend (obfuscated)
         shell: bash
+        env:
+          # scripts/obfuscate.mjs (javascript-obfuscator, then bla-agents) runs out of the default
+          # Node heap on this bundle.
+          NODE_OPTIONS: --max-old-space-size=5120
         run: |
           npm run build:ui-kit
           npx tsc --noEmit -p tsconfig.json
