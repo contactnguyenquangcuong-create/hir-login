@@ -554,6 +554,96 @@ pub fn fit_window_to_real_display(
     fit_window_to(payload, real_w, real_h);
 }
 
+/// Computes the Chromium `--force-device-scale-factor` needed so a physical display
+/// (`phys_w x phys_h`, work area `work_w x work_h`, OS DPI scale `os_scale`) fits strictly inside
+/// a profile's declared logical screen (`fp_w x fp_h`, avail `fp_avail_w x fp_avail_h`).
+///
+/// ShardX's Chromium engine caps a browser window's maximum DIP size to the profile's declared
+/// `screen.width x screen.height` (so `outerWidth` never exceeds `screen.width`). On a high-res
+/// display whose logical size is larger than `fp_w x fp_h` (e.g. a 3840x2160 monitor at 150%
+/// Windows scaling = 2560x1440 logical, or 2560x1440 at 100%, with a 1920x1080 profile), even a
+/// maximized window only covers ~75% of the screen. Raising Chromium's UI scale factor to
+/// `max(phys_w / fp_w, phys_h / fp_h, work_w / avail_w, work_h / avail_h)` makes the maximized
+/// window fill 100% of the physical monitor while guaranteeing:
+///   `outerWidth <= screen.availWidth <= screen.width`
+///   `outerHeight <= screen.availHeight <= screen.height`
+/// and leaving `screen.*`, `devicePixelRatio`, and CSS `resolution` media queries untouched.
+pub(crate) fn scale_for_screen(
+    phys_w: u32,
+    phys_h: u32,
+    work_w: u32,
+    work_h: u32,
+    os_scale: f64,
+    fp_w: i64,
+    fp_h: i64,
+    fp_avail_w: i64,
+    fp_avail_h: i64,
+) -> Option<f64> {
+    if phys_w == 0 || phys_h == 0 || os_scale <= 0.0 || fp_w <= 0 || fp_h <= 0 {
+        return None;
+    }
+    let avail_w = if fp_avail_w > 0 { fp_avail_w.min(fp_w) } else { fp_w };
+    let avail_h = if fp_avail_h > 0 { fp_avail_h.min(fp_h) } else { fp_h };
+    let eff_work_w = if work_w > 0 { work_w } else { phys_w };
+    let eff_work_h = if work_h > 0 { work_h } else { phys_h };
+
+    let logical_w = phys_w as f64 / os_scale;
+    let logical_h = phys_h as f64 / os_scale;
+    let logical_work_w = eff_work_w as f64 / os_scale;
+    let logical_work_h = eff_work_h as f64 / os_scale;
+    if logical_w <= fp_w as f64 + 0.5
+        && logical_h <= fp_h as f64 + 0.5
+        && logical_work_w <= avail_w as f64 + 0.5
+        && logical_work_h <= avail_h as f64 + 0.5
+    {
+        return None;
+    }
+
+    let needed = (phys_w as f64 / fp_w as f64)
+        .max(phys_h as f64 / fp_h as f64)
+        .max(eff_work_w as f64 / avail_w as f64)
+        .max(eff_work_h as f64 / avail_h as f64);
+    if needed <= os_scale + 0.005 {
+        return None;
+    }
+    let rounded_up = (needed * 10_000.0).ceil() / 10_000.0;
+    Some(rounded_up.clamp(os_scale, 4.0))
+}
+
+/// Returns the `--force-device-scale-factor` value needed for the launcher's current monitor
+/// when its logical size exceeds the profile's declared `screen.*` / `avail_*`.
+pub fn display_scale_for_profile(
+    window: &tauri::WebviewWindow,
+    payload: &serde_json::Map<String, Value>,
+) -> Option<f64> {
+    if profile::claims_mobile(payload) {
+        return None;
+    }
+    let (fp_w, fp_h) = profile::claimed_screen(payload)?;
+    let scr = payload.get("screen").and_then(|v| v.as_object());
+    let fp_avail_w = scr.and_then(|s| s.get("avail_width")).and_then(|v| v.as_i64()).unwrap_or(fp_w);
+    let fp_avail_h = scr.and_then(|s| s.get("avail_height")).and_then(|v| v.as_i64()).unwrap_or(fp_h);
+    let monitor = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten())?;
+    let scale = monitor.scale_factor();
+    let phys = monitor.size();
+    let work = monitor.work_area().size;
+    scale_for_screen(
+        phys.width,
+        phys.height,
+        work.width,
+        work.height,
+        scale,
+        fp_w,
+        fp_h,
+        fp_avail_w,
+        fp_avail_h,
+    )
+}
+
 /// Makes the profile's window fill the available area of a display of `real_w` x `real_h`,
 /// leaving the screen block alone: the resolution a profile declares is what pages are told, and
 /// the window opens as big as the monitor of whatever machine it is opened on.
@@ -5727,5 +5817,25 @@ mod bulk_fixed_fields_tests {
         assert_eq!(cfg["screen"]["height"].as_u64(), Some(1080));
         assert_eq!(cfg["screen"]["avail_width"].as_u64(), Some(1920), "template had no horizontal inset");
         assert_eq!(cfg["screen"]["avail_height"].as_u64(), Some(1055), "1080 - the template's 25px inset");
+    }
+
+    #[test]
+    fn scale_for_screen_matches_high_res_and_skips_fitting_monitors() {
+        // 4K at 150% (work 3840x2088) with 1920x1080 (avail 1920x1040) -> 2088/1040 = 2.0077
+        let dsf = scale_for_screen(3840, 2160, 3840, 2088, 1.5, 1920, 1080, 1920, 1040).unwrap();
+        assert!((dsf - 2.0077).abs() < 1e-4, "got {dsf}");
+        assert!((2088.0 / dsf) <= 1040.0, "outerHeight must stay <= availHeight");
+        // 2K at 100% (work 2560x1400) with 1920x1080 (avail 1920x1040) -> max(2560/1920, 1400/1040) = 1.3462
+        let dsf2k = scale_for_screen(2560, 1440, 2560, 1400, 1.0, 1920, 1080, 1920, 1040).unwrap();
+        assert!((1400.0 / dsf2k) <= 1040.0 && (2560.0 / dsf2k) <= 1920.0, "got {dsf2k}");
+        // 1080p at 100% or 125% with 1920x1080 (avail 1920x1040) -> no override needed
+        assert_eq!(scale_for_screen(1920, 1080, 1920, 1040, 1.0, 1920, 1080, 1920, 1040), None);
+        assert_eq!(scale_for_screen(1920, 1080, 1920, 1030, 1.25, 1920, 1080, 1920, 1040), None);
+        // Older 1366x768 profile on 1080p -> keeps work area <= avail_height (728)
+        let dsf_old = scale_for_screen(1920, 1080, 1920, 1040, 1.0, 1366, 768, 1366, 728).unwrap();
+        assert!((1040.0 / dsf_old) <= 728.0 && (1920.0 / dsf_old) <= 1366.0, "got {dsf_old}");
+        // Ultrawide 3440x1440 at 100% with 1920x1080 -> 3440/1920
+        let dsf_uw = scale_for_screen(3440, 1440, 3440, 1400, 1.0, 1920, 1080, 1920, 1040).unwrap();
+        assert!((3440.0 / dsf_uw) <= 1920.0 && (1400.0 / dsf_uw) <= 1040.0, "got {dsf_uw}");
     }
 }

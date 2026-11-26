@@ -320,14 +320,39 @@ async fn launch_inner(
     // A profile made on another machine carries that machine's screen; on Win/Linux
     // the window has to fit this monitor. "real" mode skips — the core drops it anyway.
     // Mobile profiles keep their phone-sized window.
+    let s = settings::load()?;
+    let extra_args = settings::parse_extra_args(&s.extra_args);
     let is_mobile = profile::claims_mobile(&stored.config);
-    if !is_mobile && settings::load()?.screen_resolution_mode.as_deref() != Some("real") {
-        if let Some(w) = crate::main_window() {
+    let custom_window = chromium_args.iter().chain(extra_args.iter()).any(|a| {
+        a.starts_with("--window-size")
+            || a.starts_with("--start-fullscreen")
+            || a == "--start-maximized"
+    });
+    let auto_maximize =
+        !headless && !is_mobile && sync_group.is_none() && !enable_cdp && !custom_window;
+    #[allow(unused_mut)]
+    let mut auto_dsf: Option<f64> = None;
+    if !is_mobile && s.screen_resolution_mode.as_deref() != Some("real") {
+        if auto_maximize {
+            // Removing `window` lets `--start-maximized` actually maximize the OS window on launch
+            // (ShardX otherwise forces `window` as a non-maximized normal rect). On monitors whose
+            // logical size exceeds the profile's declared `screen.*` (e.g. 4K@150% or 2K@100% with
+            // a 1920x1080 profile), raising Chromium's UI scale factor lets the maximized window
+            // fill 100% of the physical display while keeping `screen.*`, `devicePixelRatio`, and
+            // CSS `resolution` media queries unchanged.
+            raw.remove("window");
+            #[cfg(not(target_os = "macos"))]
+            if let Some(w) = crate::main_window() {
+                auto_dsf = crate::display_scale_for_profile(&w, &raw);
+            }
+        } else if let Some(w) = crate::main_window() {
             // Only the window is fitted to this monitor. The screen the profile declares is left as
             // it is: replacing it with this monitor's size made the same profile report a
             // different screen from every machine it was opened on.
             crate::fit_window_to_real_display(&w, &mut raw);
         }
+    } else if auto_maximize {
+        raw.remove("window");
     }
     let json = serde_json::to_string(&raw).context("serialize profile")?;
 
@@ -552,7 +577,6 @@ async fn launch_inner(
     }
 
     // Screen resolution mode: presence-only switch to use host monitor.
-    let s = settings::load()?;
     if s.screen_resolution_mode.as_deref() == Some("real") {
         cmd.arg("--shardx-real-screen");
     }
@@ -625,20 +649,21 @@ async fn launch_inner(
         cmd.arg(a);
     }
 
-    let extra_args = settings::parse_extra_args(&s.extra_args);
     let operator_start_url = extra_args.iter().any(|a| !a.starts_with('-'));
 
     // Interactive desktop launches start maximized so the browser fills whichever monitor it opens
-    // on (including multi-monitor and scaled displays), while keeping the profile's declared
+    // on (including 2K/4K/ultrawide and scaled displays), while keeping the profile's declared
     // `screen.*` fingerprint parameters unchanged.
-    if !headless && !is_mobile && sync_group.is_none() && !enable_cdp {
-        let custom_window = chromium_args.iter().chain(extra_args.iter()).any(|a| {
-            a.starts_with("--window-size")
-                || a.starts_with("--start-fullscreen")
-                || a == "--start-maximized"
-        });
-        if !custom_window {
-            cmd.arg("--start-maximized");
+    if auto_maximize {
+        cmd.arg("--start-maximized");
+        if let Some(dsf) = auto_dsf {
+            let has_dsf = chromium_args
+                .iter()
+                .chain(extra_args.iter())
+                .any(|a| a.starts_with("--force-device-scale-factor"));
+            if !has_dsf {
+                cmd.arg(format!("--force-device-scale-factor={dsf:.4}"));
+            }
         }
     }
 

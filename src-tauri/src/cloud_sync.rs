@@ -645,6 +645,7 @@ pub async fn wipe_team_data_opts(keep_profiles: bool, keep_proxies: bool, kicked
         for id in &ids {
             if crate::process::Tracker::shared().is_running(id) {
                 let _ = crate::process::Tracker::shared().kill(id).await;
+                #[cfg(feature = "automation")]
                 crate::cdp::detach(id);
             }
             if let Ok(raw) = crate::profile::load_raw(id) {
